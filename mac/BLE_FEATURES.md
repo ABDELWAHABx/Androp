@@ -45,3 +45,5 @@ The Mac remembers the authenticated peripheral against the pairing-token fingerp
 Added five Android policy tests and twelve Swift regression assertions covering command boundaries, cursor/bulk rejection, clipboard retry budgets, UTF-8 limits, media parameters, compact status and charging. The integrated Android build and 141-test suite passed; the Mac policy suite and native app build passed on CI. Physical Samsung/Mac BLE latency and reliability still require device testing.
 
 BLE authentication is the existing paired-device token protocol. This feature work does not establish a new claim of application-level encryption for BLE payloads.
+
+Preview 4 verification: 19 production BLE-manager regression cases, 10 file-route checks and the expanded hotspot suite passed on macOS 15 and 26. Android passed 149 JVM tests, debug/release assembly and lint without errors. The actual Mac app passed radio-free network-loss/Bluetooth handoff and Pause/Resume checks; physical radio behavior remains unverified.
