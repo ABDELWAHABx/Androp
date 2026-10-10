@@ -37,12 +37,7 @@ crash report; that report requires the macOS stack and native build validation.
 
 ## Regression checks
 
-Thirteen JVM cases were added for shutdown continuation after platform failure,
-safe pairing input parsing (including legacy QR compatibility), and bounded
-HTTP headers/deadlines. The first focused Gradle attempt was intentionally
-stopped before compilation while another agent was editing transfer sources.
-The integrated build/test result should be recorded by the release owner once
-all Android sources have settled.
+All 72 JVM tests passed in the integrated build, including thirteen added cases for shutdown continuation, pairing input and bounded wake-up headers, and three added transfer shutdown cases. Debug and optimized release APKs assembled; lint completed with zero errors, 250 warnings and 10 hints.
 
 Physical permission revocation, rapid pause/resume, Samsung Live Update behavior,
 Find Phone sound/vibration policies, background process eviction and battery

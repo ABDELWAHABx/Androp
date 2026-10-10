@@ -1,0 +1,46 @@
+name: Publish signed private Android preview
+
+on:
+  push:
+    branches: [androp]
+    paths: ['private-preview/**', '.github/workflows/publish-private-android-preview.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: androp-v0.1.0-preview.2
+    steps:
+      - name: Require private repository
+        run: test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify the existing signed APK bytes
+        working-directory: private-preview
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS-android.txt
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          metadata = json.loads(Path('androp-android-BUILD.json').read_text())
+          assert metadata['applicationId'] == 'app.androp.android'
+          assert metadata['optimized'] is True
+          assert hashlib.sha256(Path('androp-android.apk').read_bytes()).hexdigest() == metadata['sha256']
+          PY
+      - name: Attach APK and verification metadata to existing private preview
+        working-directory: private-preview
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload "$RELEASE_TAG" androp-android.apk SHA256SUMS-android.txt androp-android-BUILD.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

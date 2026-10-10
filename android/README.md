@@ -56,7 +56,7 @@ export ANDROID_HOME=/path/to/android-sdk
 
 Open this directory in Android Studio, or install `app/build/outputs/apk/debug/app-debug.apk` from a local debug build. Release builds need your own signing configuration. Kotlin sources are in `app/src/main/java/app/androp/android`; application ID and namespace are both `app.androp.android`.
 
-As of **10 October 2026**, debug and optimized release APKs assembled and identity/signature inspection passed. **56 JVM tests passed** with no failures/errors. Lint completed with **0 errors, 250 warnings and 10 hints**; see `app/build/reports/lint-results-debug.html` after a local run.
+As of **10 October 2026**, debug and optimized release APKs assembled and identity/signature inspection passed. **72 JVM tests passed** with no failures/errors. Lint completed with **0 errors, 250 warnings and 10 hints**; see `app/build/reports/lint-results-debug.html` after a local run.
 
 Native Mac CI is running; no passing Mac build or device pairing is claimed yet. Battery savings, BLE latency, large-file throughput and Samsung S21 FE / One UI 8 presentation require physical-device checks. In the combined source repository, `mac/EXPERIENCE_REVIEW.md` and `mac/PERFORMANCE_REVIEW.md` document behavior and remaining checks.
 
@@ -69,3 +69,7 @@ Ordinary Mac Keep Awake prevents idle sleep during actual transfer, remote input
 Based on upstream commit `2559ec38d8ef49d7efbe5af3e21fe632feb7b716` of AirSync Android by **Sameera Wijerathna** and contributors. The original [LICENSE](LICENSE), additional terms and [upstream README](README.upstream.md) are retained. Some original artwork and support links remain; they are not androp download or support services.
 
 Source visibility does not grant unrestricted redistribution. Android retains its MPL 2.0 notice and additional publisher-responsibility/license-retention terms. The companion Mac license prohibits redistribution of modified binaries and limits them to private/internal use; build downloads remain private. No upstream trademark rights or replacement license are asserted.
+
+## Preview 2 lifecycle follow-up
+
+[CRASH_REVIEW.md](CRASH_REVIEW.md) records foreground startup rollback, pause cleanup, pairing input validation and bounded wake-up handling. [CI passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38084164731) with 72 JVM tests and zero lint errors. The optimized 4.0.2 (33) private APK retains the original preview signing certificate for updates.

@@ -1,6 +1,6 @@
 {
   "tests": {
-    "tests": 56,
+    "tests": 72,
     "failures": 0,
     "errors": 0,
     "skipped": 0
@@ -11,7 +11,7 @@
     "Hint": 10
   },
   "swift": {
-    "changed_files": 82,
+    "changed_files": 103,
     "new_errors": 0,
     "unchanged_parser_limitations": 4,
     "power_policy_tests_added": 6,
@@ -26,29 +26,58 @@
     "physical_behavior_verified": false
   },
   "native_mac_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081058944",
-    "commit": "b0e214a3080aeada98fc92b2fbdc8e06058dc9ad",
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085118534",
+    "commit": "c846b9b0f8a91f94d386a0891a7578c56878efef",
     "xcode": "26.6",
     "swift": "6.3.3",
     "architecture": "arm64",
     "signatureVerification": true,
     "helperCompiledAndSigned": true,
     "helperActivated": false,
-    "notarized": false
+    "notarized": false,
+    "productionAppLifecyclePassed": true,
+    "pauseCycles": 3,
+    "resumeCycles": 2
   },
   "android_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38079604285",
-    "commit": "5b8c143c79f202a03f147de9b4c23c1357232d4e",
-    "tests": 56,
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38084164731",
+    "commit": "89d97df784d5fc789b4acd70a10653fbbc9ce24f",
+    "tests": 72,
     "failures": 0,
     "lintErrors": 0,
     "lintWarnings": 250,
     "lintHints": 10,
-    "finalUiCopyRebuiltLocally": true,
-    "releaseSourceCommit": "1162d29523b673006e81f085ebfbf8560ad72ed1",
-    "sha256": "a4f841c3bb61e4b586f9d08d28401308a96ba7c8207ec8716cb45504d5074bf5"
+    "releaseSourceCommit": "89d97df784d5fc789b4acd70a10653fbbc9ce24f",
+    "sha256": "3c8629dac53ec8e6aa757edfc9715a7405fc2adba125ed56c5c1743df123b85b",
+    "sameUpdateSigningCertificate": true
   },
-  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081768419",
+  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085737620",
   "mac_download_checksums_verified": true,
-  "android_download_checksum_and_signature_verified": true
+  "android_download_checksum_and_signature_verified": true,
+  "releaseTag": "androp-v0.1.0-preview.2",
+  "mac_regressions": {
+    "runOn": [
+      "macOS 15.7.9",
+      "macOS 26"
+    ],
+    "bleCases": 10,
+    "teardownRepetitions": 1000,
+    "keepAwakeCases": 6,
+    "scrcpyPacketChecks": 23,
+    "remoteInputChecks": 16,
+    "batteryPolicyChecks": 10,
+    "mediaAndDiscoveryChecksPassed": true
+  },
+  "mac_sequoia_runtime_ci": {
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085737665",
+    "macOS": "15.7.9",
+    "build": "24G830",
+    "architecture": "arm64",
+    "packagedSourceCommit": "c846b9b0f8a91f94d386a0891a7578c56878efef",
+    "pauseCycles": 3,
+    "resumeCycles": 2,
+    "sourceHashesAndStrictSignaturesVerified": true,
+    "bluetoothRadioActivated": false,
+    "experimentalPowerHelperActivated": false
+  }
 }

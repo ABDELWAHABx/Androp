@@ -1,0 +1,57 @@
+name: Validate packaged preview on macOS 15
+
+on:
+  push:
+    branches: [androp]
+    paths: ['.github/workflows/private-sequoia-runtime.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    if: github.event.repository.private == true
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: androp-v0.1.0-preview.2
+    steps:
+      - name: Require private repository and Apple Silicon
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = true
+          test "$(uname -m)" = arm64
+          sw_vers
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download and verify the packaged app
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/androp-sequoia"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "${RELEASE_TAG}-arm64.zip" --pattern "${RELEASE_TAG}-arm64-BUILD.json" --pattern "${RELEASE_TAG}-arm64-SHA256SUMS.txt" \
+            --dir "$RUNNER_TEMP/androp-sequoia"
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'androp-sequoia'
+          prefix = os.environ['RELEASE_TAG'] + '-arm64'
+          checksums = (root / (prefix + '-SHA256SUMS.txt')).read_text()
+          for line in checksums.splitlines():
+              expected, name = line.split(None, 1)
+              path = root / name.strip()
+              if path.suffix == '.dmg': continue
+              assert path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == expected
+          metadata = json.loads((root / (prefix + '-BUILD.json')).read_text())
+          assert metadata['architecture'] == 'arm64'
+          subprocess.run(['git', 'diff', '--exit-code', metadata['commit'], os.environ['GITHUB_SHA'], '--',
+              'mac/airsync-mac', 'mac/AirSyncWidget', 'mac/AirSync.xcodeproj'], check=True)
+          subprocess.run(['ditto', '-x', '-k', str(root / (prefix + '.zip')), str(root / 'unpacked')], check=True)
+          app = next((root / 'unpacked').glob('*/androp.app'))
+          subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+          subprocess.run(['bash', 'mac/Tests/run-app-lifecycle-tests.sh', str(app)], check=True)
+          print('Packaged arm64 app: signatures, source, hashes and real Pause/Resume passed on macOS 15.')
+          PY

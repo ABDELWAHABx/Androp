@@ -22,7 +22,7 @@ xcodebuild -project AirSync.xcodeproj -scheme androp \
 
 This command is a build check; configure signing in Xcode for normal installation and widget use. The main app targets macOS 14.5; the widget and project default target macOS 15.0, so the app and widget can run together on Sequoia. Liquid Glass uses a material fallback below macOS 26; AI notification summaries require macOS 26.
 
-Building still requires Xcode 26 or newer with the macOS 26 SDK and Swift 6.2, because the source references newer SDK symbols inside runtime availability guards. For building on Sequoia, use Xcode 26 through 26.3 on macOS 15.6 or later; newer Xcode releases may require Tahoe. See Apple's [Xcode requirements](https://developer.apple.com/support/xcode/). The build SDK version does not raise the app's runtime deployment target. Native compilation passed in [GitHub macOS CI](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081058944). Device pairing remains unverified.
+Building still requires Xcode 26 or newer with the macOS 26 SDK and Swift 6.2, because the source references newer SDK symbols inside runtime availability guards. For building on Sequoia, use Xcode 26 through 26.3 on macOS 15.6 or later; newer Xcode releases may require Tahoe. See Apple's [Xcode requirements](https://developer.apple.com/support/xcode/). The build SDK version does not raise the app's runtime deployment target. Native compilation passed in [GitHub macOS CI](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085118534). Device pairing remains unverified.
 
 ## Private GitHub downloads
 
@@ -72,3 +72,7 @@ Mac settings provide an opt-in Keep Awake mode tied to actual file transfers, re
 On macOS 15, a separate default-off experimental option uses a bundled nonprivileged watchdog to request lid-specific sleep prevention. It requires battery above 20% and a thermal state below serious, with short renewable leases and cleanup on stop or loss of the parent. This uses a private OS interface; successful request acceptance does not prove closed-lid operation. Read [CLOSED_LID_REVIEW.md](CLOSED_LID_REVIEW.md) and perform its desk checks before relying on it on an M1 Air.
 
 Six pure keep-awake policy tests can run on a Swift-enabled host with `bash Tests/run-mac-power-policy-tests.sh`. All six passed on the GitHub macOS runner. The experimental helper was compiled and signed, but not activated in CI.
+
+## Preview 2 crash and feature follow-up
+
+[CRASH_REVIEW.md](CRASH_REVIEW.md) documents the reported idle Pause stack overflow, nonrecursive lifecycle teardown, media/transfer/input guards, and implemented low-battery alerts and floating phone widget. Mac regressions passed on macOS 15 and 26. The compiled application passed three idle Pause and two real Resume cycles; the exact packaged ARM64 app repeated those checks successfully on [macOS 15.7.9](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085737665). The test leaves the Bluetooth radio and experimental closed-lid helper inactive. Real-device pairing and power consumption remain unverified.
