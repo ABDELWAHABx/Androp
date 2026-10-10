@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>AirSync</title>
+        <item>
+            <title>4.1.0</title>
+            <pubDate>Sat, 19 Sep 2026 16:27:38 +0530</pubDate>
+            <sparkle:version>32</sparkle:version>
+            <sparkle:shortVersionString>4.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.5</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/sameerasw/airsync-mac/releases/download/v4.1.0/AirSync.dmg" length="22762201" type="application/octet-stream" sparkle:edSignature="jqFyE4zwgwTGgPyktajADQ7rZ9WL6oHhoeymUrRuVnp14UCaperWcIoUx/KPlC5zK0ni4IrdxouOeaeJxbR0Dw=="/>
+        </item>
+    </channel>
+</rss>

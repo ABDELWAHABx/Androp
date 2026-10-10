@@ -1,0 +1,154 @@
+package app.androp.android.domain.repository
+
+import app.androp.android.domain.model.ConnectedDevice
+import app.androp.android.domain.model.NetworkDeviceConnection
+import app.androp.android.domain.model.NotificationApp
+import kotlinx.coroutines.flow.Flow
+
+interface AirSyncRepository {
+    suspend fun saveIpAddress(ipAddress: String)
+    fun getIpAddress(): Flow<String>
+
+    suspend fun savePort(port: String)
+    fun getPort(): Flow<String>
+
+    suspend fun saveDeviceName(deviceName: String)
+    fun getDeviceName(): Flow<String>
+
+    suspend fun setFirstRun(isFirstRun: Boolean)
+    fun getFirstRun(): Flow<Boolean>
+
+    suspend fun setPermissionsChecked(checked: Boolean)
+    fun getPermissionsChecked(): Flow<Boolean>
+
+    suspend fun setNotificationSyncEnabled(enabled: Boolean)
+    fun getNotificationSyncEnabled(): Flow<Boolean>
+
+    suspend fun setDeveloperMode(enabled: Boolean)
+    fun getDeveloperMode(): Flow<Boolean>
+
+    suspend fun setDeveloperModeVisible(visible: Boolean)
+    fun getDeveloperModeVisible(): Flow<Boolean>
+
+    suspend fun saveLastConnectedDevice(device: ConnectedDevice)
+    fun getLastConnectedDevice(): Flow<ConnectedDevice?>
+
+    // Network-aware device connections
+    suspend fun saveNetworkDeviceConnection(
+        deviceName: String,
+        ourIp: String,
+        clientIp: String,
+        port: String,
+        isPlus: Boolean,
+        symmetricKey: String?,
+        model: String? = null,
+        deviceType: String? = null
+    )
+
+    fun getNetworkDeviceConnection(deviceName: String): Flow<NetworkDeviceConnection?>
+    fun getAllNetworkDeviceConnections(): Flow<List<NetworkDeviceConnection>>
+    suspend fun updateNetworkDeviceLastConnected(deviceName: String, timestamp: Long)
+
+    // App notification preferences
+    suspend fun saveNotificationApps(apps: List<NotificationApp>)
+    fun getNotificationApps(): Flow<List<NotificationApp>>
+
+    // Last sync time tracking
+    suspend fun updateLastSyncTime(timestamp: Long)
+    fun getLastSyncTime(): Flow<Long?>
+
+    // Clipboard sync settings
+    suspend fun setClipboardSyncEnabled(enabled: Boolean)
+    fun getClipboardSyncEnabled(): Flow<Boolean>
+
+    suspend fun setClipboardHistoryEnabled(enabled: Boolean)
+    fun getClipboardHistoryEnabled(): Flow<Boolean>
+
+    // Auto reconnect settings
+    suspend fun setAutoReconnectEnabled(enabled: Boolean)
+    fun getAutoReconnectEnabled(): Flow<Boolean>
+
+    // Continue Browsing settings
+    suspend fun setContinueBrowsingEnabled(enabled: Boolean)
+    fun getContinueBrowsingEnabled(): Flow<Boolean>
+
+    // Send now playing settings
+    suspend fun setSendNowPlayingEnabled(enabled: Boolean)
+    fun getSendNowPlayingEnabled(): Flow<Boolean>
+
+    suspend fun setExcludedMediaPackages(packages: Set<String>)
+    fun getExcludedMediaPackages(): Flow<Set<String>>
+
+    // Keep previous link settings
+    suspend fun setKeepPreviousLinkEnabled(enabled: Boolean)
+    fun getKeepPreviousLinkEnabled(): Flow<Boolean>
+
+    // Smartspacer settings
+    suspend fun setSmartspacerShowWhenDisconnected(enabled: Boolean)
+    fun getSmartspacerShowWhenDisconnected(): Flow<Boolean>
+
+    // User manual disconnect tracking
+    suspend fun setUserManuallyDisconnected(disconnected: Boolean)
+    fun getUserManuallyDisconnected(): Flow<Boolean>
+
+    // App paused mode
+    suspend fun setAppPaused(paused: Boolean)
+    fun isAppPaused(): Flow<Boolean>
+
+    // Mac Media controls
+    suspend fun setMacMediaControlsEnabled(enabled: Boolean)
+    fun getMacMediaControlsEnabled(): Flow<Boolean>
+
+    // Blur settings
+    suspend fun setUseBlurEnabled(enabled: Boolean)
+    fun getUseBlurEnabled(): Flow<Boolean>
+
+    // Pitch Black Theme settings
+    suspend fun setPitchBlackThemeEnabled(enabled: Boolean)
+    fun getPitchBlackThemeEnabled(): Flow<Boolean>
+
+    // Ripple animation settings
+    suspend fun setUseRippleEnabled(enabled: Boolean)
+    fun getUseRippleEnabled(): Flow<Boolean>
+
+    // Default tab settings
+    suspend fun setDefaultTab(tab: String)
+    fun getDefaultTab(): Flow<String>
+
+
+
+    // Widget specific settings
+    suspend fun setWidgetTransparency(alpha: Float)
+    fun getWidgetTransparency(): Flow<Float>
+
+    // Essentials Bridge
+    suspend fun setEssentialsConnectionEnabled(enabled: Boolean)
+    fun getEssentialsConnectionEnabled(): Flow<Boolean>
+
+    // Expanded Networking
+    suspend fun setExpandNetworkingEnabled(enabled: Boolean)
+    fun getExpandNetworkingEnabled(): Flow<Boolean>
+
+    // Device discovery
+    suspend fun setDeviceDiscoveryEnabled(enabled: Boolean)
+    fun getDeviceDiscoveryEnabled(): Flow<Boolean>
+
+    // Rating card refined logic
+    suspend fun setFirstMacConnectionTime(time: Long)
+    fun getFirstMacConnectionTime(): Flow<Long>
+    suspend fun setLastPromptDismissedVersion(version: Int)
+    fun getLastPromptDismissedVersion(): Flow<Int>
+    suspend fun setHasRatedApp(hasRated: Boolean)
+    fun hasRatedApp(): Flow<Boolean>
+
+    // Quick Share (receiving)
+    suspend fun setQuickShareEnabled(enabled: Boolean)
+    fun isQuickShareEnabled(): Flow<Boolean>
+
+    // File Access (WebDAV Server)
+    suspend fun setFileAccessEnabled(enabled: Boolean)
+    fun isFileAccessEnabled(): Flow<Boolean>
+
+    suspend fun setNotifyOnCrashEnabled(enabled: Boolean)
+    fun getNotifyOnCrashEnabled(): Flow<Boolean>
+}

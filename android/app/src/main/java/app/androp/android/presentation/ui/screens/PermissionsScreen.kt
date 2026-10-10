@@ -1,0 +1,380 @@
+package app.androp.android.presentation.ui.screens
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.unit.dp
+import app.androp.android.presentation.ui.components.RoundedCardContainer
+import app.androp.android.presentation.ui.components.dialogs.PermissionExplanationDialog
+import app.androp.android.presentation.ui.components.dialogs.PermissionType
+import app.androp.android.utils.HapticUtil
+import app.androp.android.utils.PermissionUtil
+
+@Composable
+fun PermissionsScreen(
+    modifier: Modifier = Modifier,
+    onRequestNotificationPermission: (() -> Unit)? = null,
+    onRequestCallLogPermission: (() -> Unit)? = null,
+    onRequestContactsPermission: (() -> Unit)? = null,
+    onRequestPhonePermission: (() -> Unit)? = null,
+    onRequestBluetoothPermission: (() -> Unit)? = null,
+    onRequestLocalNetworkPermission: (() -> Unit)? = null,
+    onRequestAnswerCallsPermission: (() -> Unit)? = null,
+    refreshTrigger: Int = 0
+) {
+    val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
+    val scrollState = rememberScrollState()
+
+    var manualRefresh by remember { mutableStateOf(0) }
+
+    // Recompute when returning from settings or explicitly refreshing.
+    val criticalPermissions by remember(refreshTrigger, manualRefresh) {
+        derivedStateOf { PermissionUtil.getCriticalMissingPermissions(context) }
+    }
+    val optionalPermissions by remember(refreshTrigger, manualRefresh) {
+        derivedStateOf { PermissionUtil.getOptionalMissingPermissions(context) }
+    }
+
+    var showDialog by remember { mutableStateOf<PermissionType?>(null) }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        RoundedCardContainer {
+            // Check if all permissions are granted
+            if (criticalPermissions.isEmpty() && optionalPermissions.isEmpty()) {
+                // All permissions granted
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            "(/^▽^)/    All Permissions Granted",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.extraSmall,
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (criticalPermissions.isNotEmpty()) MaterialTheme.colorScheme.errorContainer
+                            else MaterialTheme.colorScheme.surfaceContainerHigh
+                        )
+                    ) {
+                        Row(modifier = Modifier.padding(16.dp)) {
+                            Column {
+                                Text(
+                                    text = if (criticalPermissions.isNotEmpty()) "Network access needed" else "Choose the features you use",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = if (criticalPermissions.isNotEmpty())
+                                        MaterialTheme.colorScheme.onErrorContainer
+                                    else MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+
+                                Text(
+                                    text = "Notification, file and phone permissions are optional for pairing.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.weight(1f))
+
+                            OutlinedButton(onClick = {
+                                HapticUtil.performClick(haptics)
+                                manualRefresh++
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Refresh"
+                                )
+                            }
+                        }
+                    }
+
+                    // Show critical permissions first
+                    if (criticalPermissions.isNotEmpty()) {
+
+                        criticalPermissions.forEach { permission ->
+                            when (permission) {
+                                "Local Network Access" -> PermissionButton(
+                                    permissionName = permission,
+                                    description = "Allow connecting to your Mac on Wi-Fi",
+                                    onExplainClick = { showDialog = PermissionType.LOCAL_NETWORK },
+                                    isCritical = true
+                                )
+                            }
+                        }
+                    }
+
+                    // Show optional permissions
+                    if (optionalPermissions.isNotEmpty()) {
+                        optionalPermissions.forEach { permission ->
+                            when (permission) {
+                                "Notification Access" -> PermissionButton(
+                                    permissionName = permission,
+                                    description = "Sync phone notifications and media. If blocked on Samsung, open App info → ⋮ → Allow restricted settings first.",
+                                    onExplainClick = { showDialog = PermissionType.NOTIFICATION_ACCESS },
+                                    isCritical = false
+                                )
+                                "Post Notifications" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Show connection status and alerts",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.POST_NOTIFICATIONS
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Background App Usage" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Only if background sync stops. On Samsung, remove androp from Sleeping apps.",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.BACKGROUND_USAGE
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Wallpaper & File Access" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Optional remote browsing and wallpaper. Sending and receiving files does not need it.",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.WALLPAPER_ACCESS
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Call Log Access" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Necessary for mapping the caller info",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.CALL_LOG
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Contacts Access" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Necessary for displaying known contacts in calls",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.CONTACTS
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Phone Access" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Detects call state changes",
+                                        onExplainClick = { showDialog = PermissionType.PHONE },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Bluetooth Access" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Enables background BLE sync",
+                                        onExplainClick = { showDialog = PermissionType.BLUETOOTH },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Local Network Access" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Discover nearby Mac devices on Wi-Fi",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.LOCAL_NETWORK
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+
+                                "Answer Calls" -> {
+                                    PermissionButton(
+                                        permissionName = permission,
+                                        description = "Accept and end calls from Mac",
+                                        onExplainClick = {
+                                            showDialog = PermissionType.ANSWER_CALLS
+                                        },
+                                        isCritical = false
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+    }
+
+    // Show permission explanation dialog
+    showDialog?.let { permissionType ->
+        PermissionExplanationDialog(
+            permissionType = permissionType,
+            onDismiss = { showDialog = null },
+            onGrantPermission = {
+                when (permissionType) {
+                    PermissionType.NOTIFICATION_ACCESS -> {
+                        PermissionUtil.openNotificationListenerSettings(context)
+                    }
+
+                    PermissionType.POST_NOTIFICATIONS -> {
+                        onRequestNotificationPermission?.invoke()
+                    }
+
+                    PermissionType.BACKGROUND_USAGE -> {
+                        PermissionUtil.openBatteryOptimizationSettings(context)
+                    }
+
+                    PermissionType.WALLPAPER_ACCESS -> {
+                        PermissionUtil.openManageExternalStorageSettings(context)
+                    }
+
+                    PermissionType.CALL_LOG -> {
+                        onRequestCallLogPermission?.invoke()
+                    }
+
+                    PermissionType.CONTACTS -> {
+                        onRequestContactsPermission?.invoke()
+                    }
+
+                    PermissionType.PHONE -> {
+                        onRequestPhonePermission?.invoke()
+                    }
+
+                    PermissionType.BLUETOOTH -> {
+                        onRequestBluetoothPermission?.invoke()
+                    }
+
+                    PermissionType.LOCAL_NETWORK -> {
+                        onRequestLocalNetworkPermission?.invoke()
+                    }
+
+                    PermissionType.ANSWER_CALLS -> {
+                        onRequestAnswerCallsPermission?.invoke()
+                    }
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun PermissionButton(
+    permissionName: String,
+    description: String,
+    onExplainClick: () -> Unit,
+    isCritical: Boolean
+) {
+    val haptics = LocalHapticFeedback.current
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraSmall,
+    ) {
+        Row(modifier = Modifier.padding(16.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = permissionName,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (isCritical)
+                        MaterialTheme.colorScheme.onErrorContainer
+                    else
+                        MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isCritical)
+                        MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
+                    else
+                        MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                )
+            }
+
+            if (isCritical) {
+                Button(
+                    onClick = {
+                        HapticUtil.performClick(haptics)
+                        onExplainClick()
+                    },
+                    modifier = Modifier.padding(start = 8.dp)
+                ) {
+                    Text("Open")
+                }
+            } else {
+                OutlinedButton(
+                    onClick = {
+                        HapticUtil.performClick(haptics)
+                        onExplainClick()
+                    },
+                    modifier = Modifier.padding(start = 8.dp)
+                ) {
+                    Text("Open")
+                }
+            }
+        }
+    }
+}
+
+

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Splash screen theme with animation for light theme -->
+    <style name="Theme.AirSync.Splash" parent="Theme.SplashScreen">
+        <!-- Prevent any system bar/title from showing -->
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+        <!-- Splash screen background color -->
+        <item name="windowSplashScreenBackground">@color/app_window_background</item>
+        <!-- Animated icon displayed in splash screen -->
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <!-- Branding image displayed at the bottom of the splash screen -->
+        <item name="android:windowSplashScreenBrandingImage">@drawable/ic_branding_avatar</item>
+        <!-- Splash screen animation duration in milliseconds -->
+        <item name="windowSplashScreenAnimationDuration">3000</item>
+        <!-- Theme to apply after splash screen exits -->
+        <item name="postSplashScreenTheme">@style/Theme.AirSync</item>
+    </style>
+</resources>

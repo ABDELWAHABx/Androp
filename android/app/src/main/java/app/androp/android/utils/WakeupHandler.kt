@@ -1,0 +1,155 @@
+package app.androp.android.utils
+
+import android.content.Context
+import android.util.Log
+import app.androp.android.data.local.DataStoreManager
+import app.androp.android.domain.model.ConnectedDevice
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
+/**
+ * Shared logic for processing wake-up requests from Mac clients.
+ * This can be triggered via HTTP (WakeupService) or UDP (UDPDiscoveryManager).
+ */
+object WakeupHandler {
+    private const val TAG = "WakeupHandler"
+
+    suspend fun processWakeupRequest(
+        context: Context,
+        macIp: String,
+        macPort: Int,
+        macName: String
+    ) {
+        try {
+            Log.i(TAG, "Processing wake-up request from $macName at $macIp:$macPort")
+
+            if (macIp.isEmpty()) {
+                Log.w(TAG, "Wake-up request missing Mac IP address")
+                return
+            }
+
+            val dataStoreManager = DataStoreManager.getInstance(context)
+
+            if (BackgroundWorkController.isPaused || dataStoreManager.isAppPaused().first() ||
+                dataStoreManager.getUserManuallyDisconnected().first() ||
+                !dataStoreManager.getAutoReconnectEnabled().first()) return
+
+            if (WebSocketUtil.isWifiConnected()) {
+                Log.d(TAG, "Already connected via Wi-Fi, ignoring wake-up request")
+                return
+            }
+
+
+            // Look up stored encryption key
+            val encryptionKey =
+                findStoredEncryptionKey(context, dataStoreManager, macIp, macPort, macName)
+
+            if (encryptionKey == null) {
+                Log.w(TAG, "No stored encryption key found for $macName at $macIp:$macPort")
+                return
+            }
+
+            Log.d(TAG, "Found stored encryption key for $macName")
+
+            // Update device information
+            val ourIp = DeviceInfoUtil.getWifiIpAddress(context)
+            if (ourIp != null) {
+                dataStoreManager.saveNetworkDeviceConnection(
+                    deviceName = macName,
+                    ourIp = ourIp,
+                    clientIp = macIp,
+                    port = macPort.toString(),
+                    isPlus = true,
+                    symmetricKey = encryptionKey,
+                    model = "Mac",
+                    deviceType = "desktop"
+                )
+
+                val connectedDevice = ConnectedDevice(
+                    name = macName,
+                    ipAddress = macIp,
+                    port = macPort.toString(),
+                    lastConnected = System.currentTimeMillis(),
+                    isPlus = true,
+                    symmetricKey = encryptionKey,
+                    model = "Mac",
+                    deviceType = "desktop"
+                )
+                dataStoreManager.saveLastConnectedDevice(connectedDevice)
+            }
+
+            Log.d(TAG, "Attempting to connect to Mac at $macIp:$macPort")
+            WebSocketUtil.connect(
+                context = context,
+                ipAddress = macIp,
+                port = macPort,
+                symmetricKey = encryptionKey,
+                manualAttempt = false,
+                onConnectionStatus = { connected ->
+                    if (connected) {
+                        Log.i(TAG, "Successfully connected after wake-up")
+                        CoroutineScope(Dispatchers.IO).launch {
+                            try {
+                                dataStoreManager.updateNetworkDeviceLastConnected(
+                                    macName,
+                                    System.currentTimeMillis()
+                                )
+                            } catch (e: Exception) {
+                            }
+                        }
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing wake-up request", e)
+        }
+    }
+
+    private suspend fun findStoredEncryptionKey(
+        context: Context,
+        dataStoreManager: DataStoreManager,
+        macIp: String,
+        macPort: Int,
+        macName: String
+    ): String? {
+        try {
+            val networkDevices = dataStoreManager.getAllNetworkDeviceConnections().first()
+            val ourIp = DeviceInfoUtil.getWifiIpAddress(context)
+            val cleanMacName = cleanDeviceName(macName)
+
+            if (ourIp != null) {
+                val networkDevice = networkDevices.firstOrNull { device ->
+                    cleanDeviceName(device.deviceName) == cleanMacName && device.getClientIpForNetwork(ourIp) == macIp
+                }
+                if (networkDevice?.symmetricKey != null) return networkDevice.symmetricKey
+            }
+
+            val lastConnectedDevice = dataStoreManager.getLastConnectedDevice().first()
+            if (lastConnectedDevice?.symmetricKey != null &&
+                (cleanDeviceName(lastConnectedDevice.name) == cleanMacName || networkDevices.size <= 1)
+            ) {
+                return lastConnectedDevice.symmetricKey
+            }
+
+            val matchedDevice = networkDevices.firstOrNull { cleanDeviceName(it.deviceName) == cleanMacName }
+            if (matchedDevice?.symmetricKey != null) return matchedDevice.symmetricKey
+
+            if (networkDevices.size == 1) {
+                return networkDevices.first().symmetricKey
+            }
+
+            return null
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun cleanDeviceName(name: String): String {
+        return name
+            .replace("’", "'")
+            .trim()
+            .lowercase()
+    }
+}

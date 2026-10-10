@@ -1,0 +1,246 @@
+package app.androp.android.presentation.ui.components.dialogs
+
+import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import app.androp.android.R
+
+enum class PermissionType {
+    NOTIFICATION_ACCESS,
+    POST_NOTIFICATIONS,
+    BACKGROUND_USAGE,
+    WALLPAPER_ACCESS,
+    CALL_LOG,
+    CONTACTS,
+    PHONE,
+    BLUETOOTH,
+    LOCAL_NETWORK,
+    ANSWER_CALLS
+}
+
+data class PermissionInfo(
+    val title: String,
+    val icon: Int,
+    val description: String,
+    val whyNeeded: String,
+    val buttonText: String
+)
+
+@Composable
+fun PermissionExplanationDialog(
+    permissionType: PermissionType,
+    onDismiss: () -> Unit,
+    onGrantPermission: () -> Unit
+) {
+    val context = LocalContext.current
+    val permissionInfo = getPermissionInfo(context, permissionType)
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = MaterialTheme.shapes.extraLarge,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .padding(18.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(id = permissionInfo.icon),
+                        contentDescription = null,
+                        modifier = Modifier.size(40.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = permissionInfo.title,
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Bold
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // Description
+                Text(
+                    text = permissionInfo.description,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                // Why we need this permission
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Why androp needs this permission:",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold
+                            ),
+                        )
+                        Text(
+                            text = permissionInfo.whyNeeded,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+
+                // Action buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    OutlinedButton(
+                        onClick = onDismiss,
+                    ) {
+                        Text("Dismiss")
+                    }
+
+                    Button(
+                        onClick = {
+                            onGrantPermission()
+                            onDismiss()
+                        },
+                    ) {
+                        Text(permissionInfo.buttonText)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun getPermissionInfo(context: Context, permissionType: PermissionType): PermissionInfo {
+    return when (permissionType) {
+        PermissionType.NOTIFICATION_ACCESS -> PermissionInfo(
+            title = "Notification Access",
+            icon = R.drawable.rounded_notification_settings_24,
+            description = "androp needs access to read your device notifications to sync them with your mac in real-time.",
+            whyNeeded = "Enable this only to forward phone notifications and media information. Pairing, remote controls and file transfers work without it. On Android 13+ sideloaded apps, Samsung may disable this setting: open Settings → Apps → androp → ⋮ → Allow restricted settings, then return here. If that option is absent, check whether your work profile or administrator restricts notification access.",
+            buttonText = "Grant Notification Access"
+        )
+
+        PermissionType.POST_NOTIFICATIONS -> PermissionInfo(
+            title = "Post Notifications",
+            icon = R.drawable.rounded_notifications_active_24,
+            description = "Allow the persistent androp dashboard with connection status, Pause/Resume and quick actions.",
+            whyNeeded = "This permission lets Android show the dashboard in your notification shade. It is separate from access to read other apps' notifications. Pairing and foreground controls remain usable if you decline.",
+            buttonText = "Allow Notifications"
+        )
+
+        PermissionType.BACKGROUND_USAGE -> PermissionInfo(
+            title = "Background App Usage",
+            icon = R.drawable.rounded_local_laundry_service_24,
+            description = "Android's battery optimization can kill background apps. Disabling this for androp ensures reliable notification syncing even when you're not actively using the app.",
+            whyNeeded = "Change this only if background sync stops when the screen turns off. On Samsung One UI, set androp's App battery usage to Unrestricted and remove it from Sleeping or Deep sleeping apps. Pausing androp still stops its background work.",
+            buttonText = "Disable Battery Optimization"
+        )
+
+        PermissionType.WALLPAPER_ACCESS -> PermissionInfo(
+            title = "Wallpaper & File Access",
+            icon = R.drawable.rounded_folder_managed_24,
+            description = "Optional: let your paired Mac browse shared phone storage and read your wallpaper. You can send selected files and receive files in Downloads without this permission.",
+            whyNeeded = "To read your current wallpaper, and to let your paired Mac mount your phone's storage over Wi-Fi (the File Access feature in the Mac app's settings), androp needs broader storage permissions than regular apps get. \nThis permission is only used for these two features — wallpaper sync always, and file browsing only while File Access is explicitly enabled on your Mac and only over your local network.",
+            buttonText = "Grant Storage Access"
+        )
+
+        PermissionType.CALL_LOG -> PermissionInfo(
+            title = "Call Log Access",
+            icon = R.drawable.rounded_call_log_24,
+            description = "androp needs call log access to identify the caller's phone number for real-time alerts on your Mac.",
+            whyNeeded = "To provide accurate call notifications on your Mac, Android requires the Call Log permission to see the phone number of an incoming call. \n\nWithout this, your Mac will only show 'Unknown Caller'. This permission is used strictly to identify the caller in real-time and provide alerts for missed or incoming calls. \n\nThis data is only shared with your own Mac over your secure local network and is never stored on our servers.",
+            buttonText = "Grant Call Log Access"
+        )
+
+        PermissionType.CONTACTS -> PermissionInfo(
+            title = "Contacts Access",
+            icon = R.drawable.rounded_contacts_24,
+            description = "androp needs access to your contacts to match phone numbers with names on your Mac.",
+            whyNeeded = "To provide a seamless companion experience, androp uses your contact names so you can see who is calling or who sent a notification directly on your Mac desktop. \n\nWithout this, you would only see phone numbers. Your contacts are never uploaded to any external servers; they are only used locally to enhance the connection between your phone and your Mac.",
+            buttonText = "Grant Contacts Access"
+        )
+
+        PermissionType.PHONE -> PermissionInfo(
+            title = "Phone Access",
+            icon = R.drawable.rounded_settings_phone_24,
+            description = "androp needs to detect your phone's state to notify you of incoming calls in real-time.",
+            whyNeeded = "This permission allows androp to detect when your phone is ringing, when you answer, or when a call ends, so it can display a live call status on your Mac. \n\nAirSync NEVER accesses your call audio or records conversations. This is used solely to facilitate the remote call notification feature as a device companion.",
+            buttonText = "Grant Phone Access"
+        )
+
+        PermissionType.BLUETOOTH -> PermissionInfo(
+            title = "Bluetooth Access",
+            icon = R.drawable.rounded_sync_desktop_24,
+            description = "androp uses Bluetooth Low Energy (BLE) as a secondary transport to sync notifications and media controls with your Mac when Wi-Fi is unavailable.",
+            whyNeeded = "To discover and connect to your Mac via Bluetooth, Android requires Bluetooth permissions (Scan, Connect, and Advertise). \n\nThis enables a low-power background connection that keeps your devices synced even when they aren't on the same Wi-Fi network. androp only uses Bluetooth to communicate with your authorized Mac devices.",
+            buttonText = "Grant Bluetooth Access"
+        )
+
+        PermissionType.LOCAL_NETWORK -> PermissionInfo(
+            title = context.getString(R.string.permission_local_network_title),
+            icon = R.drawable.rounded_sync_desktop_24,
+            description = context.getString(R.string.permission_local_network_explain),
+            whyNeeded = context.getString(R.string.permission_local_network_why),
+            buttonText = context.getString(R.string.permission_local_network_button)
+        )
+
+        PermissionType.ANSWER_CALLS -> PermissionInfo(
+            title = context.getString(R.string.permission_answer_calls_title),
+            icon = R.drawable.rounded_settings_phone_24,
+            description = context.getString(R.string.permission_answer_calls_explain),
+            whyNeeded = context.getString(R.string.permission_answer_calls_why),
+            buttonText = context.getString(R.string.permission_answer_calls_button)
+        )
+    }
+}

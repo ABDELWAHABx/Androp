@@ -1,0 +1,378 @@
+//
+//  airsync_macApp.swift
+//  airsync-mac
+//
+//  Created by Sameera Sandakelum on 2025-07-27.
+//
+
+import SwiftUI
+import UserNotifications
+import AppKit
+
+@main
+struct airsync_macApp: App {
+    @Environment(\.openWindow) var openWindow
+    @Environment(\.dismissWindow) var dismissWindow
+    @Environment(\.scenePhase) private var scenePhase
+    let notificationDelegate = NotificationDelegate()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var appState = AppState.shared
+    @AppStorage("hasPairedDeviceOnce") private var hasPairedDeviceOnce: Bool = false
+
+    // Initialize NowPlayingViewModel to start sending media info to Android
+    @StateObject private var macInfoSyncManager = MacInfoSyncManager.shared
+
+    init() {
+
+        // Initialize NowPlayingPublisher for MPNowPlayingInfoCenter integration
+        NowPlayingPublisher.shared.start()
+
+        let center = UNUserNotificationCenter.current()
+        center.delegate = notificationDelegate
+
+        // Register base default category with generic View action; dynamic per-notification categories added later
+        let viewAction = UNNotificationAction(identifier: "VIEW_ACTION", title: "View", options: [])
+        let defaultCategory = UNNotificationCategory(identifier: "DEFAULT_CATEGORY", actions: [viewAction], intentIdentifiers: [], options: [])
+        center.getNotificationCategories { existing in
+            center.setNotificationCategories(existing.union([defaultCategory]))
+        }
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+            if let error = error {
+                print("[main-app] Notification permission error: \(error)")
+            } else {
+                print("[main-app] Notification permission granted: \(granted)")
+            }
+        }
+
+        let rawPortInt = AppState.shared.myDevice?.port ?? Int(Defaults.serverPort)
+        let chosenPort: UInt16
+        if rawPortInt <= 0 || rawPortInt > 65_535 {
+            print("[main-app] Invalid configured port \(rawPortInt). Falling back to 8080.")
+            chosenPort = UInt16(8080)
+        }
+        else {
+            chosenPort = UInt16(rawPortInt)
+        }
+        WebSocketServer.shared.start(port: UInt16(chosenPort))
+
+        loadCachedIcons()
+        loadCachedWallpapers()
+
+
+
+        // Initialize trial manager early so entitlement state is up-to-date on launch.
+        _ = TrialManager.shared
+        
+        // Start Discovery Manager (mDNS + UDP fallback)
+        DiscoveryManager.shared.start()
+        
+    }
+
+    var body: some Scene {
+        Window("androp", id: "main") {
+            if #available(macOS 15.0, *) {
+                HomeView()
+                    .containerBackground(.ultraThinMaterial, for: .window)
+                    .applyMainWindowSetup(appDelegate: appDelegate, appState: appState)
+                    .dropTarget(appState: appState)
+            } else {
+                HomeView()
+                    .applyMainWindowSetup(appDelegate: appDelegate, appState: appState)
+                    .dropTarget(appState: appState)
+                    .onAppear {
+                        if !appState.isNativeMirroring {
+                            dismissWindow(id: "nativeMirror")
+                        }
+                        if !appState.isNativeDesktopMirroring {
+                            dismissWindow(id: "nativeDesktopMirror")
+                        }
+                        if appState.activeCall == nil || appState.callNotificationMode != .popup {
+                            dismissWindow(id: "callWindow")
+                        }
+                        if !appState.showingQuickShareTransfer {
+                            dismissWindow(id: "quickShareWindow")
+                        }
+                    }
+            }
+        }
+        .onChange(of: appState.closeMainWindowTrigger) { _, _ in
+            dismissWindow(id: "main")
+        }
+        .onChange(of: appState.activeCall) { oldValue, newValue in
+            if newValue != nil && appState.callNotificationMode == .popup {
+                openWindow(id: "callWindow")
+            } else {
+                dismissWindow(id: "callWindow")
+            }
+        }
+        .onChange(of: appState.callNotificationMode) { oldValue, newValue in
+            if appState.activeCall != nil {
+                if newValue == .popup {
+                    openWindow(id: "callWindow")
+                } else {
+                    dismissWindow(id: "callWindow")
+                }
+            }
+        }
+        .onChange(of: appState.showingQuickShareTransfer) { oldValue, newValue in
+            if newValue {
+                openWindow(id: "quickShareWindow")
+            } else {
+                dismissWindow(id: "quickShareWindow")
+            }
+        }
+        .onChange(of: appState.isNativeMirroring) { oldValue, newValue in
+            if newValue {
+                openWindow(id: "nativeMirror")
+            } else {
+                dismissWindow(id: "nativeMirror")
+            }
+        }
+        .onChange(of: appState.isNativeDesktopMirroring) { oldValue, newValue in
+            if newValue {
+                openWindow(id: "nativeDesktopMirror")
+            } else {
+                dismissWindow(id: "nativeDesktopMirror")
+            }
+        }
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit androp") {
+                    NSApp.terminate(nil)
+                }
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings...") {
+                    AppShortcutActions.openSettings()
+                }
+                .appShortcut(AppShortcuts.settings, appState: appState)
+            }
+            CommandGroup(replacing: .help) {
+                Button(action: {
+                    AppShortcutActions.openHelp()
+                }, label: {
+                    Text("Help")
+                })
+                .appShortcut(AppShortcuts.help, appState: appState)
+
+                Divider()
+                
+                
+                if CrashManager.shared.hasReports() {
+                    Menu("Last Crash Report") {
+                        Button("Copy Log") {
+                            CrashManager.shared.copyLastReport()
+                        }
+                        Button("Save Log...") {
+                            CrashManager.shared.saveLastReport()
+                        }
+                    }
+                }
+                
+                Button("Simulate Crash") {
+                    fatalError("Simulated Crash for Testing KSCrash")
+                }
+                .keyboardShortcut("c", modifiers: [.option, .command])
+            }
+            // Mirror menu: launch full device mirror or specific apps via scrcpy
+            CommandMenu("Mirror") {
+                // 1. Default Mirror Option
+                if appState.useNativeMirroringByDefault {
+                    Button("Android Mirror") {
+                        AppShortcutActions.mirrorPrimary()
+                    }
+                    .appShortcut(AppShortcuts.mirrorPrimary, appState: appState)
+                    .disabled(!(appState.device != nil && appState.adbConnected))
+                } else {
+                    Button("scrcpy Mirror") {
+                        AppShortcutActions.mirrorPrimary()
+                    }
+                    .appShortcut(AppShortcuts.mirrorPrimary, appState: appState)
+                    .disabled(!(appState.device != nil && appState.adbConnected))
+                }
+
+                // 2. Alternative Mirror Option
+                if appState.useNativeMirroringByDefault {
+                    Button("scrcpy Mirror") {
+                        AppShortcutActions.mirrorAlternate()
+                    }
+                    .appShortcut(AppShortcuts.mirrorAlternate, appState: appState)
+                    .disabled(!(appState.device != nil && appState.adbConnected))
+                } else {
+                    Button("Android Mirror") {
+                        AppShortcutActions.mirrorAlternate()
+                    }
+                    .appShortcut(AppShortcuts.mirrorAlternate, appState: appState)
+                    .disabled(!(appState.device != nil && appState.adbConnected))
+                }
+
+                Divider()
+
+                // 3. Desktop Mirroring Options (Plus only)
+                if appState.useNativeDesktopMirroringByDefault {
+                    Button("Native Desktop") {
+                        AppShortcutActions.desktopPrimary()
+                    }
+                    .appShortcut(AppShortcuts.desktopPrimary, appState: appState)
+                    .disabled(!(appState.isPlus && appState.licenseCheck && appState.device != nil && appState.adbConnected))
+
+                    Button("scrcpy Desktop") {
+                        AppShortcutActions.desktopAlternate()
+                    }
+                    .appShortcut(AppShortcuts.desktopAlternate, appState: appState)
+                    .disabled(!(appState.isPlus && appState.licenseCheck && appState.device != nil && appState.adbConnected))
+                } else {
+                    Button("scrcpy Desktop") {
+                        AppShortcutActions.desktopPrimary()
+                    }
+                    .appShortcut(AppShortcuts.desktopPrimary, appState: appState)
+                    .disabled(!(appState.isPlus && appState.licenseCheck && appState.device != nil && appState.adbConnected))
+
+                    Button("Native Desktop") {
+                        AppShortcutActions.desktopAlternate()
+                    }
+                    .appShortcut(AppShortcuts.desktopAlternate, appState: appState)
+                    .disabled(!(appState.isPlus && appState.licenseCheck && appState.device != nil && appState.adbConnected))
+                }
+
+                // 4. Sidebar Mirroring
+                Button(appState.isSidebarMirroring ? "Stop Mirroring Here" : "Mirror Here") {
+                    AppShortcutActions.toggleMirrorHere()
+                }
+                .appShortcut(AppShortcuts.mirrorHere, appState: appState)
+                .disabled(!(appState.device != nil && appState.adbConnected))
+
+                // Only show app list if ADB is connected
+                if appState.adbConnected, let _ = appState.device {
+                    Divider()
+                    // Sorted list of apps by display name
+                    ForEach(Array(appState.androidApps.values).sorted { $0.name.lowercased() < $1.name.lowercased() }, id: \.packageName) { app in
+                        Button(app.name) {
+                            if let device = appState.device {
+                                ADBConnector.startScrcpy(
+                                    ip: device.ipAddress,
+                                    port: UInt16(appState.adbPort),
+                                    deviceName: device.name,
+                                    package: app.packageName
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Secondary Tool Window for Calls
+        Window("Call", id: "callWindow") {
+            Group {
+                if let activeCall = appState.activeCall {
+                    if #available(macOS 15.0, *) {
+                        CallWindowView(callEvent: activeCall)
+                            .environmentObject(appState)
+                            .containerBackground(.ultraThinMaterial, for: .window)
+                    } else {
+                        CallWindowView(callEvent: activeCall)
+                            .environmentObject(appState)
+                    }
+                }
+            }
+            .background(WindowAccessor(callback: { window in
+                window.isRestorable = false
+            }))
+        }
+        .defaultPosition(.topTrailing)
+        .defaultSize(width: 320, height: 480)
+        .windowStyle(.hiddenTitleBar)
+
+        // Standalone Tool Window for Quick Share
+        Window("Quick Share", id: "quickShareWindow") {
+            QuickShareTransferSheet()
+                .fixedSize()
+                .background(WindowAccessor(callback: { window in
+                    window.level = .floating
+                    window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                    window.titleVisibility = .visible
+                    window.title = Localizer.shared.text("quickshare.title")
+                    window.titlebarAppearsTransparent = true
+                    window.isMovableByWindowBackground = true
+                    window.isRestorable = false
+                    window.styleMask.remove(.resizable)
+                    window.standardWindowButton(.closeButton)?.isHidden = false
+                    window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+                    window.standardWindowButton(.zoomButton)?.isHidden = true
+                    window.backgroundColor = .clear
+                    window.isOpaque = false
+                    
+                    NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+                        AppState.shared.showingQuickShareTransfer = false
+                        QuickShareManager.shared.stopDiscovery()
+                    }
+                }))
+        }
+        .defaultPosition(.topTrailing)
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+
+        Window("Mirror", id: "nativeMirror") {
+            if #available(macOS 15.0, *) {
+                ScrcpyMirrorView()
+                    .environmentObject(appState)
+                    .containerBackground(.ultraThinMaterial, for: .window)
+            } else {
+                ScrcpyMirrorView()
+                    .environmentObject(appState)
+            }
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 320, height: 680)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
+
+        Window("Desktop Mirror", id: "nativeDesktopMirror") {
+            if #available(macOS 15.0, *) {
+                NativeDesktopMirrorView()
+                    .environmentObject(appState)
+                    .containerBackground(.ultraThinMaterial, for: .window)
+            } else {
+                NativeDesktopMirrorView()
+                    .environmentObject(appState)
+            }
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 900, height: 560)
+        .windowStyle(.hiddenTitleBar)
+        .defaultPosition(.center)
+
+    }
+}
+
+extension View {
+    func applyMainWindowSetup(appDelegate: AppDelegate, appState: AppState) -> some View {
+        self.background(WindowAccessor(callback: { window in
+            window.identifier = NSUserInterfaceItemIdentifier("main")
+            appDelegate.mainWindow = window
+            // Make window transparent during onboarding
+            if appState.isOnboardingActive {
+                window.alphaValue = 0.0
+                window.isOpaque = false
+            } else {
+                window.alphaValue = 1.0
+                window.isOpaque = true
+            }
+        }, onOnboardingChange: { isActive in
+            guard let window = appDelegate.mainWindow else { return }
+            // Animate the transition
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.3
+                if isActive {
+                    window.animator().alphaValue = 0.0
+                    window.isOpaque = false
+                } else {
+                    window.animator().alphaValue = 1.0
+                    window.isOpaque = true
+                }
+            }
+        }))
+    }
+}

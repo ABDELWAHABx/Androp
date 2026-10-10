@@ -1,0 +1,29 @@
+Mozilla Public License Version 2.0
+==================================
+
+This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+If a copy of the MPL was not distributed with this file, you can obtain one at https://www.mozilla.org/MPL/2.0/.
+
+--------------------------------------------------------------------
+Additional Terms: Modified Build Redistribution Restriction
+--------------------------------------------------------------------
+
+In addition to the terms of the Mozilla Public License 2.0, the following conditions apply:
+
+1. Permissive Use
+   You are free to use, modify, and build this software for any purpose,
+   including personal, educational, or commercial use.
+
+2. Published builds should be signed by the publisher taking responsibility
+   Any changes you may apply on the source code must not be intentionally harmful in anyway and the publisher should take responsibility of the cause.
+
+3. License Inclusion Requirement
+   This license and the entire Additional Terms section must be retained in all
+   copies and derivative works created for private or internal use.
+
+4. No Trademark Rights
+   This license does not grant rights to use the project name, logo, or branding.
+
+--------------------------------------------------------------------
+END OF ADDITIONAL TERMS
+--------------------------------------------------------------------

@@ -1,0 +1,27 @@
+{
+  "tests": {
+    "tests": 56,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "lint": {
+    "Error": 0,
+    "Warning": 250,
+    "Hint": 10
+  },
+  "swift": {
+    "changed_files": 82,
+    "new_errors": 0,
+    "unchanged_parser_limitations": 4,
+    "power_policy_tests_added": 6,
+    "power_policy_tests_run": false
+  },
+  "native_mac_build": false,
+  "physical_device_testing": false,
+  "experimental_closed_lid": {
+    "default_enabled": false,
+    "runtime": "macOS 15",
+    "physical_behavior_verified": false
+  }
+}

@@ -1,0 +1,10 @@
+package app.androp.android.presentation.ui.models
+
+import androidx.annotation.StringRes
+import androidx.compose.ui.graphics.vector.ImageVector
+
+data class AirSyncTab(
+    @param:StringRes val title: Int,
+    val icon: ImageVector,
+    val index: Int
+)

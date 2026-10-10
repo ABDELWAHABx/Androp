@@ -1,0 +1,388 @@
+package app.androp.android.utils
+
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
+import app.androp.android.service.MediaNotificationListener
+
+object PermissionUtil {
+
+    fun isNotificationListenerEnabled(context: Context): Boolean {
+        val componentName = ComponentName(context, MediaNotificationListener::class.java)
+        val flat =
+            Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+        return flat.orEmpty().split(':').any {
+            ComponentName.unflattenFromString(it) == componentName
+        }
+    }
+
+    /**
+     * Check if the app is whitelisted from battery optimization
+     */
+    fun isBatteryOptimizationDisabled(context: Context): Boolean {
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        return powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    /**
+     * Check if battery optimization permission is required for this Android version
+     */
+    fun isBatteryOptimizationPermissionRequired(): Boolean {
+        return true // for min API level
+    }
+
+    /**
+     * Open battery optimization settings for the app
+     */
+    fun openBatteryOptimizationSettings(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = "package:${context.packageName}".toUri()
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            // Fallback to app-specific battery settings
+            openAppSpecificBatterySettings(context)
+        }
+    }
+
+    /**
+     * Open app-specific battery settings as alternative
+     */
+    fun openAppSpecificBatterySettings(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", context.packageName, null)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            // Final fallback to general battery optimization settings
+            openGeneralBatteryOptimizationSettings(context)
+        }
+    }
+
+    /**
+     * Open general battery optimization settings as fallback
+     */
+    fun openGeneralBatteryOptimizationSettings(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            // Final fallback to general settings
+            val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        }
+    }
+
+    /**
+     * Check if POST_NOTIFICATIONS permission is granted (Android 13+)
+     */
+    fun isPostNotificationPermissionGranted(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true // Not required on older versions
+        }
+    }
+
+    /**
+     * Check if ACCESS_LOCAL_NETWORK permission is granted (Android 17+)
+     */
+    fun isLocalNetworkPermissionGranted(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= 37) {
+            ContextCompat.checkSelfPermission(
+                context,
+                "android.permission.ACCESS_LOCAL_NETWORK"
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    /**
+     * Check if notification permissions are required for this Android version
+     */
+    fun isNotificationPermissionRequired(): Boolean {
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+    }
+
+    fun openNotificationListenerSettings(context: Context) {
+        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).apply {
+            putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                ComponentName(context, MediaNotificationListener::class.java).flattenToString())
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        try {
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            try {
+                context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (_: Exception) {
+                openAppSpecificBatterySettings(context)
+            }
+        }
+    }
+
+    /** User-initiated live update / Samsung Now bar configuration. */
+    fun openLiveUpdateSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= 36) {
+            try {
+                context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS).apply {
+                    data = "package:${context.packageName}".toUri()
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                })
+                return
+            } catch (_: Exception) { /* OEM may not expose the dedicated screen. */ }
+        }
+        try {
+            context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            })
+        } catch (_: Exception) {
+            openAppSpecificBatterySettings(context)
+        }
+    }
+
+    /**
+     * Check if MANAGE_EXTERNAL_STORAGE permission is granted (Android 11+)
+     */
+    fun hasManageExternalStoragePermission(): Boolean {
+        return try {
+            android.os.Environment.isExternalStorageManager()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Open MANAGE_EXTERNAL_STORAGE permission settings
+     */
+    fun openManageExternalStorageSettings(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = "package:${context.packageName}".toUri()
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        } catch (_: Exception) {
+            // Fallback to app settings
+            openAppSpecificBatterySettings(context)
+        }
+    }
+
+    /**
+     * Check if wallpaper access is available
+     */
+    fun hasWallpaperAccess(): Boolean {
+        return hasManageExternalStoragePermission()
+    }
+
+    fun getAllMissingPermissions(context: Context): List<String> {
+        val missing = mutableListOf<String>()
+
+        // Check notification listener permission (always required)
+        if (!isNotificationListenerEnabled(context)) {
+            missing.add("Notification Access")
+        }
+
+        // Check POST_NOTIFICATIONS permission (Android 13+)
+        if (isNotificationPermissionRequired() && !isPostNotificationPermissionGranted(context)) {
+            missing.add("Post Notifications")
+        }
+
+        // Check battery optimization permission
+        if (isBatteryOptimizationPermissionRequired() && !isBatteryOptimizationDisabled(context)) {
+            missing.add("Background App Usage")
+        }
+
+        // Check wallpaper/file access permission (optional)
+        if (!hasWallpaperAccess()) {
+            missing.add("Wallpaper & File Access")
+        }
+
+        // Check call log permission (optional)
+        if (!isCallLogPermissionGranted(context)) {
+            missing.add("Call Log Access")
+        }
+
+        // Check contacts permission (optional)
+        if (!isContactsPermissionGranted(context)) {
+            missing.add("Contacts Access")
+        }
+
+        // Check phone state permission (optional)
+        if (!isPhoneStatePermissionGranted(context)) {
+            missing.add("Phone Access")
+        }
+
+        if (!isBluetoothPermissionsGranted(context)) {
+            missing.add("Bluetooth Access")
+        }
+
+        if (Build.VERSION.SDK_INT >= 37 && !isLocalNetworkPermissionGranted(context)) {
+            missing.add("Local Network Access")
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isAnswerCallsPermissionGranted(
+                context
+            )
+        ) {
+            missing.add("Answer Calls")
+        }
+
+        return missing
+    }
+
+    /**
+     * Get permissions that are critical for app functionality
+     */
+    fun getCriticalMissingPermissions(context: Context): List<String> {
+        val critical = mutableListOf<String>()
+
+        // Notification access is feature-specific. Pairing, remote controls and file
+        // transfers must remain usable when the listener is disabled or OEM-blocked.
+        if (!isLocalNetworkPermissionGranted(context)) critical.add("Local Network Access")
+
+        return critical
+    }
+
+    /**
+     * Get permissions that are optional but recommended
+     */
+    fun getOptionalMissingPermissions(context: Context): List<String> {
+        val optional = mutableListOf<String>()
+
+        if (!isNotificationListenerEnabled(context)) optional.add("Notification Access")
+
+        // POST_NOTIFICATIONS is recommended but not critical
+        if (isNotificationPermissionRequired() && !isPostNotificationPermissionGranted(context)) {
+            optional.add("Post Notifications")
+        }
+
+        // Battery optimization is recommended for better reliability
+        if (isBatteryOptimizationPermissionRequired() && !isBatteryOptimizationDisabled(context)) {
+            optional.add("Background App Usage")
+        }
+
+        // Wallpaper/file access is optional, for wallpaper sync and the Mac File Access (WebDAV) feature
+        if (!hasWallpaperAccess()) {
+            optional.add("Wallpaper & File Access")
+        }
+
+        // Call log access is optional for call log sync
+        if (!isCallLogPermissionGranted(context)) {
+            optional.add("Call Log Access")
+        }
+
+        // Contacts access is optional for contacts sync
+        if (!isContactsPermissionGranted(context)) {
+            optional.add("Contacts Access")
+        }
+
+        // Phone state access is optional
+        if (!isPhoneStatePermissionGranted(context)) {
+            optional.add("Phone Access")
+        }
+
+        if (!isBluetoothPermissionsGranted(context)) {
+            optional.add("Bluetooth Access")
+        }
+
+        if (Build.VERSION.SDK_INT >= 37 && !isLocalNetworkPermissionGranted(context)) {
+            optional.add("Local Network Access")
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !isAnswerCallsPermissionGranted(
+                context
+            )
+        ) {
+            optional.add("Answer Calls")
+        }
+
+        return optional
+    }
+
+    /**
+     * Check if READ_CALL_LOG permission is granted
+     */
+    fun isCallLogPermissionGranted(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CALL_LOG
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Check if READ_CONTACTS permission is granted
+     */
+    fun isContactsPermissionGranted(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Check if READ_PHONE_STATE permission is granted
+     */
+    fun isPhoneStatePermissionGranted(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_PHONE_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
+     * Check if Bluetooth permissions are granted (Connect and Advertise/Scan on Android 12+)
+     */
+    fun isBluetoothPermissionsGranted(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED &&
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.BLUETOOTH_ADVERTISE
+                    ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            // On older versions, manifest permissions are enough
+            true
+        }
+    }
+
+    /**
+     * Check if ANSWER_PHONE_CALLS permission is granted
+     */
+    fun isAnswerCallsPermissionGranted(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ANSWER_PHONE_CALLS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+}

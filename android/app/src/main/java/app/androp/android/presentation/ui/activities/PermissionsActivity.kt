@@ -1,0 +1,219 @@
+package app.androp.android.presentation.ui.activities
+
+import android.Manifest
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberTopAppBarState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import app.androp.android.presentation.ui.screens.PermissionsScreen
+import app.androp.android.ui.theme.AirSyncTheme
+import app.androp.android.utils.PermissionUtil
+
+class PermissionsActivity : ComponentActivity() {
+
+    // Permission launchers
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        refreshUI()
+        app.androp.android.utils.SyncDashboardController.refreshNotification()
+    }
+
+    private val callLogPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { refreshUI() }
+
+    private val contactsPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { refreshUI() }
+
+    private val phonePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { refreshUI() }
+
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { refreshUI() }
+
+    private val localNetworkPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { refreshUI() }
+
+    private val answerCallsPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { refreshUI() }
+
+    private var refreshCounter by mutableStateOf(0)
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
+
+        super.onCreate(savedInstanceState)
+
+        // Disable scrim on 3-button navigation (API 29+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+
+        setContent {
+            val viewModel: app.androp.android.presentation.viewmodel.AirSyncViewModel =
+                androidx.lifecycle.viewmodel.compose.viewModel {
+                    app.androp.android.presentation.viewmodel.AirSyncViewModel.create(this@PermissionsActivity)
+                }
+            val uiState by viewModel.uiState.collectAsState()
+
+            AirSyncTheme(pitchBlackTheme = uiState.isPitchBlackThemeEnabled) {
+                val scrollBehavior =
+                    TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
+
+                Scaffold(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .nestedScroll(scrollBehavior.nestedScrollConnection),
+                    contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                    topBar = {
+                        TopAppBar(
+                            title = {
+                                Text("Permissions")
+                            },
+                            navigationIcon = {
+                                IconButton(onClick = { finish() }) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back"
+                                    )
+                                }
+                            },
+                            scrollBehavior = scrollBehavior
+                        )
+                    }
+                ) { innerPadding ->
+                    PermissionsScreen(
+                        modifier = Modifier.padding(innerPadding),
+                        onRequestNotificationPermission = {
+                            requestNotificationPermission()
+                        },
+                        onRequestCallLogPermission = {
+                            requestCallLogPermission()
+                        },
+                        onRequestContactsPermission = {
+                            requestContactsPermission()
+                        },
+                        onRequestPhonePermission = {
+                            requestPhonePermission()
+                        },
+                        onRequestBluetoothPermission = {
+                            requestBluetoothPermission()
+                        },
+                        onRequestLocalNetworkPermission = {
+                            requestLocalNetworkPermission()
+                        },
+                        onRequestAnswerCallsPermission = {
+                            requestAnswerCallsPermission()
+                        },
+                        refreshTrigger = refreshCounter
+                    )
+                }
+            }
+        }
+    }
+
+    private fun refreshUI() {
+        refreshCounter++
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (!PermissionUtil.isPostNotificationPermissionGranted(this)) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
+    private fun requestCallLogPermission() {
+        if (!PermissionUtil.isCallLogPermissionGranted(this)) {
+            callLogPermissionLauncher.launch(Manifest.permission.READ_CALL_LOG)
+        }
+    }
+
+    private fun requestContactsPermission() {
+        if (!PermissionUtil.isContactsPermissionGranted(this)) {
+            contactsPermissionLauncher.launch(Manifest.permission.READ_CONTACTS)
+        }
+    }
+
+    private fun requestPhonePermission() {
+        if (!PermissionUtil.isPhoneStatePermissionGranted(this)) {
+            phonePermissionLauncher.launch(Manifest.permission.READ_PHONE_STATE)
+        }
+    }
+
+    private fun requestBluetoothPermission() {
+        if (!PermissionUtil.isBluetoothPermissionsGranted(this)) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                bluetoothPermissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.BLUETOOTH_SCAN,
+                        Manifest.permission.BLUETOOTH_CONNECT,
+                        Manifest.permission.BLUETOOTH_ADVERTISE
+                    )
+                )
+            }
+        }
+    }
+
+    private fun requestLocalNetworkPermission() {
+        if (Build.VERSION.SDK_INT >= 37) {
+            if (!PermissionUtil.isLocalNetworkPermissionGranted(this)) {
+                localNetworkPermissionLauncher.launch("android.permission.ACCESS_LOCAL_NETWORK")
+            }
+        }
+    }
+
+    private fun requestAnswerCallsPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (!PermissionUtil.isAnswerCallsPermissionGranted(this)) {
+                answerCallsPermissionLauncher.launch(Manifest.permission.ANSWER_PHONE_CALLS)
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Refresh permissions display when returning to this activity
+        refreshUI()
+    }
+}
+

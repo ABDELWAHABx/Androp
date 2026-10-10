@@ -1,0 +1,2 @@
+// Private androp builds use the upstream self-compiled mode.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SELF_COMPILED

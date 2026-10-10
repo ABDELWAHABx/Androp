@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- App theme that adapts to system light/dark and avoids white flash by setting windowBackground -->
+    <style name="Theme.AirSync" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Ensure the initial window background matches theme mode -->
+        <item name="android:windowBackground">@android:color/transparent</item>
+
+        <!-- Explicitly disable any system action bar/title -->
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+
+        <!-- Light icons true for light theme (black icons) -->
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <style name="Theme.AirSync.Transparent" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+
+        <item name="android:windowIsTranslucent">true</item>
+
+        <item name="android:windowIsFloating">false</item>
+
+        <item name="android:windowAnimationStyle">@android:style/Animation</item>
+    </style>
+</resources>

@@ -1,0 +1,100 @@
+name: Build androp Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source branch to build
+        default: androp
+        type: string
+      release_tag:
+        description: Private prerelease tag (leave blank for build artifacts only)
+        required: false
+        default: ''
+  push:
+    branches: [androp]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: androp-android-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android
+    permissions:
+      contents: write
+    env:
+      ANDROP_KEYSTORE: ${{ secrets.ANDROP_ANDROID_KEYSTORE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.ref_name }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install SDK
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Build and verify
+        run: bash ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug --no-daemon --console=plain --max-workers=2
+      - name: Package CI preview
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/androp-android-debug-ci.apk
+          printf '%s\n' 'CI debug builds use a temporary signing identity and cannot replace an installed private release. Use the signed APK in Releases for installation.' > dist/README.txt
+      - name: Sign private optimized APK
+        if: env.ANDROP_KEYSTORE != ''
+        run: |
+          set -euo pipefail
+          test -n "$ANDROP_KEYSTORE" || { echo 'Missing private Android signing keystore secret'; exit 1; }
+          umask 077
+          printf '%s' "$ANDROP_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/androp.keystore"
+          mkdir -p dist
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/androp-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks "$RUNNER_TEMP/androp.keystore" --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android --out dist/androp-android.apk "$RUNNER_TEMP/androp-aligned.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose dist/androp-android.apk
+          rm -f "$RUNNER_TEMP/androp.keystore"
+          sha256sum dist/androp-android.apk > dist/SHA256SUMS-android.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: androp-android
+          path: android/dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish private download
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && env.ANDROP_KEYSTORE != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^androp-[A-Za-z0-9._-]+$ ]] || { echo 'Use an androp- prefixed tag'; exit 1; }
+          if ! gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --target "$COMMIT_SHA" --title "$RELEASE_TAG" --prerelease --notes 'Private personal androp build. Android uses a development signing identity; keep this key for compatible updates. Closed-lid Mac behavior remains experimental.'
+          fi
+          gh release upload "$RELEASE_TAG" dist/androp-android.apk dist/SHA256SUMS-android.txt --repo "$REPOSITORY" --clobber
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: androp-android-reports
+          path: |
+            android/app/build/reports/lint-results-debug.html
+            android/app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
+          retention-days: 14

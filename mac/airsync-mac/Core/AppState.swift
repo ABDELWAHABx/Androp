@@ -1,0 +1,2209 @@
+//
+//  AppState.swift
+//  airsync-mac
+//
+//  Created by Sameera Sandakelum on 2025-07-29.
+//
+import SwiftUI
+import ServiceManagement
+import Foundation
+import Cocoa
+import Combine
+import UserNotifications
+import AVFoundation
+
+class AppState: ObservableObject {
+    static let shared = AppState()
+    
+    enum ADBConnectionMode: String, Codable {
+        case wireless
+        case wired
+    }
+
+    enum AppConnectionMode: String, CaseIterable, Identifiable {
+        case network = "network"
+        case dynamic = "dynamic"
+        case nearby = "nearby"
+        
+        var id: String { rawValue }
+        
+        var displayName: String {
+            switch self {
+            case .network: return L("connectionMode.network")
+            case .dynamic: return L("connectionMode.dynamic")
+            case .nearby: return L("connectionMode.nearby")
+            }
+        }
+    }
+
+    private var notificationSyncTimer: Timer?
+    @Published private(set) var isSyncPaused = UserDefaults.standard.bool(forKey: "isSyncPaused")
+
+    private var clipboardCancellable: AnyCancellable?
+    private var lastClipboardValue: String? = nil
+    private var lastClipboardChangeCount: Int = -1
+    private struct PendingClipboard {
+        let id: String
+        let text: String
+        let videoHandoff: Bool
+        var attempts = 0
+        var deadline = Date.distantPast
+    }
+    private var clipboardOutbox: [PendingClipboard] = []
+    private var clipboardRetryWorkItem: DispatchWorkItem?
+    private var clipboardReceivedIDs: [String] = []
+    private var lastDeliveredClipboardText: String?
+    @Published var clipboardDeliveryStatus = ""
+    private var shouldSkipSave = false
+    private var cancellables = Set<AnyCancellable>()
+    private var bleWakeUpWorkItem: DispatchWorkItem?
+    private static let licenseDetailsKey = "licenseDetails"
+
+    @Published var isOS26: Bool = true
+
+    init() {
+        self.deviceAdbSerials = UserDefaults.standard.dictionary(forKey: "deviceAdbSerials") as? [String: String] ?? [:]
+        self.selectedWiredSerial = UserDefaults.standard.string(forKey: "selectedWiredSerial")
+
+        let isPlusLoaded = UserDefaults.standard.bool(forKey: "isPlus")
+        self.isPlus = isPlusLoaded
+
+        let adbPortValue = UserDefaults.standard.integer(forKey: "adbPort")
+        self.adbPort = adbPortValue == 0 ? 5555 : UInt16(adbPortValue)
+        self.adbConnectedIP = UserDefaults.standard.string(forKey: "adbConnectedIP") ?? ""
+        self.mirroringPlus = UserDefaults.standard.bool(forKey: "mirroringPlus")
+        self.adbEnabled = UserDefaults.standard.bool(forKey: "adbEnabled")
+        self.wiredAdbEnabled = UserDefaults.standard.bool(forKey: "wiredAdbEnabled")
+        self.suppressAdbFailureAlerts = UserDefaults.standard.bool(forKey: "suppressAdbFailureAlerts")
+        
+        let savedFallbackToMdns = UserDefaults.standard.object(forKey: "fallbackToMdns")
+        self.fallbackToMdns = savedFallbackToMdns == nil ? true : UserDefaults.standard.bool(forKey: "fallbackToMdns")
+
+        let savedShowInMenubar = UserDefaults.standard.object(forKey: "showInMenubar")
+        self.showInMenubar = savedShowInMenubar == nil ? true : UserDefaults.standard.bool(forKey: "showInMenubar")
+
+        self.showMenubarText = UserDefaults.standard.bool(forKey: "showMenubarText")
+        self.showMenubarDeviceName = UserDefaults.standard.object(forKey: "showMenubarDeviceName") == nil ? true : UserDefaults.standard.bool(forKey: "showMenubarDeviceName")
+
+        let savedMaxLength = UserDefaults.standard.integer(forKey: "menubarTextMaxLength")
+        // Values < 50 are from the old char-count era; migrate them to the new point-width default
+        self.menubarTextMaxLength = (savedMaxLength >= 50) ? savedMaxLength : 150
+
+        self.showMenubarIcon = UserDefaults.standard.object(forKey: "showMenubarIcon") == nil ? true : UserDefaults.standard.bool(forKey: "showMenubarIcon")
+        self.menubarBatteryStyle = UserDefaults.standard.string(forKey: "menubarBatteryStyle") ?? "both"
+        self.showMenubarMusicIcon = UserDefaults.standard.object(forKey: "showMenubarMusicIcon") == nil ? true : UserDefaults.standard.bool(forKey: "showMenubarMusicIcon")
+        self.showMenubarAlbumArt = UserDefaults.standard.object(forKey: "showMenubarAlbumArt") == nil ? true : UserDefaults.standard.bool(forKey: "showMenubarAlbumArt")
+        if UserDefaults.standard.object(forKey: "showMenubarCallDetails") == nil {
+            self.showMenubarCallDetails = isPlusLoaded
+        } else {
+            self.showMenubarCallDetails = UserDefaults.standard.bool(forKey: "showMenubarCallDetails") && (!licenseCheck || isPlusLoaded)
+        }
+        self.menubarFontSize = UserDefaults.standard.object(forKey: "menubarFontSize") == nil ? 12.0 : UserDefaults.standard.double(forKey: "menubarFontSize")
+        self.enableMarquee = UserDefaults.standard.bool(forKey: "enableMarquee")
+        self.menubarUnreadBadgeStyle = UserDefaults.standard.string(forKey: "menubarUnreadBadgeStyle") ?? "badge"
+        self.menubarUnreadBadgeColor = UserDefaults.standard.string(forKey: "menubarUnreadBadgeColor") ?? "accent"
+        self.showMenubarPillStroke = UserDefaults.standard.bool(forKey: "showMenubarPillStroke")
+        self.menubarNotificationStyle = UserDefaults.standard.string(forKey: "menubarNotificationStyle") ?? "both"
+
+        self.isClipboardSyncEnabled = UserDefaults.standard.bool(forKey: "isClipboardSyncEnabled")
+        self.autoStartAtLogin = UserDefaults.standard.bool(forKey: "autoStartAtLogin")
+        self.keepRunningAfterQuit = UserDefaults.standard.bool(forKey: "keepRunningAfterQuit")
+        self.shortcutScopes = UserDefaults.standard.dictionary(forKey: "shortcutScopes") as? [String: String] ?? [:]
+        self.windowOpacity = UserDefaults.standard.double(forKey: "windowOpacity")
+        self.hideDockIcon = UserDefaults.standard.bool(forKey: "hideDockIcon")
+        self.alwaysOpenWindow = UserDefaults.standard.bool(forKey: "alwaysOpenWindow")
+        self.notificationSound = UserDefaults.standard.string(forKey: "notificationSound") ?? "default"
+        self.dismissNotif = UserDefaults.standard.bool(forKey: "dismissNotif")
+        self.silenceAllNotifications = UserDefaults.standard.bool(forKey: "silenceAllNotifications")
+        
+        self.autoAcceptQuickShare = UserDefaults.standard.bool(forKey: "autoAcceptQuickShare")
+        self.quickShareEnabled = UserDefaults.standard.object(forKey: "quickShareEnabled") == nil ? true : UserDefaults.standard.bool(forKey: "quickShareEnabled")
+        self.isFileAccessEnabled = UserDefaults.standard.object(forKey: "isFileAccessEnabled") == nil ? true : UserDefaults.standard.bool(forKey: "isFileAccessEnabled")
+        self.popupSharedImages = UserDefaults.standard.object(forKey: "popupSharedImages") == nil ? true : UserDefaults.standard.bool(forKey: "popupSharedImages")
+        let limit = UserDefaults.standard.integer(forKey: "sharedImagePopupsLimit")
+        self.sharedImagePopupsLimit = limit == 0 ? 3 : limit
+        self.popupSharedImagesOnLeft = UserDefaults.standard.bool(forKey: "popupSharedImagesOnLeft")
+        self.showSummonedFiles = UserDefaults.standard.object(forKey: "showSummonedFiles") == nil ? true : UserDefaults.standard.bool(forKey: "showSummonedFiles")
+
+        let savedNotificationMode = UserDefaults.standard.string(forKey: "callNotificationMode") ?? CallNotificationMode.popup.rawValue
+        self.callNotificationMode = CallNotificationMode(rawValue: savedNotificationMode) ?? .popup
+
+        self.ringForCalls = UserDefaults.standard.object(forKey: "ringForCalls") == nil ? true : UserDefaults.standard.bool(forKey: "ringForCalls")
+        self.sendNowPlayingStatus = UserDefaults.standard.object(forKey: "sendNowPlayingStatus") == nil ? true : UserDefaults.standard.bool(forKey: "sendNowPlayingStatus")
+        self.autoOpenLinks = UserDefaults.standard.bool(forKey: "autoOpenLinks")
+        self.openAppOnNotificationClick = UserDefaults.standard.bool(forKey: "openAppOnNotificationClick")
+
+        var bRate = UserDefaults.standard.integer(forKey: "scrcpyBitrate")
+        if bRate == 0 { bRate = 4 }
+        self.scrcpyBitrate = bRate
+
+        var res = UserDefaults.standard.integer(forKey: "scrcpyResolution")
+        if res == 0 { res = 1200 }
+        self.scrcpyResolution = res
+
+        self.useADBWhenPossible = UserDefaults.standard.object(forKey: "useADBWhenPossible") == nil ? true : UserDefaults.standard.bool(forKey: "useADBWhenPossible")
+        self.useNativeMirroringByDefault = UserDefaults.standard.bool(forKey: "useNativeMirroringByDefault")
+        self.useNativeDesktopMirroringByDefault = UserDefaults.standard.bool(forKey: "useNativeDesktopMirroringByDefault")
+        self.isMusicCardHidden = UserDefaults.standard.bool(forKey: "isMusicCardHidden")
+        
+        self.disableAllAIFeatures = UserDefaults.standard.bool(forKey: "disableAllAIFeatures")
+        self.showAIToolbarButton = UserDefaults.standard.object(forKey: "showAIToolbarButton") == nil ? true : UserDefaults.standard.bool(forKey: "showAIToolbarButton")
+        self.includeSilentInAIOption = UserDefaults.standard.bool(forKey: "includeSilentInAIOption")
+        self.enableMenubarAISummary = UserDefaults.standard.bool(forKey: "enableMenubarAISummary")
+        self.autoMenubarSummary = UserDefaults.standard.bool(forKey: "autoMenubarSummary")
+        self.alwaysKillAdbBeforeConnect = UserDefaults.standard.bool(forKey: "alwaysKillAdbBeforeConnect")
+
+        let savedCrashReportingMode = UserDefaults.standard.string(forKey: "crashReportingMode") ?? CrashReportingMode.manual.rawValue
+        self.crashReportingMode = CrashReportingMode(rawValue: savedCrashReportingMode) ?? .manual
+
+        let savedAdapterName = UserDefaults.standard.string(forKey: "selectedNetworkAdapterName")
+        let validatedAdapter = AppState.validateAndGetNetworkAdapter(savedName: savedAdapterName)
+        self.selectedNetworkAdapterName = validatedAdapter
+        
+        let adapterIP = WebSocketServer.shared.getLocalIPAddress(adapterName: validatedAdapter) ?? "N/A"
+        let deviceName = UserDefaults.standard.string(forKey: "deviceName") ?? (Host.current().localizedName ?? "My Mac")
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0.0"
+        let portNumStr = UserDefaults.standard.string(forKey: "devicePort") ?? String(Defaults.serverPort)
+        let portNum = Int(portNumStr) ?? Int(Defaults.serverPort)
+
+        self.myDevice = Device(
+            name: deviceName,
+            ipAddress: adapterIP,
+            port: portNum,
+            version: appVersion,
+            adbPorts: [],
+            deviceId: UserDefaults.standard.string(forKey: "trialDeviceIdentifier") ?? "mac_device"
+        )
+        
+        self.licenseDetails = AppState.loadLicenseDetailsFromUserDefaults()
+
+        let savedConnectionModeStr = UserDefaults.standard.string(forKey: "appConnectionMode")
+        if let savedMode = savedConnectionModeStr.flatMap(AppConnectionMode.init(rawValue:)) {
+            self.connectionMode = savedMode
+            self.isBLEEnabled = (savedMode != .network)
+        } else if UserDefaults.standard.object(forKey: "isBLEEnabled") != nil {
+            let legacyBle = UserDefaults.standard.bool(forKey: "isBLEEnabled")
+            self.connectionMode = legacyBle ? .dynamic : .network
+            self.isBLEEnabled = legacyBle
+        } else {
+            self.connectionMode = .dynamic
+            self.isBLEEnabled = true
+        }
+
+        self.isBLEAutoConnectEnabled = UserDefaults.standard.object(forKey: "isBLEAutoConnectEnabled") == nil ? true : UserDefaults.standard.bool(forKey: "isBLEAutoConnectEnabled")
+        self.isAutoSwitchWithBLEEnabled = UserDefaults.standard.object(forKey: "isAutoSwitchWithBLEEnabled") == nil ? true : UserDefaults.standard.bool(forKey: "isAutoSwitchWithBLEEnabled")
+
+        if isBLEEnabled && !isSyncPaused {
+            DispatchQueue.main.async {
+                guard self.isBLEEnabled, !self.isSyncPaused else { return }
+                BLECentralManager.shared.startScanning()
+            }
+        }
+
+        BLECentralManager.shared.$connectionStatus
+            .receive(on: RunLoop.main)
+            .sink { [weak self] status in
+                self?.handleBLEStatusChange(status)
+            }
+            .store(in: &cancellables)
+
+        if isClipboardSyncEnabled {
+            startClipboardMonitoring()
+        }
+
+        #if SELF_COMPILED
+        self.isPlus = true
+        UserDefaults.standard.set(true, forKey: "isPlus")
+        UserDefaults.standard.lastLicenseSuccessfulCheckDate = Date().addingTimeInterval(-(24 * 60 * 60))
+        #else
+        Task {
+            // Delay startup check by 5 minutes (300 seconds) to ensure network connection is fully established
+            try? await Task.sleep(nanoseconds: 300_000_000_000)
+            await Gumroad().checkLicenseIfNeeded()
+        }
+        #endif
+
+        if !self.isPlus && licenseCheck {
+            self.showMenubarAlbumArt = false
+            self.menubarNotificationStyle = "count"
+        }
+
+        loadAppsFromDisk()
+        loadPinnedApps()
+        loadNotificationLaunchPreferences()
+        
+        // Ensure dock icon visibility is applied on launch
+        updateDockIconVisibility()
+        updateAutoStart()
+
+        // Reset mirroring state on launch to prevent auto-opening if it was open during last session
+        self.isNativeMirroring = false
+        self.isNativeDesktopMirroring = false
+
+        // Cleanup stale WebDAV mounts from previous sessions
+        WebDAVManager.shared.unmount()
+    }
+
+    @Published var minAndroidVersion = Bundle.main.infoDictionary?["AndroidVersion"] as? String ?? "2.0.0"
+
+    @Published var device: Device? = nil {
+        didSet {
+            if oldValue?.deviceId != device?.deviceId {
+                clipboardRetryWorkItem?.cancel()
+                clipboardRetryWorkItem = nil
+                if !clipboardOutbox.isEmpty { clipboardDeliveryStatus = "Clipboard delivery cancelled: device changed" }
+                clipboardOutbox.removeAll()
+                lastDeliveredClipboardText = nil
+                clipboardReceivedIDs.removeAll()
+            }
+            updateConnectionMonitoring()
+            // Store the last connected device when a new device connects
+            if let newDevice = device {
+                UserDefaults.standard.isManuallyDisconnected = false
+                QuickConnectManager.shared.saveLastConnectedDevice(newDevice)
+                // Validate pinned apps when connecting to a device
+                validatePinnedApps()
+                loadRecentApps()
+
+                // Mount WebDAV volume
+                if newDevice.isRegularConnection && isPlus && isFileAccessEnabled {
+                    WebDAVManager.shared.mount(ipAddress: newDevice.ipAddress, port: 9081, volumeName: newDevice.name)
+                }
+            } else {
+                recentApps = []
+                WebDAVManager.shared.unmount()
+            }
+
+            // Automatically switch to the appropriate tab when device connection state changes
+            if device == nil {
+                self.selectedTab = .qr
+                self.isConnectionWeak = false
+            } else if oldValue == nil {
+                self.selectedTab = .notifications
+            }
+
+            if let d = device, !d.isBLE, !d.name.isEmpty {
+                UserDefaults.standard.set(d.name, forKey: "lastRegularDeviceName")
+            }
+
+            // BLE connection management: Wi-Fi priority over BLE
+            let isRegularConnection = device?.isRegularConnection ?? false
+            let wasRegularConnection = oldValue?.isRegularConnection ?? false
+
+            if isRegularConnection {
+                // Regular connection established — immediately put BLE to idle (stop scan) and reset manual disconnect flag
+                if isBLEEnabled {
+                    print("[state] Regular connection active — stopping BLE scan")
+                    BLECentralManager.shared.stopScanning()
+                    if BLECentralManager.shared.isConnected {
+                        BLECentralManager.shared.disconnect()
+                    }
+                    BLECentralManager.shared.isManuallyDisconnected = false
+                }
+                // Cancel any pending delayed BLE wake-up tasks
+                self.bleWakeUpWorkItem?.cancel()
+                self.bleWakeUpWorkItem = nil
+            } else if !isRegularConnection && wasRegularConnection {
+                // Regular connection lost — schedule BLE scanning after 5 seconds to give Wi-Fi a chance to reconnect
+                self.bleWakeUpWorkItem?.cancel()
+                let workItem = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    let stillDisconnected = self.device == nil || self.device?.isBLE == true
+                    if stillDisconnected && !self.isSyncPaused && self.isBLEEnabled && self.isBLEAutoConnectEnabled
+                        && !BLECentralManager.shared.isAuthenticated
+                        && !UserDefaults.standard.isManuallyDisconnected {
+                        print("[state] Regular connection stayed lost for 5s — resuming BLE scan to auto-connect nearby")
+                        BLECentralManager.shared.isManuallyDisconnected = false
+                        BLECentralManager.shared.startScanning()
+                    }
+                }
+                self.bleWakeUpWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: workItem)
+            }
+        }
+    }
+    @Published var notifications: [Notification] = []
+    @Published var activeMacIp: String? = nil
+    @Published var callEvents: [CallEvent] = []
+    private var callDurationTimer: AnyCancellable?
+    @Published var activeCallDurationSec: Int = 0
+    @Published var lastCallProgressReceived: Date? = nil
+
+    @Published var activeCall: CallEvent? = nil {
+        didSet {
+            if activeCall != nil {
+                lastCallProgressReceived = Date()
+                startCallTimer()
+            } else {
+                lastCallProgressReceived = nil
+                stopCallTimer()
+            }
+        }
+    }
+    
+    private func startCallTimer() {
+        callDurationTimer?.cancel()
+        
+        if let call = activeCall {
+            activeCallDurationSec = max(0, Int(Date().timeIntervalSince1970 - Double(call.timestamp) / 1000.0))
+        }
+        
+        // .default mode lets the OS coalesce the timer under load; tolerance allows up to 0.5s slip
+        let timer = Timer.publish(every: 1.0, tolerance: 0.2, on: .main, in: .default).autoconnect()
+        callDurationTimer = timer
+            .sink { [weak self] _ in
+                guard let self = self, let call = self.activeCall else {
+                    self?.stopCallTimer()
+                    return
+                }
+                self.activeCallDurationSec = max(0, Int(Date().timeIntervalSince1970 - Double(call.timestamp) / 1000.0))
+                
+                if let lastProgress = self.lastCallProgressReceived {
+                    let timeSinceProgress = Date().timeIntervalSince(lastProgress)
+                    if timeSinceProgress > 12.0 {
+                        print("[state] No call progress received for 12 seconds. Auto-dismissing call.")
+                        self.activeCall = nil
+                        let allEventIds = self.callEvents.map { $0.eventId }
+                        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: allEventIds)
+                        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: allEventIds)
+                        self.stopCallRingtone()
+                        
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            self.callEvents.removeAll()
+                        }
+                    }
+                }
+            }
+    }
+    
+    private func stopCallTimer() {
+        callDurationTimer?.cancel()
+        callDurationTimer = nil
+        activeCallDurationSec = 0
+    }
+    @Published var status: DeviceStatus? = nil {
+        didSet {
+            syncMediaTimerToPlayState()
+            updateWidgetData()
+        }
+    }
+    @Published var myDevice: Device? = nil {
+        didSet {
+            updateWidgetData()
+        }
+    }
+    @Published var port: UInt16 = Defaults.serverPort
+    @Published var androidApps: [String: AndroidApp] = [:]
+    @Published var notificationLaunchPreferences: [String: MacAppLaunchPreference] = [:]
+    /// Set to trigger the "configure notification click action" sheet for a specific package
+    @Published var configuringLaunchPreferenceFor: String? = nil
+
+    @Published var pinnedApps: [PinnedApp] = [] {
+        didSet {
+            savePinnedApps()
+        }
+    }
+
+    @Published var deviceWallpapers: [String: String] = [:] // key = deviceName-ip, value = file path
+    @Published var isClipboardSyncEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isClipboardSyncEnabled, forKey: "isClipboardSyncEnabled")
+            if isClipboardSyncEnabled {
+                startClipboardMonitoring()
+            } else {
+                stopClipboardMonitoring()
+            }
+        }
+    }
+    @Published var shouldRefreshQR: Bool = false
+    @Published var isConnectionWeak: Bool = false
+    @Published var webSocketStatus: WebSocketStatus = .stopped
+    @Published var selectedTab: TabIdentifier = .qr
+    @Published var selectedSettingsTab: SettingsTab = .myMac
+
+    @Published var adbConnected: Bool = false {
+        didSet {
+            if !adbConnected {
+                adbConnectionMode = nil
+            }
+        }
+    }
+    @Published var adbConnecting: Bool = false
+    @Published var manualAdbConnectionPending: Bool = false
+    @Published var userInitiatedAdbConnect: Bool = false
+    @Published var currentDeviceWallpaperBase64: String? = nil
+    @Published var isMenubarWindowOpen: Bool = false
+    @Published var adbConnectionMode: ADBConnectionMode? = nil
+    
+    @Published var recentApps: [AndroidApp] = []
+    @Published var isNativeMirroring: Bool = false {
+        didSet {
+            if isNativeMirroring {
+                if isSidebarMirroring { isSidebarMirroring = false }
+                if isNativeDesktopMirroring { isNativeDesktopMirroring = false }
+            }
+        }
+    }
+    @Published var isSidebarMirroring: Bool = false {
+        didSet {
+            if isSidebarMirroring {
+                if isNativeMirroring { isNativeMirroring = false }
+                if isNativeDesktopMirroring { isNativeDesktopMirroring = false }
+            }
+        }
+    }
+    @Published var isNativeDesktopMirroring: Bool = false {
+        didSet {
+            if isNativeDesktopMirroring {
+                if isNativeMirroring { isNativeMirroring = false }
+                if isSidebarMirroring { isSidebarMirroring = false }
+            }
+        }
+    }
+    @Published var temporaryDragLabel: String? = nil
+    
+    // MARK: - Centralized Media Seekbar State
+    @Published var mediaPosition: Double = 0
+    var isDraggingMedia: Bool = false
+    var lastMediaSeekTime: Date = .distantPast
+    var seekTargetPosition: Double = -1
+    private var mediaTickTimer: AnyCancellable?
+    
+    var isConnectedOverLocalNetwork: Bool {
+        guard let device = device, device.isRegularConnection else { return false }
+        // Tailscale IPs usually start with 100.
+        return !device.ipAddress.hasPrefix("100.")
+    }
+
+    // Audio player for ringtone
+    private var ringtonePlayer: AVAudioPlayer?
+
+    @Published var selectedNetworkAdapterName: String? { // e.g., "en0"
+        didSet {
+            UserDefaults.standard.set(selectedNetworkAdapterName, forKey: "selectedNetworkAdapterName")
+        }
+    }
+    @Published var deviceAdbSerials: [String: String] {
+        didSet {
+            UserDefaults.standard.set(deviceAdbSerials, forKey: "deviceAdbSerials")
+        }
+    }
+
+    @Published var selectedWiredSerial: String? {
+        didSet {
+            UserDefaults.standard.set(selectedWiredSerial, forKey: "selectedWiredSerial")
+        }
+    }
+
+    @Published var showMenubarText: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarText, forKey: "showMenubarText")
+        }
+    }
+
+    @Published var showMenubarDeviceName: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarDeviceName, forKey: "showMenubarDeviceName")
+        }
+    }
+
+    @Published var menubarTextMaxLength: Int {
+        didSet {
+            UserDefaults.standard.set(menubarTextMaxLength, forKey: "menubarTextMaxLength")
+        }
+    }
+
+    @Published var enableMarquee: Bool {
+        didSet {
+            UserDefaults.standard.set(enableMarquee, forKey: "enableMarquee")
+        }
+    }
+
+    @Published var showMenubarIcon: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarIcon, forKey: "showMenubarIcon")
+        }
+    }
+
+    @Published var menubarBatteryStyle: String {
+        didSet {
+            UserDefaults.standard.set(menubarBatteryStyle, forKey: "menubarBatteryStyle")
+        }
+    }
+
+    @Published var showMenubarMusicIcon: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarMusicIcon, forKey: "showMenubarMusicIcon")
+        }
+    }
+
+    @Published var showMenubarAlbumArt: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarAlbumArt, forKey: "showMenubarAlbumArt")
+        }
+    }
+
+    @Published var menubarFontSize: Double {
+        didSet {
+            UserDefaults.standard.set(menubarFontSize, forKey: "menubarFontSize")
+        }
+    }
+
+    @Published var menubarUnreadBadgeStyle: String {
+        didSet {
+            UserDefaults.standard.set(menubarUnreadBadgeStyle, forKey: "menubarUnreadBadgeStyle")
+        }
+    }
+
+    @Published var menubarUnreadBadgeColor: String {
+        didSet {
+            UserDefaults.standard.set(menubarUnreadBadgeColor, forKey: "menubarUnreadBadgeColor")
+        }
+    }
+
+    @Published var showMenubarPillStroke: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarPillStroke, forKey: "showMenubarPillStroke")
+        }
+    }
+
+    @Published var menubarNotificationStyle: String {
+        didSet {
+            UserDefaults.standard.set(menubarNotificationStyle, forKey: "menubarNotificationStyle")
+        }
+    }
+
+    @Published var showMenubarCallDetails: Bool {
+        didSet {
+            UserDefaults.standard.set(showMenubarCallDetails, forKey: "showMenubarCallDetails")
+        }
+    }
+
+    var recentNotifyingPackages: [String] {
+        var packages: [String] = []
+        for notif in notifications {
+            if notif.priority != "silent" {
+                if !packages.contains(notif.package) {
+                    packages.append(notif.package)
+                    if packages.count == 3 {
+                        break
+                    }
+                }
+            }
+        }
+        return packages
+    }
+
+    @Published var scrcpyBitrate: Int = 4 {
+        didSet {
+            UserDefaults.standard.set(scrcpyBitrate, forKey: "scrcpyBitrate")
+        }
+    }
+
+    @Published var scrcpyResolution: Int = 1200 {
+        didSet {
+            UserDefaults.standard.set(scrcpyResolution, forKey: "scrcpyResolution")
+        }
+    }
+
+    @Published var licenseDetails: LicenseDetails? {
+        didSet {
+            saveLicenseDetailsToUserDefaults()
+        }
+    }
+
+    @Published var lastLicenseCheckFailureReason: String? = nil
+
+    @Published var adbPort: UInt16 {
+        didSet {
+            UserDefaults.standard.set(adbPort, forKey: "adbPort")
+        }
+    }
+
+    @Published var adbConnectedIP: String = "" {
+        didSet {
+            UserDefaults.standard.set(adbConnectedIP, forKey: "adbConnectedIP")
+        }
+    }
+
+    @Published var adbConnectionResult: String? = nil
+
+    @Published var mirroringPlus: Bool {
+        didSet {
+            UserDefaults.standard.set(mirroringPlus, forKey: "mirroringPlus")
+        }
+    }
+
+    @Published var adbEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(adbEnabled, forKey: "adbEnabled")
+        }
+    }
+    @Published var wiredAdbEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(wiredAdbEnabled, forKey: "wiredAdbEnabled")
+        }
+    }
+
+    @Published var suppressAdbFailureAlerts: Bool {
+        didSet {
+            UserDefaults.standard.set(suppressAdbFailureAlerts, forKey: "suppressAdbFailureAlerts")
+        }
+    }
+
+    @Published var fallbackToMdns: Bool {
+        didSet {
+            UserDefaults.standard.set(fallbackToMdns, forKey: "fallbackToMdns")
+        }
+    }
+
+    @Published var windowOpacity: Double {
+        didSet {
+            UserDefaults.standard.set(windowOpacity, forKey: "windowOpacity")
+        }
+    }
+
+    @Published var showInMenubar: Bool {
+        didSet {
+            UserDefaults.standard.set(showInMenubar, forKey: "showInMenubar")
+        }
+    }
+
+    @Published var hideDockIcon: Bool {
+        didSet {
+            UserDefaults.standard.set(hideDockIcon, forKey: "hideDockIcon")
+            if hideDockIcon {
+                showInMenubar = true
+            }
+            updateDockIconVisibility()
+        }
+    }
+
+    @Published var autoStartAtLogin: Bool {
+        didSet {
+            UserDefaults.standard.set(autoStartAtLogin, forKey: "autoStartAtLogin")
+            updateAutoStart()
+        }
+    }
+
+    @Published var keepRunningAfterQuit: Bool {
+        didSet {
+            UserDefaults.standard.set(keepRunningAfterQuit, forKey: "keepRunningAfterQuit")
+        }
+    }
+
+    @Published var closeMainWindowTrigger = 0
+
+    @Published var shortcutScopes: [String: String] = [:] {
+        didSet {
+            UserDefaults.standard.set(shortcutScopes, forKey: "shortcutScopes")
+        }
+    }
+
+    func scope(for shortcutID: String) -> ShortcutScope {
+        if let raw = shortcutScopes[shortcutID], let scope = ShortcutScope(rawValue: raw) {
+            return scope
+        }
+        return AppShortcuts.all.first(where: { $0.id == shortcutID })?.defaultScope ?? .inApp
+    }
+
+    func setScope(_ scope: ShortcutScope, for definition: AppShortcutDefinition) {
+        shortcutScopes[definition.id] = scope.rawValue
+        ShortcutManager.applyScope(for: definition)
+    }
+
+    @Published var connectionMode: AppConnectionMode {
+        didSet {
+            UserDefaults.standard.set(connectionMode.rawValue, forKey: "appConnectionMode")
+            let bleShouldBeEnabled = (connectionMode != .network)
+            if self.isBLEEnabled != bleShouldBeEnabled {
+                self.isBLEEnabled = bleShouldBeEnabled
+            }
+            if connectionMode == .nearby {
+                DiscoveryManager.shared.stop()
+            } else {
+                if device == nil || device?.isBLE == true {
+                    DiscoveryManager.shared.start()
+                }
+            }
+        }
+    }
+
+    @Published var isBLEEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isBLEEnabled, forKey: "isBLEEnabled")
+            if isBLEEnabled && !isSyncPaused {
+                BLECentralManager.shared.isManuallyDisconnected = false
+                BLECentralManager.shared.startScanning()
+            } else {
+                BLECentralManager.shared.stopScanning()
+                BLECentralManager.shared.disconnect()
+            }
+        }
+    }
+
+    @Published var isBLEAutoConnectEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isBLEAutoConnectEnabled, forKey: "isBLEAutoConnectEnabled")
+            if isBLEAutoConnectEnabled {
+                BLECentralManager.shared.isManuallyDisconnected = false
+            }
+        }
+    }
+
+    @Published var isAutoSwitchWithBLEEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isAutoSwitchWithBLEEnabled, forKey: "isAutoSwitchWithBLEEnabled")
+            DiscoveryManager.shared.updateAvailableWifiDevice()
+        }
+    }
+
+    @Published var alwaysOpenWindow: Bool {
+        didSet {
+            UserDefaults.standard.set(alwaysOpenWindow, forKey: "alwaysOpenWindow")
+        }
+    }
+
+    @Published var notificationSound: String {
+        didSet {
+            UserDefaults.standard.set(notificationSound, forKey: "notificationSound")
+        }
+    }
+
+    @Published var dismissNotif: Bool {
+        didSet {
+            UserDefaults.standard.set(dismissNotif, forKey: "dismissNotif")
+        }
+    }
+
+    @Published var silenceAllNotifications: Bool {
+        didSet {
+            UserDefaults.standard.set(silenceAllNotifications, forKey: "silenceAllNotifications")
+            if silenceAllNotifications {
+                UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+                UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
+            }
+        }
+    }
+
+    @Published var callNotificationMode: CallNotificationMode = .popup {
+        didSet {
+            UserDefaults.standard.set(callNotificationMode.rawValue, forKey: "callNotificationMode")
+        }
+    }
+
+    @Published var ringForCalls: Bool {
+        didSet {
+            UserDefaults.standard.set(ringForCalls, forKey: "ringForCalls")
+        }
+    }
+
+    @Published var autoOpenLinks: Bool {
+        didSet {
+            UserDefaults.standard.set(autoOpenLinks, forKey: "autoOpenLinks")
+        }
+    }
+
+    @Published var openAppOnNotificationClick: Bool {
+        didSet {
+            UserDefaults.standard.set(openAppOnNotificationClick, forKey: "openAppOnNotificationClick")
+        }
+    }
+
+    @Published var autoAcceptQuickShare: Bool {
+        didSet {
+            UserDefaults.standard.set(autoAcceptQuickShare, forKey: "autoAcceptQuickShare")
+        }
+    }
+
+    @Published var quickShareEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(quickShareEnabled, forKey: "quickShareEnabled")
+        }
+    }
+
+    @Published var popupSharedImages: Bool {
+        didSet {
+            UserDefaults.standard.set(popupSharedImages, forKey: "popupSharedImages")
+        }
+    }
+
+    @Published var sharedImagePopupsLimit: Int {
+        didSet {
+            UserDefaults.standard.set(sharedImagePopupsLimit, forKey: "sharedImagePopupsLimit")
+        }
+    }
+
+    @Published var popupSharedImagesOnLeft: Bool {
+        didSet {
+            UserDefaults.standard.set(popupSharedImagesOnLeft, forKey: "popupSharedImagesOnLeft")
+        }
+    }
+
+    @Published var showSummonedFiles: Bool {
+        didSet {
+            UserDefaults.standard.set(showSummonedFiles, forKey: "showSummonedFiles")
+        }
+    }
+
+    @Published var keepAwakeEnabled = UserDefaults.standard.bool(forKey: "keepAwakeEnabled") {
+        didSet { UserDefaults.standard.set(keepAwakeEnabled, forKey: "keepAwakeEnabled") }
+    }
+    /// Experimental private-driver backend; only enabled locally and on macOS 15.
+    @Published var experimentalClosedLidEnabled = UserDefaults.standard.bool(forKey: "experimentalClosedLidEnabled") {
+        didSet { UserDefaults.standard.set(experimentalClosedLidEnabled, forKey: "experimentalClosedLidEnabled") }
+    }
+
+    @Published var sendNowPlayingStatus: Bool {
+        didSet {
+            UserDefaults.standard.set(sendNowPlayingStatus, forKey: "sendNowPlayingStatus")
+        }
+    }
+
+    @Published var useADBWhenPossible: Bool {
+        didSet {
+            UserDefaults.standard.set(useADBWhenPossible, forKey: "useADBWhenPossible")
+        }
+    }
+
+    // Whether the media player card is hidden on the PhoneView
+    @Published var isMusicCardHidden: Bool = false {
+        didSet {
+            UserDefaults.standard.set(isMusicCardHidden, forKey: "isMusicCardHidden")
+        }
+    }
+
+    @Published var useNativeMirroringByDefault: Bool {
+        didSet {
+            UserDefaults.standard.set(useNativeMirroringByDefault, forKey: "useNativeMirroringByDefault")
+        }
+    }
+
+    @Published var useNativeDesktopMirroringByDefault: Bool {
+        didSet {
+            UserDefaults.standard.set(useNativeDesktopMirroringByDefault, forKey: "useNativeDesktopMirroringByDefault")
+        }
+    }
+
+    @Published var isFileAccessEnabled: Bool {
+        didSet {
+            if !isPlus && licenseCheck {
+                if isFileAccessEnabled {
+                    isFileAccessEnabled = false
+                }
+                UserDefaults.standard.set(false, forKey: "isFileAccessEnabled")
+                WebDAVManager.shared.unmount()
+            } else {
+                UserDefaults.standard.set(isFileAccessEnabled, forKey: "isFileAccessEnabled")
+                if isFileAccessEnabled {
+                    if let newDevice = device, newDevice.isRegularConnection {
+                        WebDAVManager.shared.mount(ipAddress: newDevice.ipAddress, port: 9081, volumeName: newDevice.name)
+                    }
+                } else {
+                    WebDAVManager.shared.unmount()
+                }
+            }
+        }
+    }
+
+    @Published var disableAllAIFeatures: Bool {
+        didSet {
+            UserDefaults.standard.set(disableAllAIFeatures, forKey: "disableAllAIFeatures")
+        }
+    }
+
+    @Published var showAIToolbarButton: Bool {
+        didSet {
+            UserDefaults.standard.set(showAIToolbarButton, forKey: "showAIToolbarButton")
+        }
+    }
+
+    @Published var includeSilentInAIOption: Bool {
+        didSet {
+            UserDefaults.standard.set(includeSilentInAIOption, forKey: "includeSilentInAIOption")
+        }
+    }
+
+    @Published var enableMenubarAISummary: Bool {
+        didSet {
+            UserDefaults.standard.set(enableMenubarAISummary, forKey: "enableMenubarAISummary")
+        }
+    }
+    
+    @Published var autoMenubarSummary: Bool {
+        didSet {
+            UserDefaults.standard.set(autoMenubarSummary, forKey: "autoMenubarSummary")
+        }
+    }
+
+    @Published var crashReportingMode: CrashReportingMode {
+        didSet {
+            UserDefaults.standard.set(crashReportingMode.rawValue, forKey: "crashReportingMode")
+        }
+    }
+
+    @Published var alwaysKillAdbBeforeConnect: Bool {
+        didSet {
+            UserDefaults.standard.set(alwaysKillAdbBeforeConnect, forKey: "alwaysKillAdbBeforeConnect")
+        }
+    }
+
+    @Published var isOnboardingActive: Bool = false {
+        didSet {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("OnboardingStateChanged"),
+                object: nil,
+                userInfo: ["isActive": isOnboardingActive]
+            )
+        }
+    }
+
+    // File browser state
+    @Published var showFileBrowser: Bool = false
+    @Published var showADBPairingSheet: Bool = false
+    @Published var browsePath: String = "/sdcard/"
+    @Published var browseItems: [FileBrowserItem] = []
+    @Published var isBrowsingLoading: Bool = false
+    @Published var browseError: String? = nil
+    
+    // ADB Transfer Progress
+    @Published var isADBTransferring: Bool = false
+    @Published var adbTransferringFilePath: String? = nil
+    @Published var showingQuickShareTransfer = false
+
+    @Published var showHiddenFiles: Bool = false {
+        didSet {
+            // refresh current directory when hidden files toggle changes
+            fetchDirectory(path: browsePath)
+        }
+    }
+
+
+    // Toggle licensing
+    let licenseCheck: Bool = true
+
+    @Published var isPlus: Bool {
+        didSet {
+            if !shouldSkipSave {
+                UserDefaults.standard.set(isPlus, forKey: "isPlus")
+            }
+            if !isPlus && licenseCheck {
+                if isFileAccessEnabled {
+                    isFileAccessEnabled = false
+                }
+                showMenubarAlbumArt = false
+                menubarNotificationStyle = "count"
+                showMenubarCallDetails = false
+            }
+            // Notify about license status change for icon revert logic
+            NotificationCenter.default.post(name: NSNotification.Name("LicenseStatusChanged"), object: nil)
+        }
+    }
+
+    func setPlusTemporarily(_ value: Bool) {
+        shouldSkipSave = true
+        isPlus = value
+        shouldSkipSave = false
+    }
+
+    // Remove notification by model instance and system notif center
+    func removeNotification(_ notif: Notification) {
+        DispatchQueue.main.async {
+            withAnimation {
+                self.notifications.removeAll { $0.id == notif.id }
+            }
+            if self.dismissNotif {
+                WebSocketServer.shared.dismissNotification(id: notif.nid)
+            }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notif.nid])
+        }
+    }
+
+    func removeNotificationById(_ nid: String) {
+        DispatchQueue.main.async {
+            withAnimation {
+                self.notifications.removeAll { $0.nid == nid }
+            }
+            if self.dismissNotif {
+                WebSocketServer.shared.dismissNotification(id: nid)
+            }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [nid])
+        }
+    }
+
+    private func playCallRingtone() {
+        stopCallRingtone() // Stop any existing ringtone first
+
+        do {
+            // Load custom ringtone.wav from bundle
+            guard let soundURL = Bundle.main.url(forResource: "ringtone", withExtension: "wav") else {
+                print("[state] Custom ringtone.wav not found in bundle")
+                playSystemToneFallback()
+                return
+            }
+
+            ringtonePlayer = try AVAudioPlayer(contentsOf: soundURL)
+            ringtonePlayer?.numberOfLoops = -1 // Infinite looping
+            ringtonePlayer?.volume = 1.0
+            ringtonePlayer?.play()
+            print("[state] Playing custom ringtone.wav in loop")
+
+        } catch {
+            print("[state] Error loading custom ringtone: \(error)")
+            playSystemToneFallback()
+        }
+    }
+
+    private func playSystemToneFallback() {
+        // Fallback: Try various system sounds via NSSound
+        let soundNames = [
+            NSSound.Name("Submarine"),
+            NSSound.Name("Alarm"),
+            NSSound.Name("Morse"),
+            NSSound.Name("Siren")
+        ]
+
+        for soundName in soundNames {
+            if let sound = NSSound(named: soundName) {
+                sound.loops = true
+                sound.play()
+                return
+            }
+        }
+
+        // Final fallback
+        print("[state] Using system beep for ringtone")
+        NSSound.beep()
+    }
+
+    private func stopCallRingtone() {
+        if let player = ringtonePlayer, player.isPlaying {
+            player.stop()
+            ringtonePlayer = nil
+            print("[state] Stopped call ringtone")
+        }
+    }
+
+    func receivedCallProgress(eventId: String) {
+        guard let call = activeCall, call.eventId == eventId else { return }
+        lastCallProgressReceived = Date()
+    }
+
+    func updateCallEvent(_ callEvent: CallEvent) {
+        print("[state] [START] updateCallEvent called for: \(callEvent.contactName)")
+        print("[state] Current callEvents count before update: \(self.callEvents.count)")
+        print("[state] Thread: \(Thread.current)")
+
+        // Ensure we're on main thread
+        if !Thread.isMainThread {
+            DispatchQueue.main.async {
+                self.updateCallEvent(callEvent)
+            }
+            return
+        }
+
+        // Check if this event already exists (update) or is new (insert)
+        if let existingIndex = self.callEvents.firstIndex(where: { $0.eventId == callEvent.eventId }) {
+            // Update existing call event
+            print("[state] Updating existing call at index \(existingIndex)")
+            self.callEvents[existingIndex] = callEvent
+            print("[state] Call updated, new count: \(self.callEvents.count)")
+        } else {
+            // Add new call event
+            print("[state] Adding new call event to beginning")
+            self.callEvents.insert(callEvent, at: 0)
+            print("[state] Call added, new count: \(self.callEvents.count)")
+            print("[state] All eventIds now: \(self.callEvents.map { $0.eventId })")
+        }
+
+        // Show macOS notification for ringing calls (incoming) or active outgoing calls
+        if (callEvent.direction == .incoming && callEvent.state == .ringing) ||
+           (callEvent.direction == .outgoing && callEvent.state == .offhook) {
+
+            // Always set activeCall so the Menubar card is visible during a call in any mode
+            self.activeCall = callEvent
+
+            // Handle notification based on user preference
+            if callNotificationMode == .notification {
+                // Only show system notification
+                print("[state] Showing notification only (user preference)")
+                self.postCallSystemNotification(callEvent)
+            } else if callNotificationMode == .popup {
+                // Show only popup window, no system notification
+                print("[state] Showing popup window only (user preference)")
+                // Only play ringtone for incoming calls in ringing state if ringForCalls is enabled
+                if callEvent.direction == .incoming && callEvent.state == .ringing && self.ringForCalls {
+                    self.playCallRingtone()
+                }
+                print("[state] Active call set for popup display")
+            } else if callNotificationMode == .none {
+                // Don't show anything
+                print("[state] No notification (user preference)")
+            }
+        } else if callEvent.direction == .incoming && callEvent.state == .offhook {
+            // Call has been answered (offhook state for incoming call)
+            print("[state] Incoming call answered - stopping ringtone and updating popup")
+            self.stopCallRingtone()
+
+            // Update activeCall to show accepted state instead of ringing
+            self.activeCall = callEvent
+            print("[state] Updated popup for accepted call")
+        } else if callEvent.state == .ended || callEvent.state == .rejected || callEvent.state == .missed || callEvent.state == .idle {
+            // Remove ALL call notifications when any call ends
+            print("[state] Call ended/rejected/missed/idle, removing ALL call notifications")
+            let allEventIds = self.callEvents.map { $0.eventId }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: allEventIds)
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: allEventIds)
+
+            // Stop ringtone
+            self.stopCallRingtone()
+
+            // Close sheet
+            self.activeCall = nil
+            print("[state] Closing call sheet")
+
+            // Auto-remove all call events from UI after 2 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.callEvents.removeAll()
+            }
+        }
+
+        print("[state] [END] updateCallEvent, final count: \(self.callEvents.count)")
+    }
+
+    private func postCallSystemNotification(_ callEvent: CallEvent) {
+        if silenceAllNotifications {
+            return
+        }
+
+        let center = UNUserNotificationCenter.current()
+        let content = UNMutableNotificationContent()
+
+        // Format the notification based on call direction
+        let displayName = callEvent.contactName.isEmpty ? callEvent.normalizedNumber : callEvent.contactName
+        let title = callEvent.direction == .incoming ? "☎ Incoming Call" : "☎ Outgoing Call"
+        content.title = title
+        content.body = displayName
+        content.sound = self.ringForCalls ? .default : nil
+
+        // TODO: Add contact photo to notification in future
+        // Photo is available in: callEvent.contactPhoto (base64 encoded PNG, no padding)
+        // Currently stored but not displayed in notification
+        if let photoBase64 = callEvent.contactPhoto, !photoBase64.isEmpty {
+            print("[state] Contact photo received (size: \(photoBase64.count) chars) - stored for future use")
+        }
+
+        // Add call-related actions - different buttons for incoming vs outgoing
+        var actions: [UNNotificationAction] = []
+        if callEvent.direction == .incoming {
+            actions.append(UNNotificationAction(identifier: "ACCEPT_CALL", title: "Accept", options: [.foreground]))
+            actions.append(UNNotificationAction(identifier: "DECLINE_CALL", title: "Decline", options: [.destructive]))
+        } else {
+            // For outgoing calls, show End Call button
+            actions.append(UNNotificationAction(identifier: "DECLINE_CALL", title: "End Call", options: [.destructive]))
+        }
+
+        let category = UNNotificationCategory(
+            identifier: "CALL_NOTIFICATION",
+            actions: actions,
+            intentIdentifiers: [],
+            options: [.customDismissAction]
+        )
+        center.setNotificationCategories([category])
+
+        content.categoryIdentifier = "CALL_NOTIFICATION"
+        content.userInfo = [
+            "eventId": callEvent.eventId,
+            "contactName": callEvent.contactName,
+            "number": callEvent.number,
+            "direction": callEvent.direction.rawValue,
+            "type": "call"
+        ]
+
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
+        let request = UNNotificationRequest(identifier: callEvent.eventId, content: content, trigger: trigger)
+
+        center.add(request) { error in
+            if let error = error {
+                print("[state] Failed to post call notification: \(error)")
+            } else {
+                print("[state] Posted call notification for \(callEvent.contactName)")
+            }
+        }
+    }
+
+    func removeCallEventById(_ eventId: String) {
+        DispatchQueue.main.async {
+            withAnimation {
+                self.callEvents.removeAll { $0.eventId == eventId }
+            }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [eventId])
+        }
+    }
+
+    func sendCallAction(_ eventId: String, action: String) {
+        WebSocketServer.shared.sendCallAction(eventId: eventId, action: action)
+    }
+
+    func hideNotification(_ notif: Notification) {
+        DispatchQueue.main.async {
+            withAnimation {
+                self.notifications.removeAll { $0.id == notif.id }
+            }
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notif.nid])
+        }
+    }
+
+    func clearNotifications() {
+        DispatchQueue.main.async {
+            if !self.notifications.isEmpty {
+                withAnimation {
+                    self.notifications.removeAll()
+                }
+            }
+            UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        }
+    }
+
+    /// Pausing stops background services and connections while retaining pairing and history.
+    func setSyncPaused(_ paused: Bool) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setSyncPaused(paused) }
+            return
+        }
+        guard isSyncPaused != paused else { return }
+        isSyncPaused = paused
+        UserDefaults.standard.set(paused, forKey: "isSyncPaused")
+        if paused {
+            MacPowerManager.shared.suspend()
+            bleWakeUpWorkItem?.cancel()
+            bleWakeUpWorkItem = nil
+            QuickConnectManager.shared.cancelPendingConnection()
+            DiscoveryManager.shared.stop()
+            QuickShareManager.shared.suspendService()
+            WebSocketServer.shared.stop()
+            BLECentralManager.shared.disconnect(restartScanning: false)
+            MacRemoteManager.shared.stopVolumeMonitoring()
+            stopClipboardMonitoring()
+            notificationSyncTimer?.invalidate()
+            notificationSyncTimer = nil
+            stopMediaTimer()
+            activeCall = nil
+            stopCallRingtone()
+            ADBConnector.stopMirroringProcesses()
+            let wasMirroring = isNativeMirroring || isNativeDesktopMirroring || isSidebarMirroring
+            isNativeMirroring = false
+            isNativeDesktopMirroring = false
+            isSidebarMirroring = false
+            if wasMirroring { ScrcpyServerManager.shared.stopServer() }
+            disconnectDevice()
+        } else {
+            let configuredPort = myDevice?.port ?? Int(Defaults.serverPort)
+            let port = (1...65535).contains(configuredPort) ? UInt16(configuredPort) : Defaults.serverPort
+            WebSocketServer.shared.start(port: port)
+            DiscoveryManager.shared.start()
+            QuickShareManager.shared.resumeService()
+            UserDefaults.standard.isManuallyDisconnected = false
+            if isBLEEnabled {
+                BLECentralManager.shared.isManuallyDisconnected = false
+                BLECentralManager.shared.startScanning()
+            }
+            updateConnectionMonitoring()
+        }
+    }
+
+    private func updateConnectionMonitoring() {
+        guard device != nil, !isSyncPaused else {
+            stopClipboardMonitoring()
+            notificationSyncTimer?.invalidate()
+            notificationSyncTimer = nil
+            return
+        }
+        startClipboardMonitoring()
+        if notificationSyncTimer == nil {
+            notificationSyncTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+                guard let self = self, self.device != nil, !self.isSyncPaused else { return }
+                self.syncWithSystemNotifications()
+            }
+            notificationSyncTimer?.tolerance = 3
+        }
+    }
+
+    func disconnectDevice(manual: Bool = false) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.disconnectDevice(manual: manual) }
+            return
+        }
+        do {
+            if manual {
+                UserDefaults.standard.isManuallyDisconnected = true
+                WebSocketServer.shared.sendDisconnectRequest()
+            }
+
+            // Then locally reset state
+            MacPowerManager.shared.suspend()
+            self.device = nil
+            self.isConnectionWeak = false
+            self.activeMacIp = nil
+            self.notifications.removeAll()
+            self.status = nil
+            NowPlayingPublisher.shared.clear()
+            WebSocketServer.shared.cancelAllFileTransfers()
+            QuickConnectManager.shared.cancelPendingConnection()
+            if manual || self.isSyncPaused {
+                self.bleWakeUpWorkItem?.cancel()
+                self.bleWakeUpWorkItem = nil
+            }
+            self.currentDeviceWallpaperBase64 = nil
+            
+            // Disconnect BLE
+            BLECentralManager.shared.disconnect()
+            
+            // Clean up Quick Share state
+            if QuickShareManager.shared.transferState != .idle {
+                QuickShareManager.shared.transferState = .idle
+            }
+            
+            // Clear all shared image popups on disconnect
+            SharedImagePopupManager.shared.dismissAll()
+
+            if self.adbConnected {
+                ADBConnector.disconnectADB()
+                self.adbConnected = false
+            }
+            
+            self.showFileBrowser = false
+            self.browseItems.removeAll()
+        }
+    }
+
+    // MARK: - Remote File Browser
+    
+    func openFileBrowser() {
+        showFileBrowser = true
+        fetchDirectory(path: "/sdcard/")
+    }
+    
+    func fetchDirectory(path: String) {
+        // Only fetch if connected
+        guard device != nil else { return }
+        
+        DispatchQueue.main.async {
+            self.isBrowsingLoading = true
+            self.browsePath = path
+        }
+        WebSocketServer.shared.sendBrowseRequest(path: path, showHidden: showHiddenFiles)
+    }
+
+    func pullFile(path: String) {
+        if useADBWhenPossible && adbConnected {
+            ADBConnector.pull(remotePath: path)
+        } else {
+            WebSocketServer.shared.sendPullRequest(path: path)
+        }
+    }
+
+    func pullFolder(path: String) {
+        if useADBWhenPossible && adbConnected {
+            ADBConnector.pull(remotePath: path)
+        }
+    }
+
+    func pushItem(at url: URL, to remotePath: String) {
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+        
+        if useADBWhenPossible && adbConnected {
+            ADBConnector.push(localPath: url.path, remotePath: remotePath) { success in
+                if success {
+                    // Refresh current directory
+                    self.fetchDirectory(path: self.browsePath)
+                }
+            }
+        } else {
+            if isDirectory {
+                print("[state] Network transfer does not support folders.")
+            } else {
+                WebSocketServer.shared.sendFile(url: url)
+            }
+        }
+    }
+    
+    func navigateUp() {
+        // Prevent going above /sdcard/
+        guard browsePath != "/sdcard/" && browsePath != "/sdcard" else { return }
+        
+        var components = browsePath.split(separator: "/").map(String.init)
+        if components.count > 1 {
+            components.removeLast()
+            let parent = "/" + components.joined(separator: "/") + "/"
+            fetchDirectory(path: parent)
+        } else {
+            fetchDirectory(path: "/sdcard/")
+        }
+    }
+
+    func addNotification(_ notif: Notification) {
+        DispatchQueue.main.async {
+            guard !self.isSyncPaused else { return }
+            var contentChanged = true
+            withAnimation {
+                if let idx = self.notifications.firstIndex(where: { $0.nid == notif.nid }) {
+                    let old = self.notifications[idx]
+                    contentChanged = (old.title != notif.title || old.body != notif.body || old.actions != notif.actions)
+                    self.notifications[idx] = notif
+                } else {
+                    self.notifications.insert(notif, at: 0)
+                }
+            }
+            let isAppSilentOnMac = UserDefaults.standard.appSilentNotifications[notif.package] ?? false
+            if notif.priority != "silent" && !isAppSilentOnMac && contentChanged {
+                var appIcon: NSImage? = nil
+                if let iconPath = self.androidApps[notif.package]?.iconUrl {
+                    appIcon = NSImage(contentsOfFile: iconPath)
+                }
+                self.postNativeNotification(
+                    id: notif.nid,
+                    appName: notif.app,
+                    title: notif.title,
+                    body: notif.body,
+                    appIcon: appIcon,
+                    package: notif.package,
+                    actions: notif.actions
+                )
+            }
+        }
+    }
+
+    func postNativeNotification(
+        id: String,
+        appName: String,
+        title: String,
+        body: String,
+        appIcon: NSImage? = nil,
+        package: String? = nil,
+        actions: [NotificationAction] = [],
+        extraActions: [UNNotificationAction] = [],
+        extraUserInfo: [String: Any] = [:]
+    ) {
+        if silenceAllNotifications {
+            return
+        }
+
+        let center = UNUserNotificationCenter.current()
+        let content = UNMutableNotificationContent()
+        content.title = "\(appName) - \(title)"
+        content.body = body
+
+        // Use custom sound if selected, otherwise use default
+        if notificationSound == "default" {
+            content.sound = .default
+        } else {
+            // For system sounds, we need to use the .aiff extension
+            content.sound = UNNotificationSound(named: UNNotificationSoundName("\(notificationSound).aiff"))
+        }
+
+        content.userInfo["nid"] = id
+        if let pkg = package { content.userInfo["package"] = pkg }
+        // Merge any extra payload the caller wants to pass
+        for (k, v) in extraUserInfo { content.userInfo[k] = v }
+
+        // Build action list (Android actions + optional View action if mirroring conditions)
+        let actionDefinitions: [NotificationAction] = actions
+        var includeView = false
+        if let pkg = package, pkg != "app.androp.android", adbConnected, mirroringPlus {
+            includeView = true
+        }
+
+        // Construct UNNotificationActions
+        var unActions: [UNNotificationAction] = []
+        for a in actionDefinitions.prefix(8) { // safety cap
+            switch a.type {
+            case .button:
+                unActions.append(UNNotificationAction(identifier: "ACT_\(a.name)", title: a.name, options: []))
+            case .reply:
+                if #available(macOS 13.0, *) {
+                    unActions.append(UNTextInputNotificationAction(identifier: "ACT_\(a.name)", title: a.name, options: [], textInputButtonTitle: "Send", textInputPlaceholder: a.name))
+                } else {
+                    unActions.append(UNNotificationAction(identifier: "ACT_\(a.name)", title: a.name, options: []))
+                }
+            }
+        }
+        if includeView {
+            unActions.append(UNNotificationAction(identifier: "VIEW_ACTION", title: "View", options: []))
+        }
+        // Append caller-provided extra actions (e.g., OPEN_LINK)
+        unActions.append(contentsOf: extraActions)
+
+        // Choose category: DEFAULT_CATEGORY when no custom actions besides optional view; otherwise derive
+        if unActions.isEmpty {
+            content.categoryIdentifier = "DEFAULT_CATEGORY"
+            content.userInfo["actions"] = []
+            finalizeAndSchedule(center: center, content: content, id: id, appIcon: appIcon)
+        } else {
+            let actionNamesKey = unActions.map { $0.identifier }.joined(separator: "_")
+            let catId = "DYN_\(actionNamesKey)"
+            content.categoryIdentifier = catId
+            content.userInfo["actions"] = actions.map { ["name": $0.name, "type": $0.type.rawValue] }
+
+            center.getNotificationCategories { existing in
+                if existing.first(where: { $0.identifier == catId }) == nil {
+                    let newCat = UNNotificationCategory(identifier: catId, actions: unActions, intentIdentifiers: [], options: [])
+                    center.setNotificationCategories(existing.union([newCat]))
+                }
+                self.finalizeAndSchedule(center: center, content: content, id: id, appIcon: appIcon)
+            }
+        }
+    }
+
+    private func finalizeAndSchedule(center: UNUserNotificationCenter, content: UNMutableNotificationContent, id: String, appIcon: NSImage?) {
+        // Attach icon
+        if let icon = appIcon, let iconFileURL = saveIconToTemporaryFile(icon: icon) {
+            if let attachment = try? UNNotificationAttachment(identifier: "appIcon", url: iconFileURL, options: nil) {
+                content.attachments = [attachment]
+            }
+        }
+        let request = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        center.add(request) { error in
+            if let error = error { print("[state] (notification) Failed to post native notification: \(error)") }
+        }
+    }
+
+    private func saveIconToTemporaryFile(icon: NSImage) -> URL? {
+        // Save NSImage as a temporary PNG file to attach in notification
+        guard let tiffData = icon.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData),
+              let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            return nil
+        }
+
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        let tempFile = tempDir.appendingPathComponent("notification_icon_\(UUID().uuidString).png")
+
+        do {
+            try pngData.write(to: tempFile)
+            return tempFile
+        } catch {
+            print("[state] Error saving icon to temp file: \(error)")
+            return nil
+        }
+    }
+
+    func syncWithSystemNotifications() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized else {
+                return
+            }
+            UNUserNotificationCenter.current().getDeliveredNotifications { systemNotifs in
+                let systemNIDs = Set(systemNotifs.map { $0.request.identifier })
+
+                DispatchQueue.main.async {
+                    // Only sync notifications that were actually posted to system (non-silent)
+                    let currentSystemNIDs = Set(self.notifications.filter { $0.priority != "silent" }.map { $0.nid })
+                    let removedNIDs = currentSystemNIDs.subtracting(systemNIDs)
+
+                    for nid in removedNIDs {
+                        print("[state] (notification) System notification \(nid) was dismissed manually.")
+                        self.removeNotificationById(nid)
+                    }
+                }
+            }
+        }
+    }
+
+    private func startClipboardMonitoring() {
+        guard isClipboardSyncEnabled, device != nil, !isSyncPaused, clipboardCancellable == nil else { return }
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        clipboardCancellable = Timer
+            .publish(every: 2.5, tolerance: 0.5, on: .main, in: .default)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self, self.device != nil, !self.isSyncPaused else { return }
+                let pasteboard = NSPasteboard.general
+                let currentChangeCount = pasteboard.changeCount
+                guard currentChangeCount != self.lastClipboardChangeCount else { return }
+                self.lastClipboardChangeCount = currentChangeCount
+
+                if let copiedString = pasteboard.string(forType: .string),
+                   copiedString != self.lastClipboardValue {
+                    self.lastClipboardValue = nil
+                    self.sendClipboardToAndroid(text: copiedString)
+                }
+            }
+    }
+
+    func sendClipboardToAndroid(text: String, force: Bool = false, videoHandoff: Bool = false) {
+        guard !isSyncPaused, (isClipboardSyncEnabled || force), device != nil,
+              !text.isEmpty, text.utf8.count <= 64 * 1024, clipboardOutbox.count < 8,
+              clipboardOutbox.reduce(0, { $0 + $1.text.utf8.count }) + text.utf8.count <= 512 * 1024 else { return }
+        if !force && (text == lastDeliveredClipboardText || clipboardOutbox.contains(where: { $0.text == text })) { return }
+        clipboardOutbox.append(PendingClipboard(id: UUID().uuidString, text: text, videoHandoff: videoHandoff))
+        clipboardDeliveryStatus = "Clipboard queued"
+        pumpClipboardOutbox()
+    }
+
+    func sendVideoToAndroid(text: String) {
+        guard let url = youTubeVideoURL(from: text) else { return }
+        sendClipboardToAndroid(text: url.absoluteString, force: true, videoHandoff: true)
+    }
+
+    private func pumpClipboardOutbox() {
+        clipboardRetryWorkItem?.cancel()
+        clipboardRetryWorkItem = nil
+        guard !isSyncPaused, device != nil else { return }
+        let now = Date()
+        clipboardOutbox.removeAll { entry in
+            if entry.attempts >= 3 && entry.deadline <= now {
+                clipboardDeliveryStatus = "Clipboard delivery not confirmed"
+                return true
+            }
+            return false
+        }
+        for index in clipboardOutbox.indices where clipboardOutbox[index].attempts < 3 && clipboardOutbox[index].deadline <= now {
+            let entry = clipboardOutbox[index]
+            let queued = WebSocketServer.shared.sendClipboardProtocol(data: [
+                "text": entry.text, "id": entry.id, "videoHandoff": entry.videoHandoff
+            ])
+            clipboardOutbox[index].attempts += 1
+            clipboardOutbox[index].deadline = now.addingTimeInterval(device?.isBLE == true ? 60 : 4)
+            clipboardDeliveryStatus = queued ? "Waiting for clipboard confirmation" : "Clipboard transport busy"
+        }
+        guard let deadline = clipboardOutbox.map({ $0.deadline }).min() else { return }
+        let work = DispatchWorkItem { [weak self] in self?.pumpClipboardOutbox() }
+        clipboardRetryWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, deadline.timeIntervalSinceNow), execute: work)
+    }
+
+    func acknowledgeClipboard(id: String, ok: Bool) {
+        guard !isSyncPaused, let index = clipboardOutbox.firstIndex(where: { $0.id == id }) else { return }
+        let entry = clipboardOutbox.remove(at: index)
+        if ok { lastDeliveredClipboardText = entry.text }
+        clipboardDeliveryStatus = ok ? "Clipboard delivered" : "Phone could not store clipboard"
+        pumpClipboardOutbox()
+    }
+
+    func handleClipboardEnvelope(_ data: [String: Any]) {
+        guard !isSyncPaused else { return }
+        let id = data["id"] as? String ?? ""
+        let text = data["text"] as? String ?? data["content"] as? String ?? ""
+        let bounded = (data["text"] is String || data["content"] is String) && text.utf8.count <= 64 * 1024 && id.count <= 128
+        let applied = bounded && (clipboardReceivedIDs.contains(id) && !id.isEmpty ||
+            updateClipboardFromAndroid(text, videoHandoff: data["videoHandoff"] as? Bool ?? false))
+        if applied && !id.isEmpty && !clipboardReceivedIDs.contains(id) {
+            clipboardReceivedIDs.append(id)
+            if clipboardReceivedIDs.count > 64 { clipboardReceivedIDs.removeFirst() }
+        }
+        if !id.isEmpty { WebSocketServer.shared.sendClipboardProtocol(type: "clipboardAck", data: ["id": id, "ok": applied]) }
+    }
+
+    @discardableResult
+    func updateClipboardFromAndroid(_ text: String, videoHandoff: Bool = false) -> Bool {
+        guard !isSyncPaused, text.utf8.count <= 64 * 1024 else { return false }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else { return false }
+        lastClipboardValue = text
+        lastClipboardChangeCount = pasteboard.changeCount
+        let videoURL = videoHandoff ? youTubeVideoURL(from: text) : nil
+        if let url = videoURL ?? exactURL(from: text) {
+            if videoURL != nil || autoOpenLinks {
+                NSWorkspace.shared.open(url)
+            } else {
+                let open = UNNotificationAction(identifier: "OPEN_LINK", title: "Open", options: [])
+                postNativeNotification(id: "clipboard", appName: "Clipboard", title: "Continue browsing", body: text,
+                    extraActions: [open], extraUserInfo: ["url": url.absoluteString])
+            }
+        } else {
+            postNativeNotification(id: "clipboard", appName: "Clipboard", title: "Updated", body: text)
+        }
+        return true
+    }
+
+    private func youTubeVideoURL(from text: String) -> URL? {
+        guard let url = exactURL(from: text), let host = url.host?.lowercased(),
+              ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"].contains(host),
+              url.user == nil, url.password == nil, url.port == nil else { return nil }
+        let components = url.path.split(separator: "/").map(String.init)
+        let validID: (String) -> Bool = { $0.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil }
+        if host.hasSuffix("youtu.be") { return components.count == 1 && validID(components[0]) ? url : nil }
+        if components == ["watch"] {
+            let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "v" })?.value ?? ""
+            return validID(id) ? url : nil
+        }
+        return components.count == 2 && ["shorts", "live"].contains(components[0]) && validID(components[1]) ? url : nil
+    }
+
+    private func stopClipboardMonitoring() {
+        clipboardCancellable?.cancel()
+        clipboardCancellable = nil
+        clipboardRetryWorkItem?.cancel()
+        clipboardRetryWorkItem = nil
+        if !clipboardOutbox.isEmpty { clipboardDeliveryStatus = "Clipboard delivery cancelled" }
+        clipboardOutbox.removeAll()
+    }
+
+    // MARK: - Continue browsing helper (exact URL detection)
+    private func exactURL(from text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              url.host != nil else { return nil }
+        // Ensure no extra text beyond a URL
+        if trimmed != text { /* allow surrounding whitespace */ }
+        return url
+    }
+
+    func wallpaperCacheDirectory() -> URL {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("wallpapers", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    var currentWallpaperPath: String? {
+        guard let device = myDevice else { return nil }
+        let key = "\(device.name)-\(device.ipAddress)"
+        return deviceWallpapers[key]
+    }
+
+    private func saveLicenseDetailsToUserDefaults() {
+        guard let details = licenseDetails else {
+            UserDefaults.standard.removeObject(forKey: AppState.licenseDetailsKey)
+            return
+        }
+
+        do {
+            let data = try JSONEncoder().encode(details)
+            UserDefaults.standard.set(data, forKey: AppState.licenseDetailsKey)
+        } catch {
+            print("[state] (license) Failed to encode license details: \(error)")
+        }
+    }
+
+    private static func loadLicenseDetailsFromUserDefaults() -> LicenseDetails? {
+        guard let data = UserDefaults.standard.data(forKey: licenseDetailsKey) else {
+            return nil
+        }
+
+        do {
+            return try JSONDecoder().decode(LicenseDetails.self, from: data)
+        } catch {
+            print("[state] (license) Failed to decode license details: \(error)")
+            return nil
+        }
+    }
+
+    func saveAppsToDisk() {
+        let appsValues = Array(self.androidApps.values)
+        let url = appIconsDirectory().appendingPathComponent("apps.json")
+        DispatchQueue.global(qos: .background).async {
+            do {
+                let data = try JSONEncoder().encode(appsValues)
+                try data.write(to: url)
+            } catch {
+                print("[state] (apps) Error saving apps: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Notification Launch Preferences
+
+    func saveNotificationLaunchPreferences() {
+        if let data = try? JSONEncoder().encode(notificationLaunchPreferences) {
+            UserDefaults.standard.set(data, forKey: "notificationLaunchPreferences")
+        }
+    }
+
+    func loadNotificationLaunchPreferences() {
+        guard let data = UserDefaults.standard.data(forKey: "notificationLaunchPreferences"),
+              let prefs = try? JSONDecoder().decode([String: MacAppLaunchPreference].self, from: data) else { return }
+        self.notificationLaunchPreferences = prefs
+    }
+
+    func setNotificationLaunchPreference(_ pref: MacAppLaunchPreference) {
+        notificationLaunchPreferences[pref.androidPackage] = pref
+        saveNotificationLaunchPreferences()
+    }
+
+    func removeNotificationLaunchPreference(for package: String) {
+        notificationLaunchPreferences.removeValue(forKey: package)
+        saveNotificationLaunchPreferences()
+    }
+
+    func handleNotificationTap(_ notif: Notification) {
+        // Try opening configured Mac app or web fallback first
+        let openedOnMac = MacAppLaunchManager.open(package: notif.package)
+        
+        // If not opened on Mac, fall back to scrcpy mirroring if available
+        if !openedOnMac {
+            if self.device != nil && self.adbConnected &&
+               notif.package != "" &&
+               notif.package != "app.androp.android" &&
+               self.mirroringPlus {
+                ADBConnector.startScrcpy(
+                    ip: self.device?.ipAddress ?? "",
+                    port: self.adbPort,
+                    deviceName: self.device?.name ?? "My Phone",
+                    package: notif.package
+                )
+            }
+        }
+    }
+
+    // MARK: - App Storage
+
+    func loadAppsFromDisk() {
+        let url = appIconsDirectory().appendingPathComponent("apps.json")
+        do {
+            let data = try Data(contentsOf: url)
+            let apps = try JSONDecoder().decode([AndroidApp].self, from: data)
+            DispatchQueue.main.async {
+                for app in apps {
+                    AppState.shared.androidApps[app.packageName] = app
+                    if let iconPath = app.iconUrl {
+                        AppState.shared
+                            .androidApps[app.packageName]?.iconUrl = iconPath
+                    }
+                }
+            }
+        } catch {
+            print("[state] (apps) Error loading apps: \(error)")
+        }
+    }
+
+    // MARK: - Pinned Apps Management
+
+    func loadPinnedApps() {
+        guard let data = UserDefaults.standard.data(forKey: "pinnedApps") else {
+            return
+        }
+
+        do {
+            pinnedApps = try JSONDecoder().decode([PinnedApp].self, from: data)
+        } catch {
+            print("[state] (pinned) Error loading pinned apps: \(error)")
+        }
+    }
+
+    func savePinnedApps() {
+        do {
+            let data = try JSONEncoder().encode(pinnedApps)
+            UserDefaults.standard.set(data, forKey: "pinnedApps")
+        } catch {
+            print("[state] (pinned) Error saving pinned apps: \(error)")
+        }
+    }
+
+    func addPinnedApp(_ app: AndroidApp) -> Bool {
+        // Check if already pinned
+        guard !pinnedApps.contains(where: { $0.packageName == app.packageName }) else {
+            return false
+        }
+
+        // Check if under the limit of 3 apps
+        guard pinnedApps.count < 3 else {
+            return false
+        }
+
+        let pinnedApp = PinnedApp(packageName: app.packageName, appName: app.name, iconUrl: app.iconUrl)
+        pinnedApps.append(pinnedApp)
+        return true
+    }
+
+    func removePinnedApp(_ packageName: String) {
+        pinnedApps.removeAll { $0.packageName == packageName }
+    }
+
+    func validatePinnedApps() {
+        // Remove pinned apps that are no longer available
+        pinnedApps.removeAll { pinnedApp in
+            androidApps[pinnedApp.packageName] == nil
+        }
+    }
+
+    // MARK: - Recent Apps Tracking
+
+    func trackAppUse(_ app: AndroidApp) {
+        DispatchQueue.main.async {
+            self.recentApps.removeAll { $0.packageName == app.packageName }
+            
+            self.recentApps.insert(app, at: 0)
+            
+            if self.recentApps.count > 9 {
+                self.recentApps = Array(self.recentApps.prefix(9))
+            }
+            
+            self.saveRecentApps()
+        }
+    }
+
+    private func saveRecentApps() {
+        guard let deviceName = device?.name else { return }
+        do {
+            let data = try JSONEncoder().encode(recentApps)
+            UserDefaults.standard.set(data, forKey: "recentApps_\(deviceName)")
+        } catch {
+            print("[state] (recent) Error saving recent apps: \(error)")
+        }
+    }
+
+    private func loadRecentApps() {
+        guard let deviceName = device?.name else { 
+            recentApps = []
+            return 
+        }
+        
+        guard let data = UserDefaults.standard.data(forKey: "recentApps_\(deviceName)") else {
+            recentApps = []
+            return
+        }
+
+        do {
+            recentApps = try JSONDecoder().decode([AndroidApp].self, from: data)
+            // Filter out apps that are no longer in the androidApps list (in case they were uninstalled)
+            recentApps.removeAll { app in
+                androidApps[app.packageName] == nil
+            }
+        } catch {
+            print("[state] (recent) Error loading recent apps: \(error)")
+            recentApps = []
+        }
+    }
+
+    func updateDockIconVisibility() {
+        DispatchQueue.main.async {
+            if self.hideDockIcon {
+                NSApp.setActivationPolicy(.accessory)
+            } else {
+                NSApp.setActivationPolicy(.regular)
+            }
+        }
+    }
+
+    func updateAutoStart() {
+        let service = SMAppService.mainApp
+        if autoStartAtLogin {
+            if service.status != .enabled {
+                do {
+                    try service.register()
+                    print("[state] Successfully registered auto start at login")
+                } catch {
+                    print("[state] Failed to register auto start at login: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            if service.status == .enabled {
+                do {
+                    try service.unregister()
+                    print("[state] Successfully unregistered auto start at login")
+                } catch {
+                    print("[state] Failed to unregister auto start at login: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func handleBLEStatusChange(_ status: BLECentralManager.BLEConnectionStatus) {
+        if status == .authenticated {
+            if self.device == nil {
+                updateVirtualDeviceForBLE()
+            }
+        } else if status == .disconnected {
+            // Only clear device if it's the virtual BLE device
+            if self.device?.ipAddress == "BLE" {
+                self.device = nil
+                self.status = nil
+                self.notifications = []
+            }
+            // Resume scanning after BLE disconnect (unless a regular connection is already active)
+            let hasRegularConnection = self.device?.isRegularConnection ?? false
+            if isBLEEnabled && !hasRegularConnection && !BLECentralManager.shared.isManuallyDisconnected {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    if self.isBLEEnabled && !(self.device?.isRegularConnection ?? false) && !BLECentralManager.shared.isAuthenticated {
+                        BLECentralManager.shared.startScanning()
+                    }
+                }
+            }
+        }
+    }
+
+    static func getPreferredDeviceName(fallback: String?) -> String {
+        if let savedName = UserDefaults.standard.string(forKey: "lastRegularDeviceName"), !savedName.isEmpty {
+            return savedName
+        }
+        if let wifiDevice = QuickConnectManager.shared.lastConnectedDevices.values.first(where: { !$0.isBLE }),
+           !wifiDevice.name.isEmpty {
+            return wifiDevice.name
+        }
+        if let fallback = fallback, !fallback.isEmpty {
+            return fallback
+        }
+        return "Android Device"
+    }
+
+    private func updateVirtualDeviceForBLE() {
+        let rawName = BLECentralManager.shared.connectedDeviceName
+        let name = AppState.getPreferredDeviceName(fallback: rawName)
+        self.device = Device(
+            name: name,
+            ipAddress: "BLE",
+            port: 0,
+            version: "2.0.0",
+            adbPorts: [],
+            deviceId: BLECentralManager.shared.connectingDeviceUUID ?? "ble_device"
+        )
+        
+        // Reuse cached wallpaper for BLE connection
+        if self.currentDeviceWallpaperBase64 == nil {
+            if let cachedBase64 = UserDefaults.standard.string(forKey: "lastCachedWallpaperBase64"), !cachedBase64.isEmpty {
+                self.currentDeviceWallpaperBase64 = cachedBase64
+                print("[state] (BLE) Loaded last cached wallpaper from UserDefaults for BLE connection")
+            } else {
+                let fileManager = FileManager.default
+                if let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+                    let wallpaperDir = appSupport.appendingPathComponent("Wallpapers")
+                    let devId = BLECentralManager.shared.connectingDeviceUUID ?? ""
+                    let fileURL = wallpaperDir.appendingPathComponent("\(devId).jpg")
+                    let fallbackURL = wallpaperDir.appendingPathComponent("last_wallpaper.jpg")
+                    let targetURL = fileManager.fileExists(atPath: fileURL.path) ? fileURL : (fileManager.fileExists(atPath: fallbackURL.path) ? fallbackURL : nil)
+                    if let targetURL = targetURL, let data = try? Data(contentsOf: targetURL) {
+                        self.currentDeviceWallpaperBase64 = data.base64EncodedString()
+                        print("[state] (BLE) Loaded last cached wallpaper from disk for BLE connection")
+                    }
+                }
+            }
+        }
+        
+        print("[state] (BLE) Created virtual device: \(name)")
+    }
+
+    /// Revalidates the current network adapter selection and falls back to auto if no longer valid
+    func revalidateNetworkAdapter() {
+        let currentSelection = selectedNetworkAdapterName
+        let validated = AppState.validateAndGetNetworkAdapter(savedName: currentSelection)
+
+        if currentSelection != validated {
+            print("[state] Network adapter changed from '\(currentSelection ?? "auto")' to '\(validated ?? "auto")'")
+            selectedNetworkAdapterName = validated
+            shouldRefreshQR = true
+        }
+    }
+
+    /// Validates a saved network adapter name and returns it if available with valid IP, otherwise returns nil (auto)
+    private static func validateAndGetNetworkAdapter(savedName: String?) -> String? {
+        guard let savedName = savedName else {
+            print("[state] No saved network adapter, using auto selection")
+            return nil // Auto mode
+        }
+
+        // Get available adapters from WebSocketServer
+        let availableAdapters = WebSocketServer.shared.getAvailableNetworkAdapters()
+
+        // Check if the saved adapter is still available
+        guard availableAdapters
+            .first(where: { $0.name == savedName }) != nil else {
+            print("[state] Saved network adapter '\(savedName)' not found, falling back to auto")
+            return nil // Fall back to auto
+        }
+
+        // Verify the adapter has a valid IP address
+        let ipAddress = WebSocketServer.shared.getLocalIPAddress(adapterName: savedName)
+        guard let validIP = ipAddress, !validIP.isEmpty, validIP != "127.0.0.1" else {
+            print("[state] Saved network adapter '\(savedName)' has no valid IP (\(ipAddress ?? "nil")), falling back to auto")
+            return nil // Fall back to auto
+        }
+
+        print("[state] Using saved network adapter: \(savedName) -> \(validIP)")
+        return savedName
+    }
+    
+    // MARK: - Media Seekbar Sync Logic
+    
+    func startMediaTimer() {
+        guard mediaTickTimer == nil else { return }
+        mediaTickTimer = Timer.publish(every: 1.0, on: .main, in: .default)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self,
+                      let music = self.status?.music,
+                      music.isPlaying,
+                      !music.isBuffering,
+                      !self.isDraggingMedia else { return }
+                
+                let next = self.mediaPosition + 1.0
+                self.mediaPosition = music.duration > 0 ? min(next, music.duration) : next
+            }
+    }
+    
+    func stopMediaTimer() {
+        mediaTickTimer?.cancel()
+        mediaTickTimer = nil
+    }
+
+    // Starts the seek-bar timer only while music is actively playing; stops it otherwise.
+    func syncMediaTimerToPlayState() {
+        let isPlaying = status?.music?.isPlaying ?? false
+        if isPlaying {
+            startMediaTimer()
+        } else {
+            stopMediaTimer()
+        }
+    }
+    
+    func syncMediaPosition(incoming: Double) {
+        guard incoming >= 0 else { return }
+        
+        let sinceSeeked = Date().timeIntervalSince(lastMediaSeekTime)
+        
+        if seekTargetPosition >= 0 && sinceSeeked < 10.0 {
+            if abs(incoming - seekTargetPosition) <= 10.0 {
+                seekTargetPosition = -1
+                applyMediaPosition(incoming)
+            }
+            return
+        }
+        
+        if seekTargetPosition >= 0 { seekTargetPosition = -1 }
+        
+        if sinceSeeked < 8.0 && incoming < mediaPosition - 5.0 { return }
+        
+        applyMediaPosition(incoming)
+    }
+    
+    private func applyMediaPosition(_ incoming: Double) {
+        let delta = incoming - mediaPosition
+        if delta > 3.0 || delta < -10.0 {
+            mediaPosition = incoming
+        }
+    }
+    
+    func handleMediaSeek(to position: Double) {
+        seekTargetPosition = position
+        lastMediaSeekTime = Date()
+        mediaPosition = position
+        WebSocketServer.shared.seekTo(positionSeconds: position)
+    }
+    
+    func handleTrackChange() {
+        seekTargetPosition = -1
+        lastMediaSeekTime = .distantPast
+        if let pos = status?.music?.position {
+            syncMediaPosition(incoming: pos)
+        }
+    }
+
+    private func updateWidgetData() {
+        let deviceName = device?.name ?? "Your Phone"
+        WidgetDataManager.shared.updateWidgetData(
+            deviceStatus: status,
+            deviceName: deviceName,
+            wallpaperBase64: currentDeviceWallpaperBase64,
+            isLocalNetwork: isConnectedOverLocalNetwork,
+            isBLEConnected: BLECentralManager.shared.isAuthenticated,
+            isADBConnected: adbConnected,
+            adbMode: adbConnectionMode?.rawValue ?? "wireless"
+        )
+    }
+}

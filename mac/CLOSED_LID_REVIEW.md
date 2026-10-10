@@ -1,0 +1,115 @@
+# Closed-lid feasibility review
+
+Reviewed 2026-10-10 for a 2020 MacBook Air with M1, 8 GB RAM, macOS 15 Sequoia, running on battery with no external display. The requested use is continuing transfers, media, and phone remote access with the lid closed, including while the computer is in a bag.
+
+**This build includes an opt-in experimental macOS 15 lid-only request, with an independent child-process watchdog. Its physical behavior on the user's M1 Air remains unverified.** Ordinary Keep Awake separately prevents idle sleep with a public bounded IOPM assertion; that option alone does not override lid closure. The experimental option is off by default and reports activation only after the helper accepts the native request.
+
+The source research establishes that closed-lid operation can be forced through privileged global settings or an undocumented kernel interface. This implementation uses the latter and never changes `pmset`, sudoers, or a privileged daemon. “Not verified” must not be presented as “technically impossible,” and an accepted IOKit request must not be presented as proof of physical closed-lid operation.
+
+## Latest Amphetamine evidence
+
+The [official App Store listing](https://apps.apple.com/us/app/amphetamine/id937984704) was checked through [Apple's lookup API](https://itunes.apple.com/lookup?id=937984704&country=us). As fetched on 2026-10-10, it reports version **5.3.2**, released **2023-11-10**, and still advertises keeping a MacBook awake with its lid closed. Its release notes say 5.3 introduced an Apple Silicon closed-display script to handle unexpected behavior after attaching or detaching external power; 5.3.1 added an optional authentication-free installer configuration. The release notes also mention additional assertion handling intended to reduce unexpected sleep, display disconnections, or display flashes. They do not document a public lid API or certify this exact M1 Air/macOS 15 configuration.
+
+The author's [current Amphetamine repository README](https://github.com/x74353/Amphetamine) and [Power Protect installer README](https://github.com/x74353/Amphetamine-Power-Protect) explicitly describe the Apple Silicon power-source issue. The installer repository's latest code/package update fetched here is dated **2023-12-07**. Power Protect is an AppleScript/configuration addition, so it does not need a separate ARM-native binary: it invokes the operating system's own `pmset`. The older Enhancer project is a distinct helper and should not be confused with Power Protect.
+
+The exact current download links in the official README were retrieved and inspected without executing them:
+
+- [PowerProtect_Script.zip](https://raw.githubusercontent.com/x74353/Amphetamine/master/Files/PowerProtect_Script.zip) contains `powerProtect.scpt`. Its embedded readable script text calls `pmset -a disablesleep 1` on enable and `pmset -a disablesleep 0` on disable. It runs through `sudo` when the optional configuration is present, or `do shell script ... with administrator privileges` otherwise. Before disable it inspects `pmset -g` for `SleepDisabled 1`. It does not preserve a previous setting or allocate a per-app sleep assertion.
+- [PowerProtect_Configuration.zip](https://raw.githubusercontent.com/x74353/Amphetamine/master/Files/PowerProtect_Configuration.zip) contains a sudoers rule allowing `%admin` to run exactly `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0` without a password. That is the demonstrated Apple Silicon fallback mechanism, not a new lid-only API.
+
+The downloaded script is an architecture-independent workaround, but its global sleep-policy consequences remain the same as described below. The published resources do not expose the latest main app's entire implementation, so the CDMManager sample cannot be claimed to prove every code path used by Amphetamine 5.3.2. The author's Freshdesk search/support URLs attempted during this review returned HTTP 404; the current official GitHub resources and Apple App Store metadata were used instead.
+
+## Public API findings
+
+Apple's [IOPMLib.h](https://github.com/apple-oss-distributions/IOKitUser/blob/main/pwr_mgt.subproj/IOPMLib.h#L275) documents `PreventUserIdleSystemSleep` as preventing sleep caused by inactivity. It explicitly permits sleep caused by lid closure, Apple-menu sleep, low battery, and other reasons. Creating a public assertion does not require root privileges. The public [caffeinate manual](https://github.com/apple-oss-distributions/PowerManagement/blob/main/caffeinate/caffeinate.8) describes `-i` as idle-sleep prevention, while `-s` is valid only on AC power.
+
+The public `NetworkClientActive` assertion provides CPU, disk, and networking during appropriate remote activity. Apple describes assertions as suggestions that may be ignored under battery, thermal, or user circumstances, and asks clients to release them as soon as remote clients become inactive. It provides no battery-powered lid override guarantee. The old `PreventSystemSleep` assertion is explicitly deprecated and described as unsupported in any OS X release in [IOPMLib.h](https://github.com/apple-oss-distributions/IOKitUser/blob/main/pwr_mgt.subproj/IOPMLib.h#L1014).
+
+[KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake#does-it-work-on-a-macbook-with-a-closed-lid), an open-source wrapper around `caffeinate`, explicitly says it cannot prevent sleep on a MacBook with a closed lid. Apple's [MacBook Air external-display guide](https://support.apple.com/guide/macbook-air/connect-an-external-display-apd8cdd74f57/mac) describes closed-lid use in the context of an external display and connected accessories; that differs from this user's battery-only, display-free setup.
+
+## Global `pmset disablesleep`
+
+Apple's [pmset source](https://github.com/apple-oss-distributions/PowerManagement/blob/main/pmset/pmset.m#L5813) implements `disablesleep` by writing the system-wide `SleepDisabled` setting. The [settings write path](https://github.com/apple-oss-distributions/PowerManagement/blob/main/pmset/pmset.m#L780) persists it to disk using `IOPMSetSystemPowerSetting` and reports an error when the caller lacks root privileges. [powerd's PMSettings.m](https://github.com/apple-oss-distributions/PowerManagement/blob/main/pmconfigd/PMSettings.m#L1331) propagates it to the root power domain. This is a global setting rather than an automatically released per-process assertion; it applies across battery and AC power, and an app crash does not restore it.
+
+The exact Sequoia-era [XNU tag `xnu-11215.1.10`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.1.10/iokit/Kernel/IOPMrootDomain.cpp#L7474) checks `userDisabledAllSleep` before the low-battery and thermal-warning/emergency exceptions in `checkSystemSleepAllowed`. The source comment calls it a “user-space sleep kill switch.” Therefore, claiming that this setting only blocks lid sleep, or that it necessarily preserves emergency sleep, would be incorrect. This finding concerns OS sleep policy; it does not establish that hardware thermal shutdown is disabled.
+
+There is practical Apple Silicon evidence: the Amphetamine author's [Power Protect project](https://github.com/x74353/Amphetamine-Power-Protect) says Apple Silicon closed-display mode can fail after power-source changes and distributes an installer requiring Touch ID or an administrator password. It installs an application script and a sudoers configuration. [M1-related issue 28](https://github.com/x74353/Amphetamine-Enhancer/issues/28) includes reports that `pmset -a disablesleep 1` works where Amphetamine alone fails, and also reports unwanted battery drain after sessions end. These are third-party reports, not a hardware verification of androp or a guarantee for macOS 15 on this specific machine.
+
+This build does not change `disablesleep`, hibernation settings, thermal settings, or sudoers rules. A watchdog improves recovery from crashes but does not turn the global switch into a lid-only policy.
+
+## Undocumented lid-specific interface
+
+Amphetamine's [CDMManager sample](https://github.com/x74353/CDMManager-Sample) and [Enhancer implementation](https://github.com/x74353/Amphetamine-Enhancer/blob/master/Xcode%20Project/CDMManager/CDMManager/AppDelegate.m) call `IOConnectCallScalarMethod` on `IOPMrootDomain` with the private selector `kPMSetClamshellSleepState` and a scalar value of 1 or 0. The Enhancer includes a launch-agent fail-safe that restores the setting after the main app exits or loses its assertion.
+
+The selector remains present in the Sequoia-era [RootDomainUserClient.cpp](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.1.10/iokit/Kernel/RootDomainUserClient.cpp#L494). Its numeric selector is **12**, defined in [IOPMLibDefs.h](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.1.10/iokit/IOKit/pwr_mgt/IOPMLibDefs.h). Its dispatch entry expects one scalar input, no output, and `checkEntitlement = NULL`; its handler performs no additional administrator, root, or local-user privilege check. Neighboring secure methods explicitly perform privilege checks. Thus this source does not establish a need for a privileged helper for this selector, although successful `IOServiceOpen` and sandbox access still require validation on the real machine.
+
+It calls `setClamShellSleepDisable` using the shared `kClamshellSleepDisablePowerd` bit; there is no ARM exclusion around that case. The [root-domain implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.1.10/iokit/Kernel/IOPMrootDomain.cpp#L4383) changes a shared mask, rather than allocating a client-owned assertion. The [clamshell decision](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.1.10/iokit/Kernel/IOPMrootDomain.cpp#L4303) reads that mask separately from the thermal/low-battery sleep policy. This preserves the separate emergency-sleep policy in the cited source, unlike the global `SleepDisabled` branch.
+
+This is a more selective mechanism than `disablesleep`, but it is undocumented and shares state with powerd. There is no public per-client ownership, timeout, or automatic restoration contract. Clearing it can affect powerd's own state, and powerd can change the bit independently.
+
+More directly, the Amphetamine author published [Apple Feedback FB9101664 with a reproducer](https://github.com/x74353/IOConnectCallScalarMethod_Issue_AppleFB). It specifically names M1 MacBook Air and 13-inch MacBook Pro and reports unexpected sleep when invoking this selector **with an external display and power delivery**. It explicitly says the issue does **not** occur with the built-in display alone, or the built-in and external displays both active. The user has no external display, so that reproducer must not be generalized into a claim that their requested configuration cannot work. The report predates Sequoia and proves neither persistence nor resolution of the bug in macOS 15. The evidence supports considering an explicitly experimental, hardware-tested lid-only path; it does not justify promising reliable behavior without that test.
+
+An experimental lid-only implementation would first verify the root-domain connection and selector result, observe `AppleClamshellCausesSleep` and real lid events, and explicitly restore the selector on all normal stop paths. A separate same-user launch agent with an independent deadline could restore after an app crash; a root daemon is not justified merely by the cited selector's privilege handling. It must still handle shared-state interaction with powerd, connection-loss recovery, power-source changes, and the absence of a per-client ownership/timeout contract. A successful return code alone does not prove that the Mac stays awake after the physical lid closes.
+
+The historical [InsomniaX](https://github.com/semaja2/InsomniaX/blob/master/Insomnia%20r7/Insomnia.cpp) and [NoSleep](https://github.com/integralpro/nosleep/tree/master/NoSleep/NoSleepKext) projects use kernel extensions and kernel power notifications. They are not evidence of a supported modern public API, and are not integrated into androp.
+
+## Requirements for any future privileged helper
+
+On macOS 13 or later, Apple's [SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice) supports bundled launch daemons. A daemon plist belongs in `Contents/Library/LaunchDaemons`; a bundled native executable can be referenced with `BundleProgram`. Apple's [register documentation](https://developer.apple.com/documentation/servicemanagement/smappservice/register()) states that a launch daemon is not bootstrapped until an administrator approves it. An ordinary unprivileged app cannot transparently install a root helper or silently grant itself root permissions.
+
+A future helper would require all of the following before any global policy change could be considered:
+
+- Explicit local opt-in, administrator approval, and a UI showing actual registration state rather than equating a toggle with installation.
+- Native ARM64/universal helper packaging and consistent code signing. A fixed Mach service with a narrow Swift XPC protocol should expose bounded lease acquisition/renewal/release and status only, never arbitrary commands, executable paths, or caller-supplied shell strings.
+- Authentication on both XPC ends using a known signing identity and exact app/helper identifiers. On macOS 13+, the public [NSXPCConnection.setCodeSigningRequirement](https://developer.apple.com/documentation/foundation/nsxpcconnection/setcodesigningrequirement(_:)) enforces a peer requirement before `resume()`. A reusable signed identity is preferable to insecure bundle-name-only or process-name checks.
+- A serialized daemon state machine, one-shot watchdog deadlines, a hard session duration cap, disconnect/pause/quit revocation, and independent battery/thermal state monitoring. Renewals must be tied to real work rather than mere pairing or Bluetooth presence.
+- Before mutation, an atomically written and durably flushed root-owned recovery journal containing the original value, lease identifier, and expiry. Its directory should be root-owned with mode 0700, its journal mode 0600, with symlink-safe creation and no client-selected paths. The helper must restore a stale journal before accepting new work after restart, verify restoration, and remove the journal only after confirmed recovery.
+- Launchd restart/recovery behavior and tests for app crashes, helper crashes, powerd restarts, power-source changes, expired leases, denied authorization, failed writes, uninstall, reboot, and concurrent third-party power-management software. Uninstall must restore owned changes before unregistering the daemon.
+
+Even this design cannot guarantee restoration while the daemon is disabled, its bundle is removed, the machine crashes, or the OS is unavailable. It also cannot remove the interval in which a global sleep kill switch changes emergency sleep policy. It is a recovery design, not proof that the global approach meets the current safety and reliability constraints. No such helper is bundled in this version.
+
+## Experimental nonprivileged watchdog implemented
+
+`Tools/ClosedLidHelper/main.swift` is an original native implementation built separately from the main app's synchronized source group. The `Build Closed Lid Helper` Xcode phase compiles the selected app architectures, combines a universal executable when needed, and signs the nested executable before enclosing-app signing. The embedded path is `Contents/Helpers/androp-closed-lid-helper`. The phase invokes its build script through `/bin/bash` and declares source, SDK/toolchain, helper output, and derived-work paths for the existing script sandbox. Local Debug builds may use ad-hoc signing; no administrator installer is required for this nonprivileged process.
+
+The helper accepts only a directly connected non-root parent with the same effective user. Its command line is `--parent-pid <pid>`; that PID must equal `getppid()`. It also verifies the parent's UID with `sysctl`, and rechecks parent identity/liveness during active renewals. Control is through the inherited private stdin pipe, rather than a publicly reachable socket or XPC service.
+
+The bounded line protocol is:
+
+| Direction | Message | Meaning |
+| --- | --- | --- |
+| Parent to helper | `RENEW 30\n` | Request or renew a lease; only integer durations 1 through 30 seconds are accepted. |
+| Parent to helper | `STOP\n` | Request restoration and exit. |
+| Helper to parent | JSON `state: "active"` | Selector call was accepted; includes `verification: "requestAccepted"`, `mutationAttempted: true`, and optional `observedCausesSleep`. |
+| Helper to parent | JSON `state: "error"` | Failure; includes `mutationAttempted` so a preflight rejection does not cause the parent to clear another app's override. |
+| Helper to parent | JSON `state: "inactive"` | Cleanup completed; includes `restored`, `mutationAttempted`, and `restorationVerification`. Restoration acceptance is separate from physical readback. |
+
+Only macOS major version 15 is accepted. Before the first mutation, `AppleClamshellCausesSleep` must be known and true; false or unknown state is rejected conservatively to avoid clearing a pre-existing powerd/other-app override. Before activation and at most every ten seconds during an active lease, the helper checks its parent, battery **above** 20%, and a thermal state below serious/critical. A missing/unreadable battery rejects activation.
+
+The helper uses one-shot expiry plus an active-only ten-second power check. An unactivated process exits after five seconds. It restores normal lid sleep by passing zero to selector 12 and closes the IOKit connection on STOP, stdin EOF, parent disappearance, lease expiry, SIGTERM/SIGINT/SIGHUP, malformed control input, failed power checks, or a failed native call. Command lines are capped at 128 bytes; the reader synchronously delivers each command so there is no unbounded command queue. Stdout is nonblocking and SIGPIPE is ignored, so a blocked or disconnected parent cannot prevent the watchdog from restoring because an acknowledgement write hangs.
+
+The parent owns unexpected-child-exit fallback and cancels activation on pause/disconnect/quit/setting changes. SIGKILL, simultaneous parent/helper crashes, kernel hangs, and interference with powerd's shared bit still have no perfect recovery guarantee. The preflight property does not expose ownership of every mask bit and therefore reduces risk without creating per-client ownership. The feature must remain labelled experimental and must be verified physically before relying on it for closed-lid use.
+
+The Sequoia setter does not synchronously publish `AppleClamshellCausesSleep`; `sendClientClamshellNotification` updates that property separately during later power/lid events. Therefore an immediate property value is reported as an observation rather than used to falsely claim physical activation/restoration. The main app observes actual lid changes independently.
+
+## Transfer activity implemented
+
+Raw WebSocket transfers now use distinct `ws-outgoing:<id>` and `ws-incoming:<id>` tokens through `MacPowerManager.setTransferActive(id:active:)`. Outgoing work starts a token only for a live transfer, renews after actual file reads/hash updates at most once every ten seconds, and releases in its worker's `defer`, verification response, and cancellation paths. Incoming work acquires only after temporary-file creation, renews after successful writes or actual streaming checksum reads, and releases on completion/error/cancellation. Cancellation also drains an init already queued on the file queue, preventing a late init from leaving a stale token or temporary file behind.
+
+The manager bounds ordinary progress leases to 120 seconds. Final phone-side checksum verification and Downloads publication receive a separate finite size-based budget, between 120 seconds and 15 minutes, matching the existing acknowledgement deadline. All completion/cancellation paths release it. This prevents a large legitimate save from losing its keep-awake request while the Mac awaits the final response; it never creates a permanent lease. Pause/disconnect clears activity. Nearby transfers remain covered by the manager's QuickShare progress/state subscriptions. These tokens feed the public idle assertion and, only when explicitly opted in, the experimental watchdog's short renewable lease.
+
+## First test on the reported M1 Air
+
+Build the **androp** scheme with the bundled helper, then use the updated Android client. Start on a desk, on battery above 20%, with no external display and no other keep-awake app running.
+
+1. Pair both apps, enable ordinary **Keep Awake**, then enable the local **Experimental closed-lid** option in Mac settings. Confirm the phone reports the setting. With no active work, the helper should remain inactive.
+2. Start a sizeable file transfer or actual Mac playback. Wait for the experimental status to report **request accepted**, then close the lid for at least three minutes. Verify continued transfer progress or media playback from the phone. A status label alone is not a passing test.
+3. While the lid is closed, press **Sleep Mac** on Android. Confirm the connection stops and the Mac sleeps; reopen it and confirm the master keep-awake preference was disabled. A queued acknowledgement alone is not a passing test.
+4. Repeat active work, then test Pause, disconnect and quit separately. Confirm resources stop and ordinary lid-close sleep returns. Check both transfer completion and cancellation, and play/pause rather than testing only an endless stream.
+5. Check normal wake/reconnection and ordinary lid sleep again after restarting androp. Record macOS build, battery change, transfer outcome and any `powerError`. If the helper refuses access, reports recovery uncertainty or sleep does not return, open the lid and disable the experiment; do not use it in a bag.
+
+The optional read-only command `pmset -g log` can help correlate observed sleep and wake times. Test unplugging/replugging power separately if that becomes a desired use case. Native compilation, these physical checks and battery measurements have not been performed in this workspace.
+
+## Validation limits
+
+Research fetched and read the cited Apple source, Apple documentation, third-party source, App Store metadata, and current Power Protect downloads. The changed WebSocket Swift files and helper pass the available syntax parser; the helper build script passes `bash -n`, and repository whitespace checks pass. Six pure policy tests were added but could not run because this workspace has no Swift compiler. Linux can inspect sources, protocol state machines and project structure; it cannot execute IOKit, SMAppService authorization, macOS powerd, lid sensors, or physical clamshell sleep. No native helper/macOS compilation, script-sandbox signing run, administrator installation, M1 battery/closed-lid behavior, or thermal recovery is claimed as tested here.
