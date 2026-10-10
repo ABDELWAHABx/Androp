@@ -20,6 +20,11 @@ struct HotspotWiFiPolicyRegression {
         let start = ProcessInfo.processInfo.systemUptime
         attempt.waitForRetry()
         precondition(attempt.isCancelled && ProcessInfo.processInfo.systemUptime - start < 0.5)
-        print("Hotspot Wi-Fi policy: 13 checks passed")
+        precondition(HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: false, manuallyDisconnected: false))
+        precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "failed", hasPhone: false, paused: false, manuallyDisconnected: false))
+        precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: true, paused: false, manuallyDisconnected: false))
+        precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: true, manuallyDisconnected: false))
+        precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: false, manuallyDisconnected: true))
+        print("Hotspot Wi-Fi policy: 18 checks passed")
     }
 }

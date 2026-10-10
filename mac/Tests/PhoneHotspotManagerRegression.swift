@@ -2,7 +2,21 @@ import Foundation
 import Combine
 
 // Compile the production manager against inert application/transport adapters.
-struct HotspotTestDevice { let deviceId: String }
+struct HotspotTestDevice { let deviceId: String; var isBLE = false }
+enum BLEConstants { static let charMediaControl = "control" }
+final class BLECentralManager {
+    static let shared = BLECentralManager()
+    var isAuthenticated = false
+    var connectingDeviceUUID: String?
+    var messages: [[String: Any]] = []
+    func writeChunked(characteristicUUID: String, payload: String) -> Bool {
+        guard let bytes = payload.data(using: .utf8),
+              let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              let data = envelope["data"] as? [String: Any] else { return false }
+        messages.append(data)
+        return true
+    }
+}
 final class AppState: ObservableObject {
     static let shared = AppState()
     @Published var device: HotspotTestDevice?
@@ -104,7 +118,27 @@ struct PhoneHotspotManagerRegression {
         manager.send(.status) { _ in manager.send(.enable) }
         manager.handleState(reply(transport.messages.last!, status: "ready", enabled: false))
         expect(manager.pendingAction == .enable, "completion can enqueue activation without old cleanup clearing it")
-        print("Phone hotspot manager: 21 checks passed")
+        manager.handleState(reply(transport.messages.last!, status: "enabled", enabled: true))
+        let bluetooth = BLECentralManager.shared
+        bluetooth.isAuthenticated = true
+        bluetooth.connectingDeviceUUID = "ble-phone-c"
+        manager.send(.enable, completion: completion)
+        expect(bluetooth.messages.count == 1, "hotspot commands prefer existing authenticated BLE")
+        let bleRequest = bluetooth.messages.last!
+        state.device = nil
+        drain()
+        expect(manager.pendingAction == .enable, "temporary Wi-Fi loss preserves bound BLE activation")
+        state.device = HotspotTestDevice(deviceId: "ble-phone-c", isBLE: true)
+        drain()
+        manager.handleState(reply(bleRequest, status: "enabled", enabled: true))
+        expect(manager.pendingAction == nil && results.last == "on", "BLE handoff can confirm activation")
+        manager.send(.status, completion: completion)
+        let oldPeerRequest = bluetooth.messages.last!
+        bluetooth.connectingDeviceUUID = "another-phone"
+        manager.handleState(reply(oldPeerRequest, status: "ready", enabled: true))
+        expect(manager.pendingAction == .status, "changed Bluetooth peer cannot complete old request")
+        expect(!PhoneHotspotTransport.matches(deviceID: "phone-c", bluetoothPeer: "ble-phone-c"), "changed peer cannot trigger association")
+        print("Phone hotspot manager: 26 checks passed")
     }
 
     private static func reply(_ request: [String: Any], id: String? = nil, action: String? = nil,

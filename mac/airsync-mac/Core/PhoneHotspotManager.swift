@@ -24,6 +24,7 @@ final class PhoneHotspotManager: ObservableObject {
     private struct Request {
         let id: String
         let deviceID: String
+        let bluetoothPeer: String?
         let action: Action
     }
     private var request: Request?
@@ -49,14 +50,15 @@ final class PhoneHotspotManager: ObservableObject {
               request == nil else { completion?(nil); return }
         if targetID != device.deviceId { reset() }
         targetID = device.deviceId
-        let request = Request(id: UUID().uuidString, deviceID: device.deviceId, action: action)
+        let request = Request(id: UUID().uuidString, deviceID: device.deviceId,
+                              bluetoothPeer: PhoneHotspotTransport.bluetoothPeer, action: action)
         self.request = request
         requestCompletion = completion
         pendingAction = action
         message = action == .setup ? "Requesting setup on your phone…" : "Waiting for your phone…"
-        guard WebSocketServer.shared.sendPowerProtocol(type: "phoneHotspotControl", data: [
+        guard PhoneHotspotTransport.send([
             "id": request.id, "action": action.rawValue
-        ]) else {
+        ], bluetoothPeer: request.bluetoothPeer) else {
             finishRequest()
             message = "Couldn't send the request. Reconnect your phone and try again."
             return
@@ -77,7 +79,7 @@ final class PhoneHotspotManager: ObservableObject {
             return
         }
         guard !AppState.shared.isSyncPaused, let request,
-              AppState.shared.device?.deviceId == request.deviceID,
+              PhoneHotspotTransport.matches(deviceID: request.deviceID, bluetoothPeer: request.bluetoothPeer),
               data["id"] as? String == request.id,
               data["action"] as? String == request.action.rawValue,
               let status = data["status"] as? String,
@@ -106,6 +108,10 @@ final class PhoneHotspotManager: ObservableObject {
     private func connectionDidChange() {
         let appState = AppState.shared
         let currentID = appState.device?.deviceId
+        if let request, PhoneHotspotTransport.matches(deviceID: request.deviceID, bluetoothPeer: request.bluetoothPeer) {
+            targetID = currentID
+            return
+        }
         if appState.isSyncPaused || currentID == nil || currentID != targetID { reset() }
         targetID = currentID
     }

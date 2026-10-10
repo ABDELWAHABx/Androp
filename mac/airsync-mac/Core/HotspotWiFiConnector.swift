@@ -85,6 +85,7 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
     private var permissionTimeout: DispatchWorkItem?
     private var pauseObserver: AnyCancellable?
     private var phoneID: String?
+    private var bluetoothPeer: String?
     private var requestedSSID = ""
     private var loadingNetworks = false
 
@@ -124,6 +125,7 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         guard !isBusy, !AppState.shared.isSyncPaused, let id = AppState.shared.device?.deviceId,
               PhoneHotspotManager.shared.pendingAction == nil, HotspotWiFiPolicy.validSSID(ssid) else { return }
         phoneID = id
+        bluetoothPeer = PhoneHotspotTransport.bluetoothPeer
         requestedSSID = ssid
         var names = UserDefaults.standard.dictionary(forKey: "hotspotWiFiNames") as? [String: String] ?? [:]
         names[id] = ssid
@@ -165,12 +167,12 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
 
     private func activatePhone(_ token: HotspotWiFiAttempt) {
         guard attempt === token, !token.isCancelled, !AppState.shared.isSyncPaused,
-              AppState.shared.device?.deviceId == phoneID else { finish(token, "Connection cancelled. Reconnect your phone and retry."); return }
+              PhoneHotspotTransport.matches(deviceID: phoneID ?? "", bluetoothPeer: bluetoothPeer) else { finish(token, "Connection cancelled. Reconnect your phone and retry."); return }
         message = "Requesting your phone's hotspot…"
         // Ask for a fresh observation even if an older status said it was on.
         PhoneHotspotManager.shared.send(.status) { [weak self] enabled in
             guard let self, self.attempt === token, !token.isCancelled else { return }
-            guard !AppState.shared.isSyncPaused, AppState.shared.device?.deviceId == self.phoneID else { self.finish(token, "Connection cancelled. The phone changed or sync paused."); return }
+            guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else { self.finish(token, "Connection cancelled. The phone changed or sync paused."); return }
             if enabled == true { self.join(token); return }
             guard enabled != nil else { self.finish(token, "Your phone did not confirm hotspot status. Refresh and retry."); return }
             guard PhoneHotspotManager.shared.state?.canAttemptControl == true else {
@@ -179,7 +181,19 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
             }
             PhoneHotspotManager.shared.send(.enable) { [weak self] enabled in
                 guard let self, self.attempt === token, !token.isCancelled else { return }
-                guard !AppState.shared.isSyncPaused, AppState.shared.device?.deviceId == self.phoneID else { self.finish(token, "Connection cancelled. The phone changed or sync paused."); return }
+                // Some phones drop their old Wi-Fi before they can send the
+                // final state. After an acknowledged activation request only,
+                // look for the selected secure hotspot; finding/associating with
+                // that real network supplies the Mac-side confirmation instead.
+                if enabled == nil && HotspotWiFiPolicy.mayRecoverHandoff(
+                    status: PhoneHotspotManager.shared.state?.status,
+                    hasPhone: AppState.shared.device != nil,
+                    paused: AppState.shared.isSyncPaused,
+                    manuallyDisconnected: UserDefaults.standard.isManuallyDisconnected) {
+                    self.join(token)
+                    return
+                }
+                guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else { self.finish(token, "Connection cancelled. The phone changed or sync paused."); return }
                 if enabled == true { self.join(token) }
                 else { self.finish(token, "Hotspot activation wasn't confirmed. Check the phone's hotspot status or use Setup on phone.") }
             }

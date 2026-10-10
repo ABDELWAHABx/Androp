@@ -8,6 +8,10 @@ nonisolated enum HotspotWiFiPolicy {
     static func mayRetry(attempt: Int, elapsed: TimeInterval, cancelled: Bool) -> Bool {
         !cancelled && attempt >= 0 && attempt < 6 && elapsed.isFinite && elapsed >= 0 && elapsed < 30
     }
+
+    static func mayRecoverHandoff(status: String?, hasPhone: Bool, paused: Bool, manuallyDisconnected: Bool) -> Bool {
+        status == "requesting" && !hasPhone && !paused && !manuallyDisconnected
+    }
 }
 
 /// Cancellation wakes retry waits. A CoreWLAN call already submitted to macOS
