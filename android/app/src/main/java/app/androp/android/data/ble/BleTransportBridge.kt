@@ -6,6 +6,12 @@ import app.androp.android.domain.model.BatteryInfo
 import app.androp.android.utils.CallControlUtil
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 import java.security.MessageDigest
 import java.util.Base64
 import org.json.JSONArray
@@ -14,14 +20,17 @@ import org.json.JSONObject
 object BleTransportBridge {
     private const val TAG = "BleTransportBridge"
 
-    private var gattServer: BleGattServer? = null
+    @Volatile private var gattServer: BleGattServer? = null
+    private val upgradeLock = Any()
+    private val upgradeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var networkUpgradeJob: Job? = null
 
     fun initialize(server: BleGattServer) {
-        gattServer = server
+        synchronized(upgradeLock) { networkUpgradeJob?.cancel(); networkUpgradeJob = null; gattServer = server }
     }
 
     fun clear() {
-        gattServer = null
+        synchronized(upgradeLock) { networkUpgradeJob?.cancel(); networkUpgradeJob = null; gattServer = null }
     }
 
     fun deriveAuthToken(symmetricKey: String): String {
@@ -167,11 +176,46 @@ object BleTransportBridge {
 
     // --- Inbound (Mac -> Android) ---
 
+    private fun handleNetworkUpgrade(context: android.content.Context, message: JSONObject, bytes: Int) {
+        if (bytes > BleNetworkUpgradePolicy.MAX_MESSAGE_BYTES) return
+        val data = message.optJSONObject("data") ?: return
+        val ip = data.opt("ip") as? String ?: return
+        val port = data.opt("port") as? Int ?: return
+        if (!BleNetworkUpgradePolicy.isValidEndpoint(ip, port)) return
+        val server = gattServer ?: return
+        val peer = server.captureAuthenticatedPeer() ?: return
+        synchronized(upgradeLock) {
+            if (networkUpgradeJob?.isActive == true) return
+            networkUpgradeJob = upgradeScope.launch {
+                try {
+                    withTimeoutOrNull(5_000L) {
+                        val application = context.applicationContext
+                        val settings = app.androp.android.data.local.DataStoreManager.getInstance(application)
+                        if (app.androp.android.utils.BackgroundWorkController.isPaused || settings.isAppPaused().first() ||
+                            settings.getUserManuallyDisconnected().first()) return@withTimeoutOrNull
+                        val saved = settings.getLastConnectedDevice().first() ?: return@withTimeoutOrNull
+                        if (saved.symmetricKey != peer.pairingKey || gattServer !== server || !server.isCurrentPeer(peer) ||
+                            app.androp.android.utils.WebSocketUtil.isWifiConnected() || app.androp.android.utils.WebSocketUtil.isConnecting()) return@withTimeoutOrNull
+                        app.androp.android.utils.WebSocketUtil.connect(application, ip, port, peer.pairingKey,
+                            manualAttempt = false, pairedUserRequest = true,
+                            authorization = { gattServer === server && server.isCurrentPeer(peer) })
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) { Log.w(TAG, "Unable to upgrade paired Bluetooth connection", failure) }
+            }
+        }
+    }
+
     fun handleMediaControl(action: String, context: android.content.Context) {
         // Small authenticated control envelopes share this existing write
         // characteristic without changing legacy media command framing.
         if (action.toByteArray(Charsets.UTF_8).size <= 64 * 1024 && action.startsWith("{")) {
             val message = try { JSONObject(action) } catch (_: Exception) { null }
+            if (message?.optString("type") == "connectNetwork") {
+                if (BleGattServer.isAnyAuthenticated() && !app.androp.android.utils.BackgroundWorkController.isPaused)
+                    handleNetworkUpgrade(context, message, action.toByteArray(Charsets.UTF_8).size)
+                return
+            }
             if (message != null && BleControlPolicy.acceptsIncoming(message.optString("type"), action.toByteArray(Charsets.UTF_8).size)) {
                 if (!BleGattServer.isAnyAuthenticated() || app.androp.android.utils.BackgroundWorkController.isPaused) return
                 app.androp.android.utils.WebSocketMessageHandler.handleIncomingMessage(context, action)

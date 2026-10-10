@@ -126,14 +126,19 @@ object WebSocketUtil {
         onConnectionStatus: ((Boolean) -> Unit)? = null,
         onMessage: ((String) -> Unit)? = null,
         manualAttempt: Boolean = true,
-        onHandshakeTimeout: (() -> Unit)? = null
+        onHandshakeTimeout: (() -> Unit)? = null,
+        pairedUserRequest: Boolean = false,
+        authorization: (() -> Boolean)? = null
     ) {
+        // Bypassing the automatic-reconnect preference requires the authenticated
+        // BLE command's live authorization, never just a caller-supplied flag.
+        if (pairedUserRequest && authorization == null) return
         // Cache application context for future cleanup even if callers don't pass context on disconnect
         appContext = context.applicationContext
 
         val epoch = synchronized(connectionLock) {
-            if (BackgroundWorkController.isPaused || isConnected.get() || isConnecting.get()) {
-                Log.d(TAG, "Already connected or connecting")
+            if (BackgroundWorkController.isPaused || authorization?.invoke() == false || isConnected.get() || isConnecting.get()) {
+                Log.d(TAG, "Already connected, connecting, or authorization expired")
                 return
             }
             if (manualAttempt) manualReconnectSuppressed.set(false)
@@ -151,11 +156,12 @@ object WebSocketUtil {
         // Validate local network IP
         scope.launch {
             val ds = app.androp.android.data.local.DataStoreManager.getInstance(context)
-            if (ds.isAppPaused().first() || BackgroundWorkController.isPaused || !connectionEpoch.isCurrent(epoch)) {
+            if (ds.isAppPaused().first() || BackgroundWorkController.isPaused || authorization?.invoke() == false || !connectionEpoch.isCurrent(epoch)) {
                 if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
                 return@launch
             }
-            if (!manualAttempt && (manualReconnectSuppressed.get() || ds.getUserManuallyDisconnected().first() || !ds.getAutoReconnectEnabled().first())) {
+            if (!manualAttempt && (manualReconnectSuppressed.get() || ds.getUserManuallyDisconnected().first() ||
+                    (!pairedUserRequest && !ds.getAutoReconnectEnabled().first()))) {
                 if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
                 return@launch
             }
@@ -179,7 +185,10 @@ object WebSocketUtil {
                 return@launch
             }
 
-            if (!isActive || !connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused) return@launch
+            if (!isActive || !connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) {
+                if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
+                return@launch
+            }
             handshakeCompleted.set(false)
             notifyConnectionStatusListeners(false)
 
@@ -270,7 +279,7 @@ object WebSocketUtil {
                     Log.d(TAG, "Attempting connection to $url")
 
                     run {
-                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || isConnected.get() || connectionStarted.get()) return@run
+                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false || isConnected.get() || connectionStarted.get()) return@run
 
                         val request = Request.Builder()
                             .url(url)
@@ -287,7 +296,7 @@ object WebSocketUtil {
                         val listener = object : WebSocketListener() {
                             override fun onOpen(webSocket: WebSocket, response: Response) {
                                 synchronized(connectionLock) {
-                                    if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused) {
+                                    if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) {
                                         pendingSockets.remove(webSocket)
                                         webSocket.cancel()
                                         return

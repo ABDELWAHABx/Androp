@@ -593,7 +593,9 @@ class AirSyncViewModel(
 
     fun setConnectionStatus(isConnected: Boolean, isConnecting: Boolean = false) {
         _uiState.value = _uiState.value.copy(
-            isConnected = isConnected,
+            isConnected = app.androp.android.data.ble.BleAvailabilityPolicy.connectedForUi(
+                isConnected, app.androp.android.data.ble.BleGattServer.isAnyAuthenticated(),
+                app.androp.android.utils.BackgroundWorkController.isPaused),
             isConnecting = isConnecting,
             connectingDeviceId = if (!isConnecting) null else _uiState.value.connectingDeviceId
         )
@@ -962,10 +964,13 @@ class AirSyncViewModel(
                                         manualAttempt = false,
                                         onConnectionStatus = { connected ->
                                             viewModelScope.launch {
+                                                val anyConnected = app.androp.android.data.ble.BleAvailabilityPolicy.connectedForUi(
+                                                    connected, app.androp.android.data.ble.BleGattServer.isAnyAuthenticated(),
+                                                    app.androp.android.utils.BackgroundWorkController.isPaused)
                                                 _uiState.value = _uiState.value.copy(
-                                                    isConnected = connected,
+                                                    isConnected = anyConnected,
                                                     isConnecting = false,
-                                                    response = if (connected) "Connected successfully!" else "Reconnection failed"
+                                                    response = if (connected) "Connected successfully!" else if (anyConnected) "Connected over Bluetooth" else "Reconnection failed"
                                                 )
                                                 if (connected) {
                                                     // Update last connected record timestamp for this device

@@ -6,6 +6,8 @@ object BleAvailabilityPolicy {
         val networkConnected: Boolean, val pairingKey: String?)
     fun shouldRun(inputs: Inputs): Boolean = inputs.enabled && !inputs.manuallyDisconnected &&
         !inputs.paused && !inputs.pairingKey.isNullOrBlank()
+    fun connectedForUi(networkConnected: Boolean, bleAuthenticated: Boolean, paused: Boolean): Boolean =
+        !paused && (networkConnected || bleAuthenticated)
     fun keepBleOnNetworkDisconnect(manual: Boolean, paused: Boolean, authenticated: Boolean): Boolean =
         !manual && !paused && authenticated
 }

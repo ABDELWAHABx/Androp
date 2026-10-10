@@ -242,11 +242,11 @@ class AirSyncService : Service() {
                     // Refresh UDP socket to bind to new network interface
                     DiscoveryOrchestrator.refreshSocket()
                     // When network becomes available, do a burst to announce ourselves
-                    if (isScanning && !app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) {
+                    if (!WebSocketUtil.isWifiConnected()) {
+                        // Bluetooth keeps control available while a network event
+                        // offers a higher-throughput path for files/trackpad.
                         DiscoveryOrchestrator.burstBroadcast(applicationContext)
                         WebSocketUtil.requestAutoReconnect(applicationContext)
-                    } else if (isScanning) {
-                        DiscoveryOrchestrator.burstBroadcast(applicationContext)
                     }
                 }
             }

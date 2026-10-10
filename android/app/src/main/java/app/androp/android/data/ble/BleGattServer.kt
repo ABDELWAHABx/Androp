@@ -58,6 +58,13 @@ class BleGattServer(private val context: Context) {
     private val notificationSubscriptions = ConcurrentHashMap<String, MutableSet<UUID>>()
     private val reassemblers = ConcurrentHashMap<UUID, BleChunkUtil.Reassembler>()
     @Volatile private var authenticatedDevice: BluetoothDevice? = null
+    internal class AuthenticatedPeer(val pairingKey: String)
+    @Volatile private var authenticatedPeer: AuthenticatedPeer? = null
+    internal fun captureAuthenticatedPeer(): AuthenticatedPeer? =
+        authenticatedPeer?.takeIf { isAuthenticated && authenticatedDevice != null }
+    internal fun isCurrentPeer(peer: AuthenticatedPeer): Boolean =
+        isAuthenticated && authenticatedDevice != null && authenticatedPeer === peer
+
     @Volatile private var serverGeneration = 0L
     private val sendLock = Any()
     private data class OutboundMessage(val device: BluetoothDevice, val uuid: UUID, val chunks: List<ByteArray>,
@@ -134,6 +141,7 @@ class BleGattServer(private val context: Context) {
         pendingServices.clear()
         _connectionState.value = BleConnectionState.DISCONNECTED
         isAuthenticated = false
+        authenticatedPeer = null
         authenticatedFlag.set(false)
         ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
         if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
@@ -563,6 +571,7 @@ class BleGattServer(private val context: Context) {
                     authenticationTimeout?.cancel()
                     authenticationTimeout = null
                     authenticatedDevice = device
+                    authenticatedPeer = AuthenticatedPeer(storedKey)
                     isAuthenticated = true
                     authenticatedFlag.set(true)
                     ClipboardSyncManager.onPeerChanged(storedKey)
@@ -828,6 +837,7 @@ class BleGattServer(private val context: Context) {
             }
         }
         isAuthenticated = false
+        authenticatedPeer = null
         authenticatedFlag.set(false)
         ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
         if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()

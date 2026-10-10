@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.ref_name }}
+          ref: ${{ inputs.source_ref || github.sha }}
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
