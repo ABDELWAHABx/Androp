@@ -33,6 +33,6 @@ Both peers must run the updated androp build. Pair over Wi-Fi once to establish 
 
 ## Verification and limits
 
-Added five Android policy tests and twelve Swift regression assertions covering command boundaries, cursor/bulk rejection, clipboard retry budgets, UTF-8 limits, media parameters, compact status and charging. The parent integration run must confirm builds and test results; physical Samsung/Mac BLE latency and reliability still require device testing.
+Added five Android policy tests and twelve Swift regression assertions covering command boundaries, cursor/bulk rejection, clipboard retry budgets, UTF-8 limits, media parameters, compact status and charging. The integrated Android build and 141-test suite passed; the Mac policy suite and native app build passed on CI. Physical Samsung/Mac BLE latency and reliability still require device testing.
 
 BLE authentication is the existing paired-device token protocol. This feature work does not establish a new claim of application-level encryption for BLE payloads.

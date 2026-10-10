@@ -1,83 +1,99 @@
 {
+  "releaseTag": "androp-v0.1.0-preview.3",
   "tests": {
-    "tests": 72,
+    "tests": 141,
     "failures": 0,
     "errors": 0,
     "skipped": 0
   },
   "lint": {
     "Error": 0,
-    "Warning": 250,
+    "Warning": 252,
     "Hint": 10
   },
   "swift": {
-    "changed_files": 103,
+    "changed_files": 119,
     "new_errors": 0,
-    "unchanged_parser_limitations": 4,
-    "power_policy_tests_added": 6,
-    "power_policy_tests_run": true,
-    "power_policy_test_failures": 0
+    "unchanged_parser_limitations": 4
   },
   "native_mac_build": true,
   "physical_device_testing": false,
-  "experimental_closed_lid": {
-    "default_enabled": false,
-    "runtime": "macOS 15",
-    "physical_behavior_verified": false
-  },
   "native_mac_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085118534",
-    "commit": "c846b9b0f8a91f94d386a0891a7578c56878efef",
-    "xcode": "26.6",
-    "swift": "6.3.3",
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38087765717",
+    "commit": "9840f0758f0560fddc1de459955900f2856e301e",
     "architecture": "arm64",
     "signatureVerification": true,
     "helperCompiledAndSigned": true,
     "helperActivated": false,
     "notarized": false,
     "productionAppLifecyclePassed": true,
+    "compilerWarningsRemain": true,
     "pauseCycles": 3,
     "resumeCycles": 2
   },
   "android_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38084164731",
-    "commit": "89d97df784d5fc789b4acd70a10653fbbc9ce24f",
-    "tests": 72,
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38087765759",
+    "conclusion": "in_progress",
+    "applicationId": "app.androp.android",
+    "versionName": "4.0.3",
+    "versionCode": 34,
+    "minimumAndroid": 30,
+    "targetAndroid": 37,
+    "commit": "9840f0758f0560fddc1de459955900f2856e301e",
+    "publicSourceCommit": "61fc6eac4519076511cc5e0a0c8e6b1c9443dae2",
+    "sha256": "9a5aeca3b6f93b82b62006e96b6abb6c35adac6aef0361143a37fc845862f54c",
+    "signing": "same local development certificate",
+    "optimized": true,
+    "localBuild": "assembleDebug assembleRelease testDebugUnitTest lintDebug: success",
+    "tests": 141,
     "failures": 0,
     "lintErrors": 0,
-    "lintWarnings": 250,
+    "lintWarnings": 252,
     "lintHints": 10,
-    "releaseSourceCommit": "89d97df784d5fc789b4acd70a10653fbbc9ce24f",
-    "sha256": "3c8629dac53ec8e6aa757edfc9715a7405fc2adba125ed56c5c1743df123b85b",
+    "ciRun": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38087765759",
     "sameUpdateSigningCertificate": true
   },
-  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085737620",
+  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38088498315",
   "mac_download_checksums_verified": true,
   "android_download_checksum_and_signature_verified": true,
-  "releaseTag": "androp-v0.1.0-preview.2",
   "mac_regressions": {
     "runOn": [
       "macOS 15.7.9",
       "macOS 26"
     ],
-    "bleCases": 10,
+    "bleCases": 11,
     "teardownRepetitions": 1000,
     "keepAwakeCases": 6,
     "scrcpyPacketChecks": 23,
     "remoteInputChecks": 16,
     "batteryPolicyChecks": 10,
-    "mediaAndDiscoveryChecksPassed": true
+    "hotspotManagerChecks": 14,
+    "bleControlChecks": 12,
+    "networkRecoveryChecks": 11,
+    "floatingWidgetChecks": 7,
+    "notificationPolicyChecks": 12,
+    "clipboardMediaAndDiscoveryChecksPassed": true
   },
   "mac_sequoia_runtime_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38085737665",
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38088498273",
     "macOS": "15.7.9",
-    "build": "24G830",
     "architecture": "arm64",
-    "packagedSourceCommit": "c846b9b0f8a91f94d386a0891a7578c56878efef",
+    "packagedSourceCommit": "9840f0758f0560fddc1de459955900f2856e301e",
     "pauseCycles": 3,
     "resumeCycles": 2,
     "sourceHashesAndStrictSignaturesVerified": true,
     "bluetoothRadioActivated": false,
     "experimentalPowerHelperActivated": false
+  },
+  "hotspot": {
+    "normalPermissionsOnly": true,
+    "requiresAndroidAPI": 36,
+    "samsungControlVerified": false,
+    "automaticGlobalDataSaverToggle": false
+  },
+  "experimental_closed_lid": {
+    "default_enabled": false,
+    "runtime": "macOS 15",
+    "physical_behavior_verified": false
   }
 }
