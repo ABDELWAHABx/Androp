@@ -87,7 +87,7 @@ object WebSocketMessageHandler {
                 "dismissNotification" -> handleNotificationDismissal(data)
                 "notificationAction" -> handleNotificationAction(data)
                 "disconnectRequest" -> handleDisconnectRequest(context)
-                "toggleAppNotif" -> handleToggleAppNotification(context, data)
+                "toggleAppNotif", "toggleAppNotifs" -> handleToggleAppNotification(context, data)
                 "toggleNowPlaying" -> handleToggleNowPlaying(context, data)
                 "macVolume" -> handleMacVolume(data)
                 "modifierStatus" -> handleModifierStatus(data)
