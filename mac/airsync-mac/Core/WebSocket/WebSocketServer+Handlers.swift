@@ -75,6 +75,12 @@ extension WebSocketServer {
             handleRemoteControl(message)
         case .browseData:
             handleBrowseData(message)
+        case .transferNetwork:
+            if let data = message.data.value as? [String: Any],
+               let bytes = try? JSONSerialization.data(withJSONObject: ["type": "transferNetwork", "data": data]),
+               let envelope = String(data: bytes, encoding: .utf8) {
+                TransferNetworkCoordinator.shared.handleEnvelope(envelope, fromNetwork: true)
+            }
         case .phoneHotspotState:
             if let data = message.data.value as? [String: Any] { PhoneHotspotManager.shared.handleState(data) }
         case .webDavAccess:
@@ -199,6 +205,10 @@ extension WebSocketServer {
             let version = dict["version"] as? String ?? "2.0.0"
             let adbPorts = dict["adbPorts"] as? [String] ?? []
             let deviceId = dict["id"] as? String ?? ""
+
+            lock.lock()
+            if primarySessionID == sessionId { authenticatedPrimarySessionID = sessionId }
+            lock.unlock()
 
             // File-browsing credentials belong only to this authenticated session,
             // including when the same phone reconnects on a replacement socket.
@@ -1153,7 +1163,8 @@ extension WebSocketServer {
                 exactDeviceName: exactDeviceName,
                 isPlusSubscription: isPlusSubscription,
                 version: appVersion,
-                savedAppPackages: savedAppPackages
+                savedAppPackages: savedAppPackages,
+                quickSharePort: NearbyConnectionManager.shared.readyQuickSharePort
             )
 
             do {
@@ -1162,6 +1173,7 @@ extension WebSocketServer {
                     jsonDict["model"] = modelId
                     jsonDict["type"] = categoryType
                     jsonDict["isPlus"] = isPlusSubscription
+                    jsonDict["quickShareEndpointSupported"] = true
                     for (key, value) in MacPowerManager.shared.statusFields { jsonDict[key] = value }
 
                     let messageDict: [String: Any] = [

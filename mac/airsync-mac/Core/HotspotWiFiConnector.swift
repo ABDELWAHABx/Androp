@@ -9,6 +9,8 @@ import Darwin
 /// is persisted by androp, logged, passed to a subprocess, or sent to the phone.
 nonisolated enum HotspotWiFiWorker {
     static let queue = DispatchQueue(label: "app.androp.hotspot-wifi", qos: .userInitiated)
+    // All reads/writes are asserted onto this serial worker queue.
+    nonisolated(unsafe) private static var temporaryOwnership = TemporaryWiFiOwnership()
 
     static func savedNetworks() -> [String] {
         let profiles = CWWiFiClient.shared().interface()?.configuration()?.networkProfiles.array ?? []
@@ -49,15 +51,70 @@ nonisolated enum HotspotWiFiWorker {
         return nil
     }
 
-    static func join(ssid: String, attempt: HotspotWiFiAttempt) -> String {
+    static func currentSSID() -> String? { CWWiFiClient.shared().interface()?.ssid() }
+
+    static func joinTemporary(ssid: String, password: String, attempt: HotspotWiFiAttempt, owner: UUID) -> (String?, String) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard !attempt.isCancelled, HotspotWiFiPolicy.validSSID(ssid), (8...63).contains(password.utf8.count),
+              let wifi = CWWiFiClient.shared().interface(), wifi.powerOn() else {
+            return (nil, "Turn on Mac Wi-Fi and try Send again.")
+        }
+        // Capture restoration state before submitting any asynchronous-to-us
+        // CoreWLAN work. Cancel does not depend on a later main-queue callback.
+        temporaryOwnership.begin(owner: owner, ssid: ssid, currentSSID: wifi.ssid())
+        for index in 0..<6 {
+            guard !attempt.isCancelled else { return (nil, "Connection cancelled.") }
+            if wifi.ssid() == ssid { break }
+            if let networks = try? wifi.scanForNetworks(withName: ssid),
+               let network = networks.filter({ $0.ssid == ssid &&
+                   ($0.supportsSecurity(.wpa2Personal) || $0.supportsSecurity(.wpa3Personal) || $0.supportsSecurity(.wpa3Transition)) })
+                .max(by: { $0.rssiValue < $1.rssiValue }) {
+                guard !attempt.isCancelled, temporaryOwnership.willAssociate(owner: owner) else {
+                    return (nil, "Connection cancelled.")
+                }
+                // CoreWLAN may finish a submitted association after cancellation;
+                // the single owner-bound release will clean up that result.
+                do { try wifi.associate(to: network, password: password) }
+                catch { return (nil, "Mac couldn't join the temporary Wi-Fi network. Check Location access and retry Send.") }
+                break
+            }
+            if index < 5 { attempt.waitForRetry() }
+        }
+        guard !attempt.isCancelled, wifi.ssid() == ssid else { return (nil, "Temporary Wi-Fi wasn't found. Keep the phone nearby and retry Send.") }
+        guard let address = joinedIPv4(ssid: ssid, attempt: attempt) else { return (nil, "Wi-Fi connected but no local address was assigned. Retry Send.") }
+        return (address, "Connecting to the paired phone…")
+    }
+
+    /// Called once by the coordinator, never from a stale join completion.
+    /// A cancelled cleanup can disconnect its own temporary network, but starts
+    /// no restoration scans, Keychain lookups, or associations.
+    static func releaseTemporary(owner: UUID, attempt: HotspotWiFiAttempt) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let wifi = CWWiFiClient.shared().interface()
+        guard let release = temporaryOwnership.release(owner: owner, currentSSID: wifi?.ssid(),
+                                                       cancelled: attempt.isCancelled) else { return }
+        if release.disconnect { wifi?.disassociate() }
+        guard !attempt.isCancelled, let previousSSID = release.restoreSSID,
+              HotspotWiFiPolicy.validSSID(previousSSID) else { return }
+        // Reuse the coordinator's token: Pause or a new transfer also cancels
+        // restoration work already queued behind a synchronous CoreWLAN call.
+        _ = join(ssid: previousSSID, attempt: attempt, onlyWhileUnassociated: true)
+    }
+
+    static func join(ssid: String, attempt: HotspotWiFiAttempt, onlyWhileUnassociated: Bool = false) -> String {
         guard HotspotWiFiPolicy.validSSID(ssid), !attempt.isCancelled else { return "Connection cancelled." }
         guard let wifi = CWWiFiClient.shared().interface(), wifi.powerOn() else {
             return "Turn on Wi-Fi on your Mac, then try Connect again."
         }
         if wifi.ssid() == ssid { return "Already connected to your phone's Wi-Fi. Internet access depends on the phone and carrier." }
+        func mayContinue() -> Bool {
+            !attempt.isCancelled && (!onlyWhileUnassociated || wifi.ssid() == nil || wifi.ssid() == ssid)
+        }
+        guard mayContinue() else { return "Wi-Fi changed. Keeping the current network." }
         let started = ProcessInfo.processInfo.systemUptime
         var network: CWNetwork?
         for index in 0..<6 {
+            guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
             guard HotspotWiFiPolicy.mayRetry(attempt: index, elapsed: ProcessInfo.processInfo.systemUptime - started,
                                             cancelled: attempt.isCancelled) else { break }
             do {
@@ -73,7 +130,7 @@ nonisolated enum HotspotWiFiWorker {
             if network != nil { break }
             if index < 5 { attempt.waitForRetry() }
         }
-        guard !attempt.isCancelled else { return "Connection cancelled." }
+        guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
         guard let network else {
             return "The selected WPA2/WPA3 hotspot wasn't found. Check its Wi-Fi name, phone hotspot settings and Mac Location access."
         }
@@ -83,17 +140,17 @@ nonisolated enum HotspotWiFiWorker {
         // Only try the other domain when the item does not exist. A denial or
         // cancelled Keychain prompt must not trigger another authorization prompt.
         var status = CWKeychainFindWiFiPassword(.user, ssidData, &password)
-        if status == errSecItemNotFound && !attempt.isCancelled {
+        if status == errSecItemNotFound && mayContinue() {
             status = CWKeychainFindWiFiPassword(.system, ssidData, &password)
         }
-        guard !attempt.isCancelled else { return "Connection cancelled." }
+        guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
         guard status == errSecSuccess, let savedPassword = password as String?, !savedPassword.isEmpty else {
             return status == errSecItemNotFound
                 ? "No saved password was found for this hotspot. Join it once in the Mac Wi-Fi menu and save its password, then retry."
                 : "macOS did not allow access to the saved Wi-Fi password. Allow androp's Keychain request, or join using the Mac Wi-Fi menu."
         }
         do {
-            guard !attempt.isCancelled else { return "Connection cancelled." }
+            guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
             try wifi.associate(to: network, password: savedPassword)
             if attempt.isCancelled { return "Cancelled. macOS may have completed the Wi-Fi connection already." }
             return wifi.ssid() == ssid

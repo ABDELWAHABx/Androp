@@ -981,6 +981,8 @@ class AirSyncQuickShareGetStatusCommand: NSScriptCommand {
             stateStr = "preparing"
         case .reviewing:
             stateStr = "reviewing"
+        case .connectingNetwork:
+            stateStr = "connectingNetwork"
         case .discovering:
             stateStr = "discovering"
         case .connecting(let id):

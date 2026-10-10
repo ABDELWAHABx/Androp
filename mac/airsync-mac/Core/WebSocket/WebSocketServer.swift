@@ -17,6 +17,13 @@ class WebSocketServer: ObservableObject {
     
     internal var server = HttpServer()
     internal var activeSessions: [WebSocketSession] = []
+    internal var authenticatedPrimarySessionID: ObjectIdentifier?
+    var authenticatedSessionIdentity: ObjectIdentifier? {
+        lock.lock(); defer { lock.unlock() }
+        guard let identity = authenticatedPrimarySessionID, primarySessionID == identity,
+              activeSessions.contains(where: { ObjectIdentifier($0) == identity }) else { return nil }
+        return identity
+    }
     internal var primarySessionID: ObjectIdentifier?
     internal var pingTimer: Timer?
     internal let pingInterval: TimeInterval = 4.5
@@ -92,7 +99,7 @@ class WebSocketServer: ObservableObject {
         lifecycleQueue.async { [weak self] in
             guard let self = self, self.isCurrentLifecycle(generation) else { return }
             self.lock.lock()
-            self.primarySessionID = nil
+            self.primarySessionID = nil; self.authenticatedPrimarySessionID = nil
             self.activeSessions.removeAll()
             self.lastActivity.removeAll()
             self.lock.unlock()
@@ -153,6 +160,7 @@ class WebSocketServer: ObservableObject {
         restartWorkItem = nil
         isRestarting = false
         primarySessionID = nil
+        authenticatedPrimarySessionID = nil
         activeSessions.removeAll()
         lastActivity.removeAll()
         lock.unlock()
@@ -255,7 +263,7 @@ class WebSocketServer: ObservableObject {
                 self.activeSessions.removeAll(where: { $0 === session })
                 let sessionCount = self.activeSessions.count
                 let wasPrimary = (ObjectIdentifier(session) == self.primarySessionID)
-                if wasPrimary { self.primarySessionID = nil }
+                if wasPrimary { self.primarySessionID = nil; self.authenticatedPrimarySessionID = nil }
                 self.lock.unlock()
                 
                 if sessionCount == 0 {

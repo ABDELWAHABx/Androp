@@ -6,6 +6,7 @@ import Foundation
 struct QuickShareTransferSheet: View {
     @ObservedObject var manager = QuickShareManager.shared
     @ObservedObject var appState = AppState.shared
+    @ObservedObject private var network = TransferNetworkCoordinator.shared
     
     var body: some View {
         ZStack {
@@ -109,19 +110,18 @@ struct QuickShareTransferSheet: View {
                 }
             }
             .frame(maxHeight: 168)
-            Text("Files use Wi-Fi and are saved in Downloads on your phone.")
+            Text("Files use Wi-Fi and are saved in Downloads on your phone. If needed, androp connects a temporary Wi-Fi link automatically when you press Send.")
                 .font(.caption).foregroundStyle(.secondary)
+            if manager.completedPreparedFileCount > 0 {
+                Text("\(manager.completedPreparedFileCount) already sent. Send continues with the remaining files.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if !manager.canSendPreparedFiles {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Connect Wi-Fi to send", systemImage: "wifi")
-                        .font(.subheadline).fontWeight(.medium)
-                    Text("Your files stay selected. Join the same Wi-Fi network, or connect to your phone's hotspot below. Send becomes available when the same paired phone reconnects.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    PhoneHotspotControls(compact: true)
-                }
-                .padding(12)
-                .background(Color.secondary.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                Label(appState.isSyncPaused ? "Resume androp to send." : "Reconnect the same paired phone over Bluetooth or Wi-Fi to send.", systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let feedback = manager.dropFeedback {
+                Text(feedback).font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Button("Choose files…") { manager.chooseFilesForConnectedDevice() }
@@ -215,6 +215,14 @@ struct QuickShareTransferSheet: View {
                     Text("\(Int(min(1, max(0, manager.transferProgress)) * 100))%")
                         .font(.caption)
                 }
+            } else if case .connectingNetwork(let target) = manager.transferState {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Connecting Wi-Fi for \(target)").font(.headline)
+                    Text(network.statusMessage ?? "Preparing a fast connection. Your files will send automatically when it is ready.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
             } else if case .connecting = manager.transferState {
                 VStack(spacing: 8) {
                     ProgressView()
@@ -243,6 +251,15 @@ struct QuickShareTransferSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    if manager.canReviewPreparedFiles {
+                        Button("Review and retry") { manager.reviewPreparedFiles() }
+                            .buttonStyle(.borderedProminent)
+                        DisclosureGroup("Other ways to connect") {
+                            Text("You can join the same Wi-Fi network or use your phone's saved hotspot, then retry with the selected files.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            PhoneHotspotControls(compact: true)
+                        }
+                    }
                 }
             }
             

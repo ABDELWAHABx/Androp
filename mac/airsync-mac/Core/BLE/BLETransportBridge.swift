@@ -29,6 +29,19 @@ class BLETransportBridge {
     }
     
     private func handleMacControl(_ payload: String) {
+        if payload.utf8.count <= TransferNetworkProtocol.maximumEnvelopeBytes,
+           let bytes = payload.data(using: .utf8),
+           let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+           envelope["type"] as? String == "transferNetwork" {
+            let generation = BLECentralManager.shared.sessionGeneration
+            DispatchQueue.main.async {
+                guard BLECentralManager.shared.isAuthenticated,
+                      BLECentralManager.shared.sessionGeneration == generation else { return }
+                TransferNetworkCoordinator.shared.handleEnvelope(payload)
+            }
+            return
+        }
+
         if payload.utf8.count <= 2048, let bytes = payload.data(using: .utf8),
            let message = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
            message["type"] as? String == "macPowerControl", let data = message["data"] as? [String: Any] {

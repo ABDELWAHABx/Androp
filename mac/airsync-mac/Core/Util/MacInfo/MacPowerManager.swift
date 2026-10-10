@@ -82,14 +82,14 @@ final class MacPowerManager: ObservableObject {
         QuickShareManager.shared.$transferProgress.receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 switch QuickShareManager.shared.transferState {
-                case .sending, .receiving: self?.setTransferActive(id: "quickshare", active: true)
+                case .connectingNetwork, .sending, .receiving: self?.setTransferActive(id: "quickshare", active: true)
                 default: self?.setTransferActive(id: "quickshare", active: false)
                 }
             }.store(in: &observers)
         QuickShareManager.shared.$transferState.receive(on: DispatchQueue.main)
             .sink { [weak self] state in
                 switch state {
-                case .sending, .receiving: self?.setTransferActive(id: "quickshare", active: true)
+                case .connectingNetwork, .sending, .receiving: self?.setTransferActive(id: "quickshare", active: true)
                 default: self?.setTransferActive(id: "quickshare", active: false)
                 }
             }.store(in: &observers)

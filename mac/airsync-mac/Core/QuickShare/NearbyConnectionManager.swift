@@ -179,6 +179,26 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
 	
 	private var tcpListener:NWListener?
 	private var isVisible = false
+    private var lastAdvertisedQuickSharePort: Int?
+
+    /// A listener can retain a port while waiting, failed, or cancelled. Only
+    /// publish an endpoint that is accepting connections right now.
+    var readyQuickSharePort: Int? {
+        guard isVisible, let listener = tcpListener, case .ready = listener.state,
+              let port = listener.port, port.rawValue > 0 else { return nil }
+        return Int(port.rawValue)
+    }
+
+    private func refreshTransferEndpoint() {
+        let port = readyQuickSharePort
+        guard port != lastAdvertisedQuickSharePort else { return }
+        lastAdvertisedQuickSharePort = port
+        guard !AppState.shared.isSyncPaused,
+              AppState.shared.device?.isRegularConnection == true else { return }
+        // Existing MacInfo transport targets the authenticated paired session.
+        // A missing optional port clears Android's previously cached endpoint.
+        WebSocketServer.shared.sendMacInfoResponse()
+    }
 	public let endpointID:[UInt8]=generateEndpointID()
 	private var mdnsService:NetService?
 	private var activeConnections:[String:InboundNearbyConnection]=[:]
@@ -213,8 +233,15 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
             listener.stateUpdateHandler = { [weak self, weak listener] state in
                 Task { @MainActor in
                     guard let self, let listener, self.tcpListener === listener, self.isVisible else { return }
-                    if case .ready = state { self.initMDNS() }
-                    if case .failed = state { self.stopVisibility() }
+                    switch state {
+                    case .ready:
+                        self.initMDNS()
+                        self.refreshTransferEndpoint()
+                    case .failed, .cancelled:
+                        self.stopVisibility()
+                    default:
+                        self.refreshTransferEndpoint()
+                    }
                 }
             }
             listener.newConnectionHandler = { [weak self, weak listener] connection in
@@ -234,6 +261,7 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
         } catch {
             print("[nearby] Cannot start listener: \(error)")
             isVisible = false
+            refreshTransferEndpoint()
         }
     }
 
@@ -246,6 +274,7 @@ public class NearbyConnectionManager : NSObject, NetServiceDelegate, InboundNear
         tcpListener?.newConnectionHandler = nil
         tcpListener?.cancel()
         tcpListener = nil
+        refreshTransferEndpoint()
         browser?.cancel()
         browser = nil
         discoveryRefCount = 0

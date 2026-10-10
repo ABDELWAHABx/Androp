@@ -15,4 +15,5 @@ struct MacInfo: Codable {
     let isPlusSubscription: Bool
     let version: String
     let savedAppPackages: [String]
+    var quickSharePort: Int? = nil
 }

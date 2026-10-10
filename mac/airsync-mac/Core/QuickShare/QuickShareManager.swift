@@ -46,11 +46,15 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     private var preparedDeviceName: String?
     private var wsTransferID: String?
     private var fileSendGeneration: UInt64 = 0
+    private var transferNetworkLease: UUID?
+    private var preparedNextFileIndex = 0
+    private var preparedCompletedBytes: Int64 = 0
     
     public enum TransferState: Equatable {
         case idle
         case preparing(String)
         case reviewing(String)
+        case connectingNetwork(String) // paired device name
         case discovering
         case connecting(String) // deviceID
         case awaitingPin(String, String) // pin, deviceID
@@ -156,7 +160,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         self.autoTargetDeviceName = nil
         
         switch transferState {
-        case .preparing, .reviewing, .discovering, .connecting, .awaitingPin, .sending, .receiving, .incomingAwaitingConsent:
+        case .preparing, .reviewing, .connectingNetwork, .discovering, .connecting, .awaitingPin, .sending, .receiving, .incomingAwaitingConsent:
             cancelActiveTransfer()
         default:
             break
@@ -165,6 +169,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
 
     public func cancelActiveTransfer() {
         fileSendGeneration &+= 1
+        releaseTransferNetwork(cancelled: true)
         if let id = wsTransferID {
             wsTransferID = nil
             WebSocketServer.shared.cancelFileTransfer(id: id, notifyRemote: true)
@@ -232,10 +237,13 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         }
         guard !urls.isEmpty else { presentFileError("Choose one or more files to send."); return }
         fileSendGeneration &+= 1
+        resetGeneration &+= 1
         let generation = fileSendGeneration
         dropFeedback = nil
         transferURLs = []
         preparedFileSizes = []
+        preparedNextFileIndex = 0
+        preparedCompletedBytes = 0
         selectedFileSize = 0
         preparedDeviceID = device.deviceId
         preparedPairingToken = UserDefaults.standard.string(forKey: "bleAuthToken")
@@ -289,7 +297,20 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         }
     }
 
+    /// Send can establish a fast link from the authenticated BLE connection.
+    /// Actual file bytes still require a verified network session below.
     public var canSendPreparedFiles: Bool {
+        FileTransferRoutePolicy.mayBegin(
+            preparedDeviceID: preparedDeviceID,
+            currentDeviceID: AppState.shared.device?.deviceId,
+            preparedPairingToken: preparedPairingToken,
+            currentPairingToken: UserDefaults.standard.string(forKey: "bleAuthToken"),
+            networkConnected: AppState.shared.device?.isRegularConnection == true,
+            bluetoothAuthenticated: BLECentralManager.shared.isAuthenticated,
+            paused: AppState.shared.isSyncPaused)
+    }
+
+    private var canStreamPreparedFiles: Bool {
         FileTransferRoutePolicy.maySend(
             preparedDeviceID: preparedDeviceID,
             currentDeviceID: AppState.shared.device?.deviceId,
@@ -299,19 +320,67 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
             paused: AppState.shared.isSyncPaused)
     }
 
+    public var canReviewPreparedFiles: Bool {
+        preparedDeviceID != nil && !transferURLs.isEmpty && preparedFileSizes.count == transferURLs.count
+    }
+
+    public var completedPreparedFileCount: Int { preparedNextFileIndex }
+
+    public func reviewPreparedFiles() {
+        guard case .failed = transferState, canReviewPreparedFiles else { return }
+        dropFeedback = nil
+        transferState = .reviewing(preparedDeviceName ?? "your phone")
+    }
+
     public func sendPreparedFiles() {
         guard case .reviewing = transferState, !transferURLs.isEmpty else { return }
-        guard canSendPreparedFiles, let device = AppState.shared.device else {
-            dropFeedback = "Connect the same paired phone over Wi-Fi before sending. Your selected files are still here."
+        guard canSendPreparedFiles, let targetID = preparedDeviceID else {
+            dropFeedback = "Reconnect the same paired phone, then try Send again. Your selected files are still here."
             return
         }
         fileSendGeneration &+= 1
         let generation = fileSendGeneration
         let files = transferURLs
+        dropFeedback = nil
         transferProgress = 0
+        sendingFileName = nil
         sendingDeviceName = preparedDeviceName
-        transferState = .sending(device.deviceId)
-        sendPreparedFile(files, index: 0, completedBytes: 0, targetID: device.deviceId, generation: generation)
+        transferState = .connectingNetwork(preparedDeviceName ?? "your phone")
+        transferNetworkLease = TransferNetworkCoordinator.shared.ensureNetwork(
+            deviceID: targetID, pairingToken: preparedPairingToken) { [weak self] result in
+                // The coordinator can complete immediately on existing Wi-Fi.
+                // Defer until its lease has been assigned, and consume once.
+                Task { @MainActor in
+                    guard let self, self.fileSendGeneration == generation,
+                          case .connectingNetwork = self.transferState else { return }
+                    switch result {
+                    case .success:
+                        guard self.canStreamPreparedFiles else {
+                            self.failPreparedTransfer("The paired phone changed before sending. Reconnect the original phone and try again.")
+                            return
+                        }
+                        self.transferState = .sending(targetID)
+                        self.sendPreparedFile(files, index: self.preparedNextFileIndex,
+                            completedBytes: self.preparedCompletedBytes, targetID: targetID, generation: generation)
+                    case .failure(let error):
+                        self.failPreparedTransfer(error.localizedDescription)
+                    }
+                }
+            }
+    }
+
+    private func releaseTransferNetwork(cancelled: Bool = false) {
+        guard let id = transferNetworkLease else { return }
+        transferNetworkLease = nil
+        if cancelled { TransferNetworkCoordinator.shared.cancel(id: id) }
+        else { TransferNetworkCoordinator.shared.finish(id: id) }
+    }
+
+    private func failPreparedTransfer(_ message: String) {
+        wsTransferID = nil
+        sendingFileName = nil
+        transferState = .failed(message)
+        releaseTransferNetwork()
     }
 
     private func sendPreparedFile(_ files: [URL], index: Int, completedBytes: Int64,
@@ -322,11 +391,11 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
             sendingFileName = nil
             transferProgress = 1
             transferState = .finished
+            releaseTransferNetwork()
             return
         }
-        guard canSendPreparedFiles else {
-            wsTransferID = nil
-            transferState = .failed("The paired phone or Wi-Fi connection changed. Review the files again before retrying.")
+        guard canStreamPreparedFiles else {
+            failPreparedTransfer("The paired phone or Wi-Fi connection changed. Your remaining files are still selected.")
             return
         }
         let url = files[index]
@@ -336,18 +405,20 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         sendingFileName = url.lastPathComponent
         WebSocketServer.shared.sendFile(url: url, transferID: id, expectedDeviceID: targetID, expectedFileSize: size,
             progress: { fraction in
-                guard self.fileSendGeneration == generation else { return }
+                guard self.fileSendGeneration == generation, self.wsTransferID == id else { return }
                 self.transferProgress = self.selectedFileSize > 0
                     ? (Double(completedBytes) + Double(size) * fraction) / Double(self.selectedFileSize)
                     : (Double(index) + fraction) / Double(files.count)
             }, completion: { success, error in
-                guard self.fileSendGeneration == generation else { return }
+                guard self.fileSendGeneration == generation, self.wsTransferID == id else { return }
                 self.wsTransferID = nil
                 if success {
+                    self.preparedNextFileIndex = index + 1
+                    self.preparedCompletedBytes = completedBytes + size
                     self.sendPreparedFile(files, index: index + 1, completedBytes: completedBytes + size,
                                           targetID: targetID, generation: generation)
                 } else {
-                    self.transferState = .failed(error ?? "Couldn't send the file. Check Wi-Fi and try again.")
+                    self.failPreparedTransfer(error ?? "Couldn't send the file. Your remaining files are still selected; try again.")
                 }
             })
     }
@@ -380,7 +451,8 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     // MARK: - MainAppDelegate (Incoming)
     
     public func obtainUserConsent(for transfer: TransferMetadata, from device: RemoteDeviceInfo) {
-        guard !AppState.shared.isSyncPaused && !suspended && isEnabled else {
+        guard !AppState.shared.isSyncPaused && !suspended && isEnabled,
+              transferNetworkLease == nil else {
             handleUserConsent(transferID: transfer.id, accepted: false)
             return
         }
@@ -533,12 +605,14 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     }
     
     public func connectionWasEstablished(pinCode: String) {
-        let deviceID = caseDiscoveryID() ?? "unknown"
+        guard let deviceID = caseDiscoveryID() else { return }
         lastPinCode = pinCode
         transferState = .awaitingPin(pinCode, deviceID)
     }
 
     private func caseDiscoveryID() -> String? {
+        // Nearby delegate callbacks cannot take over an authenticated batch.
+        guard transferNetworkLease == nil else { return nil }
         switch transferState {
         case .connecting(let id), .awaitingPin(_, let id), .sending(let id):
             return id
@@ -548,6 +622,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     }
     
     public func connectionFailed(with error: Error) {
+        guard caseDiscoveryID() != nil else { return }
         transferState = .failed(error.localizedDescription)
         resetTransfer(after: 3)
     }
@@ -559,10 +634,12 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     }
     
     public func transferProgress(progress: Double) {
+        guard caseDiscoveryID() != nil else { return }
         self.transferProgress = progress
     }
     
     public func transferFinished() {
+        guard caseDiscoveryID() != nil else { return }
         transferState = .finished
         resetTransfer(after: 2)
     }

@@ -1,46 +1,62 @@
-# Automatic Mac hotspot joining
+# Automatic Wi-Fi for file transfers
 
-Preview 4 adds **Connect** to the Phone hotspot controls in both the main window and androp menu bar. The saved-password joining action also understands Preview 3 Android, but install both Preview 4 apps for persistent BLE alongside Wi-Fi and the latest connection recovery.
+Preview 5 makes network preparation part of Send in both directions. Install both updated apps, pair them once, and enable Bluetooth sync on both. An authenticated Wi-Fi connection is reused when available. Otherwise, the paired BLE connection coordinates a temporary phone Wi-Fi network, the Mac joins it, and the files start after the paired network session has authenticated. You do not need to choose an SSID, enter a password, or press a separate hotspot Connect button for this transfer path.
 
-## Setup and behavior
+## Sending files
 
-1. Expand **Phone hotspot** and choose the phone's Wi-Fi name from **Saved networks**, or enter its exact name. androp remembers that selection for the connected device identity.
-2. Click **Connect**. If necessary, macOS asks for Location access so CoreWLAN can find the Wi-Fi network.
-3. androp requests fresh hotspot status over the existing authenticated connection. If the hotspot is off, it requests activation and waits for the phone's actual tethered-interface confirmation. If the phone acknowledges the activation request and then drops its old Wi-Fi connection, androp instead searches for the selected secure hotspot and confirms the Mac's actual association; merely sending a command never means connected.
-4. The Mac scans for the selected WPA2/WPA3 network, obtains its existing password through Apple's Keychain API, and associates with it. macOS may ask to authorize Keychain access or the Wi-Fi change.
+- **Mac → Android:** choose or drop files, review the selection, and press **Send**. The sheet shows connection progress before file progress. Recoverable connection errors retain the selection for **Review and retry**; a partially completed batch continues with its remaining files.
+- **Android → Mac:** share files to androp. The share flow prepares the files once, requests a fast connection when needed, and hands them to the sending service after the same paired Mac authenticates. Permission prompts and screen rotation preserve the pending selection. Retry keeps the staged files; cancellation removes the temporary copies. Existing receiving consent or PIN prompts still apply.
+- File bytes use the network, not BLE. Device identity and the pairing key are checked before handing off a selection; a nearby device with a matching display name cannot inherit it.
 
-The SSID is stored in androp preferences; the password stays in the existing Mac Keychain. Only that selected network's password is requested. It is used in process memory for association, never logged, persisted by androp, passed to a shell/subprocess, or sent to Android. If the saved credential is missing or access is denied, the app explains how to join using the native Wi-Fi menu and save the password there. No extra password-entry form, ADB or wireless debugging is required.
+The temporary connection uses Android's public **local-only hotspot** API. It does not enable cellular tethering, require a mobile data plan, or provide internet access to the Mac. Joining it can temporarily replace the Mac's current Wi-Fi connection. The separate **Phone hotspot → Connect** action remains available when you want the phone's existing internet hotspot instead.
 
-Joining changes the active Mac Wi-Fi network. Bluetooth keeps the control path usable while the network changes. Association success is reported separately from cellular/internet availability.
+## Permissions and platform limits
 
-## Bounds and cancellation
+Android 13 and newer require **Nearby Wi-Fi devices** permission; older supported Android versions require Location permission and may require Location Services to be enabled. Android-originated sharing asks through the normal system permission dialog. For the first Mac-originated attempt, a background phone app cannot force that dialog onto the screen: the Mac explains that you must open androp on the phone. The resumed phone app requests the permission, then you can retry with the files still selected.
 
-- One connection attempt at a time; no background auto-join polling or automatic network switching merely because the phone connects.
-- Fresh phone status and an activation acknowledgement are required. An unacknowledged queued request, permission failure, cancelled request or mismatched response cannot initiate association. A link loss after a requesting acknowledgement can start the bounded hotspot scan, unless the user paused or explicitly disconnected.
-- At most six Wi-Fi scans with short interruptible retry waits and a 30-second retry deadline; no new retries after cancellation. Location authorization waiting expires after 30 seconds. Phone requests retain their existing 30-second Mac / 20-second Android observation limits.
-- CoreWLAN/Keychain operations are synchronous system APIs and run on a serial background queue, outside the main thread. A call already submitted to macOS cannot be safely retracted; cancelling or pausing prevents subsequent work and reports that an in-flight association may complete. androp does not disconnect a network the OS has already joined.
-- Phone identity is checked before activation. Requests prefer an already-authenticated BLE peer and retain that binding across Wi-Fi loss; a different peer cannot complete them. Once association starts, ordinary control-session disconnection does not cancel it, because changing Wi-Fi can itself interrupt that session.
-- SSIDs are validated by UTF-8 byte length, not character count. Open lookalikes with the same SSID are never used as a fallback. Keychain denial does not trigger another domain's authorization prompt.
+macOS asks for Location access when needed to discover the temporary Wi-Fi network. There is no need to grant root access, use ADB, enable wireless debugging, or install a helper. Denied permissions, unavailable Wi-Fi, and manufacturer restrictions produce an error with a shared-Wi-Fi alternative.
 
-Samsung/carrier restrictions on hotspot activation still apply. Android offers no ordinary app permission to disable global Data Saver; use the phone settings action when needed. These Mac changes cannot grant additional Android privileges.
+Samsung firmware, carrier policy, or an already-active hotspot can prevent Android from creating the temporary network. androp does not disable or reconfigure the user's existing internet hotspot to work around that failure. Ordinary Android applications also cannot disable global Data Saver. This implementation does not promise that every Samsung configuration supports local-only hotspot operation.
 
-## Native Wi-Fi menu boundary
+## Coordination, identity, and credentials
 
-Apple's documented [Instant Hotspot](https://support.apple.com/en-gb/109321) uses a nearby iPhone/iPad and an Apple Account or Family Sharing relationship. No documented public API was found for adding a dormant Android device to the native macOS Wi-Fi menu or intercepting its selection. androp therefore provides its own Connect action. The real phone network naturally appears in the native menu once it is broadcasting.
+The peers exchange a versioned `transferNetwork` envelope with a UUID identifying one transfer-network lease. The inner payload, including generated SSID and password, is encrypted with AES-GCM using the pairing's existing network key. It travels over the authenticated BLE control characteristics. These credentials stay in memory: androp does not log them, persist them, pass them to a shell, or add them to its saved-hotspot preferences.
+
+Initial network creation requires the paired BLE connection. After Wi-Fi authenticates for the same pairing, encrypted keep-alive, stop, and error messages can use that socket if BLE drops. An active file transfer therefore need not fail just because Bluetooth briefly disconnects. A newly authenticated BLE connection for the same pairing can resume carrying lease controls while the paired Wi-Fi session remains valid. Wi-Fi lease-control messages cannot initiate an unsolicited new hotspot or share.
+
+The Mac joins only the supplied WPA2/WPA3 network and waits for a local IPv4 address on the selected Wi-Fi interface. It then proposes that private address and its server port over BLE. Android validates the bounded private-IPv4 endpoint and starts its normal authenticated socket connection. The Mac allows up to three endpoint announcements, 17 seconds apart, so the handoff does not depend solely on mDNS visibility on the phone hotspot.
+
+This new envelope encryption applies to transfer-network coordination. It does not retrofit encryption onto every legacy BLE feature or replace the existing BLE pairing-token protocol with mutual cryptographic authentication.
+
+## Lifetime, cancellation, and power
+
+- A single explicit transfer owns the temporary network. There are no idle hotspot scans, network creation loops, or keep-alives when there is no active lease.
+- Android limits local-hotspot startup to 30 seconds. The Mac's complete connection attempt has a 120-second deadline; the Android outgoing-share screen waits up to 90 seconds. These application deadlines stop subsequent work, but cannot forcibly abort a synchronous platform Wi-Fi call already in progress.
+- An unused lease expires after 90 seconds. The owning Mac transfer sends a keep-alive approximately every 30 seconds; an Android outgoing share or sending service sends one approximately every 25 seconds. A keep-alive cannot extend Android's initial hotspot-startup deadline. The receiving peer does not keep an abandoned sender's lease alive indefinitely.
+- Completion, cancellation, pause, explicit disconnect, a changed pairing, and loss of both usable transports release the owned temporary network. Unexpected BLE loss alone can retain it while the same-key Wi-Fi connection is authenticated. Stop and stale callbacks cannot release another transfer's lease.
+- Android closes only its own local-only hotspot reservation. The public API cannot cancel a pending startup request before a reservation is returned; a late reservation belonging to a cancelled attempt is immediately closed.
+- On the Mac, background serial Wi-Fi work keeps synchronous CoreWLAN and Keychain calls off the UI thread. Cleanup is tied to the transfer owner and the actual current network. Normal completion can leave the owned temporary network and attempt to restore the previous saved network; it does not override a network the user has already selected. Pause/manual disconnect suppress new restoration scans, Keychain lookups, and association attempts. A previously submitted OS association can still finish before queued cleanup runs.
+
+Cancellation is explicit; a cancelled or failed transfer does not silently start sending later when an unrelated connection appears.
+
+## Existing internet-hotspot joining
+
+For cellular internet, expand **Phone hotspot**, select the phone's exact SSID from **Saved networks** or enter it once, then click **Connect**. androp requests fresh phone hotspot status and, if needed, asks Android to activate the existing hotspot. It waits for actual status confirmation. If Android acknowledges activation before dropping its old Wi-Fi link, the Mac may instead confirm the selected secure hotspot by association.
+
+The Mac obtains the selected SSID's existing password through Apple's Keychain API. The system may ask to authorize Keychain access. Only an item-not-found result triggers a second lookup in the system domain; denial does not cause another authorization prompt. The password is used in memory, and is not logged, saved by androp, or sent to the phone. Missing credentials must first be saved through the normal macOS Wi-Fi interface. androp remembers only the selected SSID for that paired identity.
+
+This saved-network path uses bounded scans and interruptible retries, and distinguishes Wi-Fi association from actual internet availability. Android's ordinary Modify System Settings permission and supported tethering implementation are still required for internet-hotspot activation. Samsung/carrier restrictions and global Data Saver remain outside androp's control.
+
+## Native macOS Wi-Fi menu
+
+Apple's documented [Instant Hotspot](https://support.apple.com/en-gb/109321) uses a nearby iPhone/iPad and an Apple Account or Family Sharing relationship. No documented public API was found for adding a dormant Android device to the native macOS Wi-Fi menu or intercepting its selection. androp supplies its own automatic transfer flow and internet-hotspot Connect action. An actual broadcasting phone network can appear in the native menu normally.
 
 ## Public APIs and verification
 
-- [CWConfiguration.networkProfiles](https://developer.apple.com/documentation/corewlan/cwconfiguration/networkprofiles) lists remembered networks.
-- [CWKeychainFindWiFiPassword](https://developer.apple.com/documentation/corewlan/cwkeychainfindwifipassword%28_%3A_%3A_%3A%29) reads the selected SSID's credential from the user domain, then the system domain only if the item was not found.
-- [CWInterface association](https://developer.apple.com/documentation/corewlan/cwinterface/associate%28to%3Apassword%3A%29) joins the selected network.
-- [Apple DTS guidance](https://developer.apple.com/forums/thread/748161) explains the Location Services authorization requirement for modern macOS scans.
+- [Android local-only hotspot](https://developer.android.com/develop/connectivity/wifi/localonlyhotspot) creates a temporary local network without cellular tethering.
+- [CWInterface association](https://developer.apple.com/documentation/corewlan/cwinterface/associate%28to%3Apassword%3A%29) joins a supplied secure network.
+- [CWConfiguration.networkProfiles](https://developer.apple.com/documentation/corewlan/cwconfiguration/networkprofiles) lists remembered networks for the separate saved-hotspot flow.
+- [CWKeychainFindWiFiPassword](https://developer.apple.com/documentation/corewlan/cwkeychainfindwifipassword%28_%3A_%3A_%3A%29) retrieves a selected saved network's credential for joining or restoration.
+- [Apple DTS guidance](https://developer.apple.com/forums/thread/748161) explains Location Services authorization for modern macOS scanning.
 
-Production-manager regressions cover confirmed on/off versus failed observations, queued-request rejection, duplicate confirmations, pause cancellation and reentrant activation. Policy regressions cover SSID byte limits, invalid clock/retry limits and cancellation waking a retry wait. Native builds and packaged-app lifecycle checks are recorded in the repository verification files. Actual Keychain authorization, Samsung activation, Wi-Fi association, and cellular routing still need testing on the user's Mac and phone.
-
-## File-transfer handoff
-
-Selecting or dropping files while on BLE now retains them in a review sheet with hotspot controls. After the same authenticated phone reconnects over Wi-Fi, Send becomes available. Device identity and pairing-token continuity are checked before sending and before every file in a batch. Files are never sent over BLE, and a nearby phone with a matching display name cannot inherit the selection.
-
-This flow uses the existing phone hotspot or a shared Wi-Fi network. It does not automatically create a temporary transfer network. Android's public [local-only hotspot API](https://developer.android.com/develop/connectivity/wifi/localonlyhotspot) could support a future router-free, non-cellular transfer path using normal Nearby Wi-Fi permission. That requires authenticated temporary credential exchange, IP discovery and cleanup on both peers; the current Nearby protocol implementation does not negotiate that upgrade.
-
-After confirmed association and a bounded DHCP wait, the Mac sends its selected Wi-Fi interface IPv4 address/port over the existing authenticated BLE link. Android accepts only bounded private-IPv4 endpoints from the still-current paired peer and starts one normal socket attempt. Pause/manual disconnect block it. This avoids relying solely on mDNS visibility on Samsung tethered interfaces.
+Regression coverage includes bounded envelopes and UUIDs, authenticated credential encryption and tamper rejection, Wi-Fi control restrictions, paired-device transfer gating, cancellation, retry selection handling, and temporary-network ownership. Build and packaged-app results are recorded separately in the repository verification files. Local-only hotspot creation, Samsung coexistence restrictions, physical BLE/Wi-Fi handoff, system permission prompts, actual network restoration, and battery impact still require testing on the user's Mac and phone. Simulator or radio-free CI results are not evidence that those hardware paths work.
