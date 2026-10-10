@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// In-app alternative to WidgetKit for builds without a usable App Group.
