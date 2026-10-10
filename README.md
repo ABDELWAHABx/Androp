@@ -6,7 +6,7 @@ androp is a personal continuation of [AirSync macOS](https://github.com/sameeras
 
 Control your Mac from your phone, send files into Android Downloads, share a video at its timestamp, and reach everyday actions from one notification dashboard. Pause stops the underlying work. An empty media session no longer takes over the screen.
 
-[Private preview downloads](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.1) · [Experience review](mac/EXPERIENCE_REVIEW.md) · [Power and performance review](mac/PERFORMANCE_REVIEW.md) · [Closed-lid experiment](mac/CLOSED_LID_REVIEW.md)
+[Public source](https://github.com/ABDELWAHABx/Androp) · [Private preview downloads](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.1) · [Experience review](mac/EXPERIENCE_REVIEW.md) · [Power and performance review](mac/PERFORMANCE_REVIEW.md) · [Closed-lid experiment](mac/CLOSED_LID_REVIEW.md)
 
 ## What changed
 
@@ -15,7 +15,7 @@ Control your Mac from your phone, send files into Android Downloads, share a vid
 | Pause and power | Cancels sync, discovery, transfers, media and mirroring work. Resume remains available. Event-driven input, bounded queues and active-only monitoring replace unnecessary background work. |
 | Android dashboard | One quiet notification combines connection state, transfers, consent, clipboard links and Find Phone. Contextual actions open the right screen. Native media keeps its own player. |
 | Samsung / Android 16 | Requests supported Live Updates for active work, with a normal notification fallback. Now Bar placement and visibility remain controlled by Android and Samsung settings. |
-| Remote controls | Trackpad below the buttons in portrait, to their right in wide layouts. Empty media hides; paused media stays compact. Pointer and text keyboard input use Wi-Fi/USB; supported small controls also work over authenticated BLE. |
+| Remote controls | Trackpad below the buttons in portrait, to their right in wide layouts. Empty media hides; paused media stays compact. Pointer and text keyboard input use the paired network connection; supported small controls also work over authenticated BLE. |
 | File transfers | Review dropped files on Mac, send with progress and cancellation, and confirm the final Android save. Bounded writes, SHA-256 verification and interrupted-transfer cleanup protect the paired transfer path. |
 | Clipboard | Message acknowledgements, finite retries and duplicate handling distinguish waiting from delivered. Android clipboard reading follows foreground restrictions; explicit Share to androp remains available. |
 | Media | Native Android MediaSession metadata, playback controls and remote volume control your Mac. Audio continues playing on the Mac; this does not stream its audio to the phone. |
@@ -39,15 +39,15 @@ Use the signed release APK for installation and updates. CI debug artifacts use 
 
 ### macOS
 
-**Native Mac CI is running; a successful build and Mac download are not yet confirmed.** Check the private release page for the ZIP or DMG and its installation notes when packaging finishes.
+Download the Apple Silicon **[DMG](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.1/androp-androp-v0.1.0-preview.1-arm64.dmg)** or **[ZIP](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.1/androp-androp-v0.1.0-preview.1-arm64.zip)** for M1 and newer Macs. The [native build passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081058944); installation notes, build metadata and SHA-256 checksums accompany the downloads. Intel Macs require a separate universal build.
 
-Once available, extract the ZIP or mount the DMG, move `androp.app` to Applications, and open it. The private build is ad-hoc signed, without Apple Developer ID signing or notarization. If macOS blocks launch, use the explicit **Open Anyway** option in **System Settings → Privacy & Security** after trying to open it.
+Extract the ZIP or mount the DMG, move `androp.app` to Applications, and open it. The private build is ad-hoc signed, without Apple Developer ID signing or notarization. If macOS blocks launch, use the explicit **Open Anyway** option in **System Settings → Privacy & Security** after trying to open it.
 
 The main app targets macOS **14.5+**; the bundled widget requires **macOS 15+**. Widget app-group access with an ad-hoc signature may require a locally developer-signed build. Newer visual and AI features retain their own OS requirements.
 
 ### Pair and choose permissions
 
-Open both updated apps on the same Wi-Fi network and scan the Mac's pairing QR code from Android. Existing AirSync pairings are separate; pair again in androp. Wi-Fi or USB is required for bulk files and pointer/text input. Authenticated BLE supports selected small commands; it is not a bulk-transfer replacement.
+Open both updated apps on the same Wi-Fi network and scan the Mac's pairing QR code from Android. Existing AirSync pairings are separate; pair again in androp. Use Wi-Fi for bulk files and pointer/text input. USB mirroring is a separate adb/scrcpy feature; plugging in a cable alone does not establish sync. Authenticated BLE supports selected small commands; it is not a bulk-transfer replacement.
 
 Permissions are feature-specific:
 
@@ -101,10 +101,10 @@ Optional integrations use `scrcpy`/`adb` for mirroring and `media-control` for m
 
 As of **10 October 2026**:
 
-- Android debug and optimized release APKs assembled; application identity and APK signatures were verified.
+- Android debug and optimized release APKs assembled; application identity and APK signatures were verified. [Android CI passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38079604285). The final connection-label clarification was rebuilt and signed locally afterward.
 - **56 Android JVM tests passed** with no failures or errors.
 - Android lint finished with **0 errors, 250 warnings and 10 hints**. Remaining warnings are not presented as a clean lint result.
-- Native Mac CI is running. A passing native build, bundled-helper execution and hardware pairing are not yet confirmed.
+- The [native Mac build passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081058944) on Xcode 26.6 / Swift 6.3.3, including **six keep-awake policy tests**. The app, widget and helper compiled; signatures, bundle identities, deployment targets and arm64 packaging were verified. CI did not activate the experimental helper or test hardware pairing.
 - Battery savings, BLE responsiveness, transfer throughput, Samsung Now Bar presentation and closed-lid behavior require measurements or device checks.
 
 [EXPERIENCE_REVIEW.md](mac/EXPERIENCE_REVIEW.md) records protocol behavior and remaining device checks. [PERFORMANCE_REVIEW.md](mac/PERFORMANCE_REVIEW.md) covers implementation findings; [CLOSED_LID_REVIEW.md](mac/CLOSED_LID_REVIEW.md) records the experimental power mechanism and its limits.

@@ -1,12 +1,12 @@
 # androp for macOS
 
-Private development version of [AirSync macOS](https://github.com/sameerasw/airsync-mac), based on upstream commit `bdaaecbebbc8308faeebe164334e6c409b34aaa6`.
+Personal continuation of [AirSync macOS](https://github.com/sameerasw/airsync-mac), based on upstream commit `bdaaecbebbc8308faeebe164334e6c409b34aaa6`.
 
 The original application documentation is preserved in [README.upstream.md](README.upstream.md). The original [LICENSE](LICENSE) and author attribution remain intact.
 
 ## Local development
 
-This repository is on the `own-version` branch. The `upstream` Git remote points to Sameera Wijerathna's repository. There is no publishing remote configured.
+This directory is the macOS client in the public [Androp source repository](https://github.com/ABDELWAHABx/Androp). Compiled personal previews remain in the [private release](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.1).
 
 Open `AirSync.xcodeproj` in Xcode and select the **androp** scheme. Original target and source names remain to simplify comparisons with upstream. Build products are named `androp.app` and `andropWidget.appex`.
 
@@ -22,7 +22,7 @@ xcodebuild -project AirSync.xcodeproj -scheme androp \
 
 This command is a build check; configure signing in Xcode for normal installation and widget use. The main app targets macOS 14.5; the widget and project default target macOS 15.0, so the app and widget can run together on Sequoia. Liquid Glass uses a material fallback below macOS 26; AI notification summaries require macOS 26.
 
-Building still requires Xcode 26 or newer with the macOS 26 SDK and Swift 6.2, because the source references newer SDK symbols inside runtime availability guards. For building on Sequoia, use Xcode 26 through 26.3 on macOS 15.6 or later; newer Xcode releases may require Tahoe. See Apple's [Xcode requirements](https://developer.apple.com/support/xcode/). The build SDK version does not raise the app's runtime deployment target. Mac compilation and device pairing cannot be verified on this Linux workspace.
+Building still requires Xcode 26 or newer with the macOS 26 SDK and Swift 6.2, because the source references newer SDK symbols inside runtime availability guards. For building on Sequoia, use Xcode 26 through 26.3 on macOS 15.6 or later; newer Xcode releases may require Tahoe. See Apple's [Xcode requirements](https://developer.apple.com/support/xcode/). The build SDK version does not raise the app's runtime deployment target. Native compilation passed in [GitHub macOS CI](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081058944). Device pairing remains unverified.
 
 ## Private GitHub downloads
 
@@ -46,7 +46,7 @@ The original license permits private modification and explicitly prohibits distr
 
 ## Verification
 
-Property lists, widget entitlements, Xcode schemes, localization JSON, and matching Android/Mac discovery constants were checked. The original licenses are unchanged. Xcode compilation and physical device pairing have not been tested in this Linux workspace.
+Property lists, widget entitlements, Xcode schemes, localization JSON, and matching Android/Mac discovery constants were checked. The original licenses are unchanged. Native CI on Xcode 26.6 / Swift 6.3.3 compiled the app, widget and embedded helper, passed six power-policy tests, verified signatures and bundle metadata, and packaged arm64 ZIP/DMG downloads. Physical device pairing remains untested.
 
 ## Performance and bug fixes
 
@@ -71,4 +71,4 @@ Mac settings provide an opt-in Keep Awake mode tied to actual file transfers, re
 
 On macOS 15, a separate default-off experimental option uses a bundled nonprivileged watchdog to request lid-specific sleep prevention. It requires battery above 20% and a thermal state below serious, with short renewable leases and cleanup on stop or loss of the parent. This uses a private OS interface; successful request acceptance does not prove closed-lid operation. Read [CLOSED_LID_REVIEW.md](CLOSED_LID_REVIEW.md) and perform its desk checks before relying on it on an M1 Air.
 
-Six pure keep-awake policy tests can run on a Swift-enabled host with `bash Tests/run-mac-power-policy-tests.sh`. They could not run in this Linux workspace because no Swift compiler is installed.
+Six pure keep-awake policy tests can run on a Swift-enabled host with `bash Tests/run-mac-power-policy-tests.sh`. All six passed on the GitHub macOS runner. The experimental helper was compiled and signed, but not activated in CI.

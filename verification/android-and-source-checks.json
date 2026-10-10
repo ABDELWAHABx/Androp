@@ -15,13 +15,40 @@
     "new_errors": 0,
     "unchanged_parser_limitations": 4,
     "power_policy_tests_added": 6,
-    "power_policy_tests_run": false
+    "power_policy_tests_run": true,
+    "power_policy_test_failures": 0
   },
-  "native_mac_build": false,
+  "native_mac_build": true,
   "physical_device_testing": false,
   "experimental_closed_lid": {
     "default_enabled": false,
     "runtime": "macOS 15",
     "physical_behavior_verified": false
-  }
+  },
+  "native_mac_ci": {
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081058944",
+    "commit": "b0e214a3080aeada98fc92b2fbdc8e06058dc9ad",
+    "xcode": "26.6",
+    "swift": "6.3.3",
+    "architecture": "arm64",
+    "signatureVerification": true,
+    "helperCompiledAndSigned": true,
+    "helperActivated": false,
+    "notarized": false
+  },
+  "android_ci": {
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38079604285",
+    "commit": "5b8c143c79f202a03f147de9b4c23c1357232d4e",
+    "tests": 56,
+    "failures": 0,
+    "lintErrors": 0,
+    "lintWarnings": 250,
+    "lintHints": 10,
+    "finalUiCopyRebuiltLocally": true,
+    "releaseSourceCommit": "1162d29523b673006e81f085ebfbf8560ad72ed1",
+    "sha256": "a4f841c3bb61e4b586f9d08d28401308a96ba7c8207ec8716cb45504d5074bf5"
+  },
+  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38081768419",
+  "mac_download_checksums_verified": true,
+  "android_download_checksum_and_signature_verified": true
 }
