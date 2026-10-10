@@ -187,7 +187,7 @@ final class TransferNetworkCoordinator: NSObject, ObservableObject, CLLocationMa
                 }
             }
         case "error": fail(value, String((payload["message"] as? String ?? "The phone couldn't create a transfer network. Retry Send.").prefix(512)))
-        case "stop": end(value, failure: value.connected ? nil : "Transfer connection cancelled on your phone.", notify: false)
+        case "stop": end(value, failure: !value.remote || !value.connected ? "Transfer connection cancelled on your phone." : nil, notify: false)
         case "keepAlive":
             if value.remote && value.connected {
                 armDeadline(value, seconds: 90, message: "The phone stopped the transfer. Connection closed.")
@@ -306,6 +306,11 @@ final class TransferNetworkCoordinator: NSObject, ObservableObject, CLLocationMa
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
+    func isActiveLease(id: UUID) -> Bool {
+        guard let value = session, value.id == id else { return false }
+        return value.connected && valid(value)
+    }
+
     func cancel(id: UUID) { if let value = session, value.id == id { end(value, failure: "Transfer cancelled.", notify: true) } }
     func finish(id: UUID) { if let value = session, value.id == id { end(value, failure: nil, notify: true) } }
     private func fail(_ value: Session, _ message: String) { end(value, failure: message, notify: true) }
@@ -328,12 +333,19 @@ final class TransferNetworkCoordinator: NSObject, ObservableObject, CLLocationMa
         statusMessage = failure
         if value.temporarySSID != nil {
             let cleanup = HotspotWiFiAttempt()
-            if AppState.shared.isSyncPaused || UserDefaults.standard.isManuallyDisconnected { cleanup.cancel() }
+            if AppState.shared.isSyncPaused || UserDefaults.standard.isManuallyDisconnected ||
+                UserDefaults.standard.string(forKey: "bleAuthToken") != value.pairingToken ||
+                UserDefaults.standard.string(forKey: "encryptionKey").flatMap({ Data(base64Encoded: $0) }) != value.key {
+                cleanup.cancel()
+            }
             cleanupAttempt = cleanup
             cleanupKey = value.key
             cleanupPairingToken = value.pairingToken
             let owner = value.id
             HotspotWiFiWorker.queue.async { HotspotWiFiWorker.releaseTemporary(owner: owner, attempt: cleanup) }
+        }
+        if value.connected && !value.remote, let failure {
+            QuickShareManager.shared.transferNetworkInvalidated(id: value.id, message: failure)
         }
         let completion = value.completion; value.completion = nil
         if let failure { completion?(.failure(Failure(message: failure))) }

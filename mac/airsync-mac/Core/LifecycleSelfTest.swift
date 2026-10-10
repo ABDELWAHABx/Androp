@@ -16,7 +16,7 @@ enum LifecycleSelfTest {
         let state = AppState.shared
         guard !state.isSyncPaused, state.device == nil, !state.isBLEEnabled,
               !state.keepAwakeEnabled, !state.experimentalClosedLidEnabled,
-              !QuickShareManager.shared.isEnabled else {
+              !state.quickShareEnabled, !QuickShareManager.shared.isEnabled else {
             finish(success: false, message: "Isolated idle launch configuration is invalid")
             return
         }
@@ -96,12 +96,44 @@ enum LifecycleSelfTest {
                 return
             }
             print("LIFECYCLE resume \(cycle): real WebSocket listener and discovery started")
-            pause(cycle: cycle + 1)
+            if cycle == 1 {
+                AppState.shared.quickShareEnabled = true
+                awaitQuickShareToggle(deadline: ProcessInfo.processInfo.systemUptime + 3)
+            } else {
+                pause(cycle: cycle + 1)
+            }
         } else if ProcessInfo.processInfo.systemUptime >= deadline {
             finish(success: false, message: "Real listener did not resume within four seconds")
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 awaitResume(cycle: cycle, deadline: deadline)
+            }
+        }
+    }
+
+    @MainActor private static func awaitQuickShareToggle(deadline: TimeInterval) {
+        let manager = QuickShareManager.shared
+        if let port = NearbyConnectionManager.shared.readyQuickSharePort {
+            guard (1...65535).contains(port), manager.isEnabled, manager.isRunning,
+                  AppState.shared.quickShareEnabled, !AppState.shared.isSyncPaused,
+                  UserDefaults.standard.bool(forKey: "quickShareEnabled") else {
+                finish(success: false, message: "Quick Share enable setting did not start the real listener")
+                return
+            }
+            AppState.shared.quickShareEnabled = false
+            guard !manager.isEnabled, !manager.isRunning,
+                  NearbyConnectionManager.shared.readyQuickSharePort == nil,
+                  !UserDefaults.standard.bool(forKey: "quickShareEnabled") else {
+                finish(success: false, message: "Quick Share disable setting retained a listener or stale port")
+                return
+            }
+            print("LIFECYCLE quickshare: settings enable starts a real listener; disable removes listener and advertised port")
+            pause(cycle: 2)
+        } else if ProcessInfo.processInfo.systemUptime >= deadline {
+            finish(success: false, message: "Quick Share listener did not become ready after enabling settings")
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                awaitQuickShareToggle(deadline: deadline)
             }
         }
     }

@@ -798,7 +798,14 @@ class AppState: ObservableObject {
 
     @Published var quickShareEnabled: Bool {
         didSet {
+            guard quickShareEnabled != oldValue else { return }
             UserDefaults.standard.set(quickShareEnabled, forKey: "quickShareEnabled")
+            // Property observers do not run during this type's initialization.
+            // User changes can therefore synchronize the live service without
+            // recursively initializing AppState through QuickShareManager.
+            if QuickShareManager.shared.isEnabled != quickShareEnabled {
+                QuickShareManager.shared.isEnabled = quickShareEnabled
+            }
         }
     }
 

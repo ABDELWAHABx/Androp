@@ -18,8 +18,10 @@ struct QuickShareTransferInfo {
 @MainActor
 public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, ShareExtensionDelegate {
     public static let shared = QuickShareManager()
-    @Published public var isEnabled: Bool = UserDefaults.standard.bool(forKey: "quickShareEnabled") {
+    @Published public var isEnabled: Bool = UserDefaults.standard.object(forKey: "quickShareEnabled") == nil
+        ? true : UserDefaults.standard.bool(forKey: "quickShareEnabled") {
         didSet {
+            guard isEnabled != oldValue else { return }
             UserDefaults.standard.set(isEnabled, forKey: "quickShareEnabled")
             if isEnabled {
                 startService()
@@ -311,7 +313,9 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     }
 
     private var canStreamPreparedFiles: Bool {
-        FileTransferRoutePolicy.maySend(
+        guard let lease = transferNetworkLease,
+              TransferNetworkCoordinator.shared.isActiveLease(id: lease) else { return false }
+        return FileTransferRoutePolicy.maySend(
             preparedDeviceID: preparedDeviceID,
             currentDeviceID: AppState.shared.device?.deviceId,
             preparedPairingToken: preparedPairingToken,
@@ -367,6 +371,22 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
                     }
                 }
             }
+    }
+
+    /// The coordinator calls this after revoking a connected local lease.
+    /// Cancel the in-flight file before any delayed callback can start another.
+    func transferNetworkInvalidated(id: UUID, message: String) {
+        guard transferNetworkLease == id else { return }
+        transferNetworkLease = nil
+        fileSendGeneration &+= 1
+        let activeTransfer = wsTransferID
+        wsTransferID = nil
+        if let activeTransfer {
+            WebSocketServer.shared.cancelFileTransfer(id: activeTransfer, notifyRemote: true)
+        }
+        sendingFileName = nil
+        transferState = .failed(message)
+        AppState.shared.showingQuickShareTransfer = true
     }
 
     private func releaseTransferNetwork(cancelled: Bool = false) {
