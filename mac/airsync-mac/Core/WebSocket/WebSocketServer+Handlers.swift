@@ -75,6 +75,8 @@ extension WebSocketServer {
             handleRemoteControl(message)
         case .browseData:
             handleBrowseData(message)
+        case .phoneHotspotState:
+            if let data = message.data.value as? [String: Any] { PhoneHotspotManager.shared.handleState(data) }
         case .webDavAccess:
             guard !AppState.shared.isSyncPaused,
                   let device = AppState.shared.device, device.isRegularConnection,
@@ -93,6 +95,41 @@ extension WebSocketServer {
         case .volumeControl, .macVolume, .toggleAppNotif, .browseLs, .wakeUpRequest, .macMediaControlResponse, .macPowerControlResponse, .macInfo, .callControl:
             // Outgoing or unexpected messages
             break
+        }
+    }
+
+    /// Authenticated BLE uses only small control/state messages. File/session
+    /// negotiation never enters the WebSocket router without its socket identity.
+    func handleBLEMessage(_ message: Message) {
+        guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated else { return }
+        switch message.type {
+        case .phoneHotspotState:
+            if let data = message.data.value as? [String: Any] { PhoneHotspotManager.shared.handleState(data) }
+        case .status:
+            if let data = message.data.value as? [String: Any],
+               let battery = data["battery"] as? [String: Any],
+               let level = battery["level"] as? Int, (0...100).contains(level),
+               let charging = battery["isCharging"] as? Bool {
+                if data["music"] == nil {
+                    if AppState.shared.status == nil {
+                        AppState.shared.status = DeviceStatus(battery: .init(level: level, isCharging: charging), isPaired: true, music: nil)
+                    } else { AppState.shared.status?.battery = .init(level: level, isCharging: charging) }
+                } else { handleStatusUpdate(message) }
+            }
+        case .remoteControl:
+            // Cursor streaming needs the throughput and latency of Wi-Fi/USB.
+            guard let data = message.data.value as? [String: Any],
+                  let action = data["action"] as? String,
+                  !["mouse_move", "mouse_scroll", "mouse_click"].contains(action) else { return }
+            handleRemoteControl(message)
+        case .macMediaControl: handleMacMediaControlRequest(message)
+        case .notificationActionResponse: handleNotificationActionResponse(message)
+        case .dismissalResponse: handleDismissalResponse(message)
+        case .mediaControlResponse: handleMediaControlResponse(message)
+        case .callControlResponse: handleCallControlResponse(message)
+        case .callEvent: handleCallEvent(message)
+        case .callProgress: handleCallProgress(message)
+        default: break
         }
     }
 

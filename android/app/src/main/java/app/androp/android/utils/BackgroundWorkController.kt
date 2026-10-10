@@ -22,6 +22,7 @@ object BackgroundWorkController {
         val application = context.applicationContext
         runShutdownSteps(listOf(
             "phone alert" to { FindPhoneManager.stop() },
+            "hotspot status" to { HotspotControlManager.stopObserving() },
             "dashboard" to { SyncDashboardController.setPaused(true) },
             "file transfers" to { WebSocketFileTransfer.cancelAll() },
             "connection" to { WebSocketUtil.disconnect(application, manual = true) },

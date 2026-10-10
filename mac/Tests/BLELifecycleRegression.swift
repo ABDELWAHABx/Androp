@@ -19,7 +19,25 @@ func makeDevice(_ address: String) -> Device {
     Device(name: "Phone", ipAddress: address, port: 1234, version: "1", adbPorts: [], deviceId: "phone")
 }
 
+// The semaphore publishes the worker's result; the production method must
+// reject before accessing main-thread state, without scheduling hidden work.
+final class BackgroundWriteProbe: @unchecked Sendable {
+    let manager: BLECentralManager
+    let finished = DispatchSemaphore(value: 0)
+    var accepted = true
+    init(_ manager: BLECentralManager) { self.manager = manager }
+}
+
 let cases: [(String, () throws -> Void)] = [
+    ("Off-main BLE writes reject synchronously without waiting on main", {
+        let probe = BackgroundWriteProbe(makeManager())
+        Thread.detachNewThread {
+            probe.accepted = probe.manager.writeChunked(characteristicUUID: BLEConstants.charClipboardDataWrite, payload: "private clipboard")
+            probe.finished.signal()
+        }
+        try expect(probe.finished.wait(timeout: .now() + 2) == .success, "off-main write blocked waiting for main")
+        try expect(!probe.accepted, "off-main write reported success before checking its queue")
+    }),
     ("Existing Android battery JSON remains compatible and placeholders remain unknown", {
         let oldWirePacket = Data(#"{"level":0,"isCharging":false}"#.utf8)
         let reported = try JSONDecoder().decode(DeviceStatus.Battery.self, from: oldWirePacket)

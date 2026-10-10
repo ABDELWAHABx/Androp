@@ -156,7 +156,7 @@ object ClipboardSyncManager {
 
     suspend fun sendAndAwait(text: String, videoHandoff: Boolean = false): Boolean {
         val id = enqueueExplicit(text, videoHandoff) ?: return false
-        val deadline = if (app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) 60_000L else 15_000L
+        val deadline = app.androp.android.data.ble.BleControlPolicy.clipboardWaitMillis(text.toByteArray(Charsets.UTF_8).size, WebSocketUtil.isWifiConnected())
         val result = try {
             withTimeoutOrNull(deadline) { deliveryResults.first { id in it }[id] } ?: false
         } catch (e: CancellationException) {
@@ -194,7 +194,7 @@ object ClipboardSyncManager {
                     val entry = outbox.due(now)
                     if (entry != null) {
                         val data = JSONObject().put("text", entry.text).put("id", entry.id).put("videoHandoff", entry.videoHandoff)
-                        outbox.attempted(entry.id, now, if (app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) 60_000 else 4_000)
+                        outbox.attempted(entry.id, now, app.androp.android.data.ble.BleControlPolicy.clipboardRetryMillis(entry.text.toByteArray(Charsets.UTF_8).size, WebSocketUtil.isWifiConnected()))
                         val queued = WebSocketUtil.sendMessage(JSONObject().put("type", "clipboardUpdate").put("data", data).toString())
                         _deliveryState.value = DeliveryState(entry.id, "waiting", if (queued) null else "Transport busy")
                     } else {

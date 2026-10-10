@@ -61,4 +61,29 @@ class SyncDashboardStateTest {
         assertSame(cancelled, cancelled.withProgress("1", "file", 60, true))
     }
 
+    @Test fun hotspotSetupUsesOneExistingDashboardAndClearsOnPause() {
+        val setup = SyncDashboardState(hotspotSetup = "dataSaver")
+        assertTrue(setup.shouldShow)
+        assertFalse(setup.shouldRequestPromotion)
+        assertTrue(setup.activityLine.contains("Data Saver"))
+        assertNull(setup.pause().hotspotSetup)
+        assertFalse(setup.pause().activityLine.contains("Data Saver"))
+    }
+
+    @Test fun hotspotSetupCannotHideIncomingFileConsent() {
+        val setup = SyncDashboardState(hotspotSetup = "permission",
+            consents = listOf(DashboardConsent("id", "Mac", "photo.jpg")))
+        assertEquals("Mac wants to share files", setup.activityLine)
+    }
+
+    @Test fun hotspotActionPublishesImmediatelyWithoutProgressPolling() {
+        val publication = DashboardPublicationPolicy()
+        val original = SyncDashboardState(owners = setOf("sync"), transport = "Bluetooth")
+        publication.didPublish(original, 1000)
+        val setup = original.copy(hotspotSetup = "permission")
+        assertEquals(0L, publication.delayMillis(setup, 1001))
+        publication.didPublish(setup, 1001)
+        assertNull(publication.delayMillis(setup, 1002))
+    }
+
 }

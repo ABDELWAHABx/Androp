@@ -176,7 +176,11 @@ object SyncDashboardController {
     fun link(url: String) { update { if (it.paused) it else it.copy(link = url, lastEvent = "Link received · Open in browser", receivedFile = null) } }
     fun clearLink() { update { it.copy(link = null, lastEvent = if (it.link != null) null else it.lastEvent) } }
     fun clipboard(sent: Boolean) { update { if (it.paused) it else it.copy(lastEvent = if (sent) "Clipboard sent" else "Clipboard received", receivedFile = null) } }
-    fun clearActivity() { update { it.copy(lastEvent = null, link = null, receivedFile = null) } }
+    fun clearActivity() { update { it.copy(lastEvent = null, link = null, receivedFile = null, hotspotSetup = null) } }
+    fun hotspotSetup(prompt: String?) {
+        require(prompt == null || prompt in setOf("dataSaver", "permission", "hotspot"))
+        update { if (it.paused) it else it.copy(hotspotSetup = prompt) }
+    }
 
     private fun ensureChannel(context: Context) {
         synchronized(lock) {
@@ -207,6 +211,7 @@ object SyncDashboardController {
             if (snapshot.phoneAlert) lines += "Find phone alert · Tap Stop alert to end"
             snapshot.consents.firstOrNull()?.let { lines += "${it.sender}: ${it.files}" }
             snapshot.transfers.take(3).forEach { lines += "${if (it.sending) "↑ Sending" else "↓ Receiving"} ${it.name} · ${it.percent}%" }
+            snapshot.hotspotSetupMessage?.let { lines += it }
             snapshot.lastEvent?.let { lines += it }
             snapshot.ownerStatuses.filterKeys { it != OWNER_SYNC }.values.forEach { if (it !in lines && snapshot.transfers.isEmpty()) lines += it }
         }
@@ -237,6 +242,21 @@ object SyncDashboardController {
             transfer != null -> builder.addAction(0, "Cancel", action(context, NotificationActionReceiver.ACTION_CANCEL_TRANSFER, 40015) {
                 putExtra("transfer_id", transfer.id); putExtra("is_sending", transfer.sending); putExtra("transfer_kind", transfer.kind)
             })
+            snapshot.hotspotSetup != null -> {
+                val settingsIntent = when (snapshot.hotspotSetup) {
+                    "dataSaver" -> Intent("android.settings.DATA_SAVER_SETTINGS")
+                    "permission" -> Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS, "package:${context.packageName}".toUri())
+                    else -> Intent("android.settings.TETHER_SETTINGS")
+                }
+                // A direct user-tapped activity PendingIntent avoids background launch restrictions.
+                val label = when (snapshot.hotspotSetup) {
+                    "dataSaver" -> "Data Saver"
+                    "permission" -> "Allow hotspot"
+                    else -> "Hotspot settings"
+                }
+                builder.addAction(0, label, PendingIntent.getActivity(context, 40020,
+                    settingsIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+            }
             snapshot.link != null -> {
                 val link = snapshot.link.trim().let { if (it.startsWith("https://") || it.startsWith("http://")) it else "https://$it" }
                 builder.addAction(0, "Open link", PendingIntent.getActivity(context, 40016, Intent(Intent.ACTION_VIEW, link.toUri()), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))

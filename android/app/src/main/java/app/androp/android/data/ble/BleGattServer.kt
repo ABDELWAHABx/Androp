@@ -60,7 +60,8 @@ class BleGattServer(private val context: Context) {
     @Volatile private var authenticatedDevice: BluetoothDevice? = null
     @Volatile private var serverGeneration = 0L
     private val sendLock = Any()
-    private data class OutboundMessage(val device: BluetoothDevice, val uuid: UUID, val chunks: List<ByteArray>, var index: Int = 0, var retries: Int = 0)
+    private data class OutboundMessage(val device: BluetoothDevice, val uuid: UUID, val chunks: List<ByteArray>,
+        val stateKey: String? = null, var index: Int = 0, var retries: Int = 0)
     private val sendQueue = java.util.ArrayDeque<OutboundMessage>()
     private var queuedBytes = 0
     private var notificationInFlight = false
@@ -130,6 +131,7 @@ class BleGattServer(private val context: Context) {
         isAuthenticated = false
         authenticatedFlag.set(false)
         ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
+        if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
         isAdvertisingPaused = false
     }
 
@@ -336,6 +338,7 @@ class BleGattServer(private val context: Context) {
                     isAuthenticated = false
                     authenticatedFlag.set(false)
                     ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
+                    if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
                     if (gattServer != null && !isAdvertisingPaused) startAdvertising()
                 }
             }
@@ -535,7 +538,8 @@ class BleGattServer(private val context: Context) {
                 "Handling auth request from ${device.address}. Device in DB: ${deviceData?.name}, hasKey: ${storedKey != null}"
             )
 
-            if (generation != serverGeneration || device !in connectedDevices) return@launch
+            if (generation != serverGeneration || device !in connectedDevices ||
+                app.androp.android.utils.BackgroundWorkController.isPaused) return@launch
             if (storedKey != null) {
                 val expectedToken = BleTransportBridge.deriveAuthToken(storedKey)
                 if (expectedToken.isNotEmpty() && MessageDigest.isEqual(token, expectedToken.toByteArray(Charsets.UTF_8))) {
@@ -554,7 +558,11 @@ class BleGattServer(private val context: Context) {
                     )
                     BleTransportBridge.sendDeviceName()
                     dataStoreManager.setUserManuallyDisconnected(false)
+                    if (generation != serverGeneration || !isAuthenticated || authenticatedDevice != device ||
+                        app.androp.android.utils.BackgroundWorkController.isPaused) return@launch
                     BleTransportBridge.sendBatteryStatus(app.androp.android.utils.DeviceInfoUtil.getBatteryInfo(context))
+                    app.androp.android.utils.SyncManager.startPeriodicSync(context)
+                    app.androp.android.utils.SyncManager.checkAndSyncDeviceStatus(context, forceSync = true)
                 } else {
                     Log.w(TAG, "BLE Auth Failed! Token mismatch.")
                     sendNotification(
@@ -631,23 +639,27 @@ class BleGattServer(private val context: Context) {
         return enqueueNotification(characteristicUuid, listOf(data))
     }
 
-    fun sendChunkedNotification(characteristicUuid: UUID, payload: String): Boolean {
+    fun sendChunkedNotification(characteristicUuid: UUID, payload: String, stateKey: String? = null): Boolean {
         // negotiatedMtu includes the ATT opcode and attribute handle (3 bytes).
         val chunks = BleChunkUtil.splitIntoChunks(payload, negotiatedMtu - 3)
-        return chunks.isNotEmpty() && enqueueNotification(characteristicUuid, chunks)
+        return chunks.isNotEmpty() && enqueueNotification(characteristicUuid, chunks, stateKey)
     }
 
-    private fun enqueueNotification(uuid: UUID, chunks: List<ByteArray>): Boolean {
+    private fun enqueueNotification(uuid: UUID, chunks: List<ByteArray>, stateKey: String? = null): Boolean {
         val device = if (uuid == BleConstants.CHAR_AUTH_RESULT) connectedDevices.firstOrNull() else authenticatedDevice
         if (app.androp.android.utils.BackgroundWorkController.isPaused || device == null || device !in connectedDevices ||
             notificationSubscriptions[device.address]?.contains(uuid) != true) return false
         return synchronized(sendLock) {
-            if (uuid in stateCharacteristics) {
-                // Only pending state can be replaced; never discard the tail of an in-flight message.
+            val replacementKey = stateKey ?: uuid.takeIf { it in stateCharacteristics }?.toString()
+            if (replacementKey != null) {
+                // Match both characteristic and message kind: CHAR_MAC_CONTROL
+                // also carries commands and correlated responses that must survive.
+                // Never discard the head or the tail of an in-flight message.
                 val iterator = sendQueue.iterator()
                 while (iterator.hasNext()) {
                     val queued = iterator.next()
-                    if (queued.uuid == uuid && queued.index == 0 && queued !== sendQueue.peekFirst()) {
+                    if (queued.uuid == uuid && queued.stateKey == replacementKey &&
+                        queued.index == 0 && queued !== sendQueue.peekFirst()) {
                         queuedBytes -= queued.chunks.sumOf { it.size }
                         iterator.remove()
                     }
@@ -659,7 +671,7 @@ class BleGattServer(private val context: Context) {
                 return false
             }
             queuedBytes += byteCount
-            val message = OutboundMessage(device, uuid, chunks)
+            val message = OutboundMessage(device, uuid, chunks, stateKey = replacementKey)
             if (uuid in priorityCharacteristics && !notificationInFlight && notificationRetry?.isActive != true) {
                 sendQueue.addFirst(message)
             } else {
@@ -724,6 +736,7 @@ class BleGattServer(private val context: Context) {
                             authenticatedDevice = null
                             authenticatedFlag.set(false)
                             ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
+                            if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
                             gattServer?.cancelConnection(message.device)
                         }
                     }
@@ -798,6 +811,7 @@ class BleGattServer(private val context: Context) {
         isAuthenticated = false
         authenticatedFlag.set(false)
         ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
+        if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
         _connectionState.value = if (gattServer != null && !isAdvertisingPaused) BleConnectionState.ADVERTISING else BleConnectionState.DISCONNECTED
         authenticatedDevice = null
         clearSendQueue()

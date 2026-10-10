@@ -55,12 +55,8 @@ object SyncManager {
                     if (DataStoreManager.getInstance(context).isAppPaused().first()) break
                     // Check if sync is needed (either via WebSocket or BLE)
                     if (WebSocketUtil.isConnected() || app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) {
-                        val dataStoreManager = DataStoreManager.getInstance(context)
-                        val isSyncEnabled = dataStoreManager.getNotificationSyncEnabled().first()
-
-                        if (isSyncEnabled) {
-                            checkAndSyncDeviceStatus(context)
-                        }
+                        // Battery/media status is independent of mirroring notifications.
+                        checkAndSyncDeviceStatus(context)
                     }
 
                     delay(BATTERY_SYNC_INTERVAL)

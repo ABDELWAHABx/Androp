@@ -47,6 +47,7 @@ enum MessageType: String, Codable {
     case browseLs
     case browseData
     case webDavAccess
+    case phoneHotspotState
 }
 
 struct Message: Codable {

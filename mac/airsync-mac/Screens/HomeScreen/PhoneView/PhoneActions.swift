@@ -206,6 +206,83 @@ struct PhonePrimaryActions: View {
                     PlusFeaturePopover(message: "Browse files with androp+")
                 }
             }
+            PhoneHotspotControls(compact: compact)
+        }
+    }
+}
+
+/// Compact on both main-window and menu-bar surfaces. Expanding requests one
+/// fresh status when none is known; there is no timer or background polling.
+struct PhoneHotspotControls: View {
+    @ObservedObject private var appState = AppState.shared
+    @ObservedObject private var hotspot = PhoneHotspotManager.shared
+    @State private var expanded = false
+    var compact = false
+
+    private var available: Bool { appState.device != nil && !appState.isSyncPaused }
+    private var idle: Bool { hotspot.pendingAction == nil }
+    private var canControl: Bool {
+        available && idle && hotspot.state?.canAttemptControl == true && hotspot.state?.status != "unsupported"
+    }
+    private var label: String {
+        guard available else { return "Phone hotspot" }
+        if hotspot.pendingAction != nil { return "Phone hotspot · waiting" }
+        if let enabled = hotspot.state?.hotspotEnabled { return "Phone hotspot · \(enabled ? "on" : "off")" }
+        return "Phone hotspot"
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                if !available {
+                    Text(appState.isSyncPaused ? "Resume sync to control your phone's hotspot." : "Connect your phone to check hotspot availability.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    if let enabled = hotspot.state?.hotspotEnabled {
+                        Label(enabled ? "Last reported: hotspot on" : "Last reported: hotspot off",
+                              systemImage: enabled ? "personalhotspot" : "wifi.slash")
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 6) {
+                        Button("Enable") { hotspot.send(.enable) }
+                            .disabled(!canControl || hotspot.state?.dataSaverEnabled != false || hotspot.state?.hotspotEnabled == true)
+                            .help("Ask your phone to enable internet tethering. Phone permission, firmware and carrier support are required.")
+                        Button("Disable") { hotspot.send(.disable) }
+                            .disabled(!canControl || hotspot.state?.hotspotEnabled == false)
+                            .help("Ask your phone to stop the hotspot session started by androp.")
+                        Spacer(minLength: 0)
+                        Button { hotspot.send(.status) } label: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .disabled(!idle)
+                        .accessibilityLabel("Refresh phone hotspot status")
+                        .help("Check the current state and permissions on your phone")
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Setup on phone") { hotspot.send(.setup) }
+                        .disabled(!idle)
+                        .help("Request a setup action in your phone's androp notification")
+                    if hotspot.state?.dataSaverEnabled == true {
+                        Text("Turn off Data Saver on your phone before enabling its hotspot. androp cannot change Data Saver automatically.")
+                            .foregroundStyle(.secondary)
+                    }
+                    if let message = hotspot.message {
+                        Text(message).foregroundStyle(.secondary)
+                    } else if hotspot.state == nil {
+                        Text("Refresh to check this phone's hotspot support and permissions.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 6)
+        } label: {
+            Label(label, systemImage: "personalhotspot")
+                .font(compact ? .caption.weight(.medium) : .subheadline.weight(.medium))
+        }
+        .onChange(of: expanded) { _, isExpanded in
+            if isExpanded && available { hotspot.refreshIfNeeded() }
         }
     }
 }

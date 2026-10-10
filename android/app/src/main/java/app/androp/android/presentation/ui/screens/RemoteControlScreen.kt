@@ -62,6 +62,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.unit.dp
 import app.androp.android.R
+import app.androp.android.AirSyncApp
+import app.androp.android.data.ble.BleGattServer
 import app.androp.android.presentation.ui.components.KeyboardInputSheet
 import app.androp.android.presentation.ui.components.KeyboardModifiers
 import app.androp.android.presentation.ui.components.ModifierStatus
@@ -69,6 +71,7 @@ import app.androp.android.utils.HapticUtil
 import app.androp.android.utils.WebSocketUtil
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -84,7 +87,12 @@ fun RemoteControlScreen(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val lifecycleState by lifecycle.currentStateFlow.collectAsState()
     val isForeground = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
-    val supportsPointerAndKeyboard by WebSocketUtil.connectionState.collectAsState()
+    val supportsPointer by WebSocketUtil.connectionState.collectAsState()
+    val bluetoothState by remember {
+        AirSyncApp.getBleConnectionManager()?.connectionState
+            ?: flowOf(BleGattServer.BleConnectionState.DISCONNECTED)
+    }.collectAsState(initial = BleGattServer.BleConnectionState.DISCONNECTED)
+    val supportsKeyboard = supportsPointer || bluetoothState == BleGattServer.BleConnectionState.AUTHENTICATED
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -102,15 +110,19 @@ fun RemoteControlScreen(
         performHaptic: Boolean = true
     ) {
         if (!isActive || !lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
+        // Observe state for the UI, then verify the live transport at dispatch time:
+        // a disconnect can happen between recomposition and the next key/gesture.
+        if (!WebSocketUtil.isConnected()) return
+        if (action in setOf("mouse_move", "mouse_scroll", "mouse_click") && !WebSocketUtil.isWifiConnected()) return
         try {
-            if (performHaptic) HapticUtil.performLightTick(haptics)
             val data = JSONObject().put("action", action)
             if (value != null) data.put("value", value)
             extras.forEach { (key, item) ->
                 data.put(key, if (item is List<*>) JSONArray(item) else item)
             }
             val json = JSONObject().put("type", "remoteControl").put("data", data)
-            WebSocketUtil.sendMessage(json.toString())
+            val accepted = WebSocketUtil.sendMessage(json.toString())
+            if (accepted && performHaptic) HapticUtil.performLightTick(haptics)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -119,9 +131,9 @@ fun RemoteControlScreen(
     // Accumulate deltas rather than queueing every pointer event. The conflated signal
     // wakes the sender only on input, so an idle or hidden trackpad does no polling.
     val motion = remember { PendingRemoteMotion() }
-    LaunchedEffect(isActive, supportsPointerAndKeyboard, lifecycle) {
+    LaunchedEffect(isActive, supportsPointer, lifecycle) {
         motion.clear()
-        if (!isActive || !supportsPointerAndKeyboard) return@LaunchedEffect
+        if (!isActive || !supportsPointer) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             try {
                 while (true) {
@@ -153,7 +165,7 @@ fun RemoteControlScreen(
     }
 
     fun clickMouse(button: String) {
-        if (!supportsPointerAndKeyboard) return
+        if (!supportsPointer) return
         // Enqueue both edges together: leaving the screen cannot cancel a delayed
         // release and leave the Mac's mouse button held down.
         sendRemoteAction("mouse_click", extras = mapOf("button" to button, "isDown" to true))
@@ -216,12 +228,12 @@ fun RemoteControlScreen(
     }
 
 
-    if (showKeyboard && isActive && isForeground && !supportsPointerAndKeyboard) {
+    if (showKeyboard && isActive && isForeground && !supportsKeyboard) {
         AlertDialog(
             onDismissRequest = onDismissKeyboard,
-            title = { Text("Keyboard requires a network connection") },
+            title = { Text("Connect your Mac to use the keyboard") },
             text = {
-                Text("Connect your phone and Mac over Wi-Fi to use the keyboard and trackpad. Arrow keys and media controls are available over Bluetooth.")
+                Text("Connect your paired Mac over Bluetooth or Wi-Fi to type and send keyboard shortcuts. The trackpad needs Wi-Fi or a hotspot connection.")
             },
             confirmButton = {
                 TextButton(onClick = onDismissKeyboard) { Text("Got it") }
@@ -347,17 +359,17 @@ fun RemoteControlScreen(
             modifier = modifier
                 .fillMaxWidth()
                 .semantics {
-                    contentDescription = if (supportsPointerAndKeyboard) {
+                    contentDescription = if (supportsPointer) {
                         "Trackpad. Tap to click; use two fingers to scroll or right-click."
                     } else {
-                        "Connect your phone and Mac over Wi-Fi to use the trackpad."
+                        "Connect your phone and Mac over Wi-Fi or a hotspot to use the trackpad."
                     }
-                    if (supportsPointerAndKeyboard) {
+                    if (supportsPointer) {
                         onClick(label = "Left click") { clickMouse("left"); true }
                     }
                 }
-                .pointerInput(isActive, isForeground, supportsPointerAndKeyboard) {
-                    if (!isActive || !isForeground || !supportsPointerAndKeyboard) return@pointerInput
+                .pointerInput(isActive, isForeground, supportsPointer) {
+                    if (!isActive || !isForeground || !supportsPointer) return@pointerInput
                     awaitEachGesture {
                         awaitFirstDown()
                         var totalMoved = 0f
@@ -413,8 +425,8 @@ fun RemoteControlScreen(
                     tint = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    if (supportsPointerAndKeyboard) "Tap to click · Two fingers to scroll"
-                    else "Connect over Wi-Fi for the trackpad",
+                    if (supportsPointer) "Tap to click · Two fingers to scroll"
+                    else "Connect over Wi-Fi or a hotspot for the trackpad",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(12.dp)

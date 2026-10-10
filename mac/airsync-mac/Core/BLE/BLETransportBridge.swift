@@ -36,6 +36,16 @@ class BLETransportBridge {
             WebSocketServer.shared.handleMacPowerControl(data)
             return
         }
+        if payload.utf8.count <= 64 * 1024, let bytes = payload.data(using: .utf8),
+           let message = try? JSONDecoder().decode(Message.self, from: bytes) {
+            let generation = BLECentralManager.shared.sessionGeneration
+            DispatchQueue.main.async {
+                guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                      BLECentralManager.shared.sessionGeneration == generation else { return }
+                WebSocketServer.shared.handleBLEMessage(message)
+            }
+            return
+        }
         let components = payload.components(separatedBy: "|")
         guard components.count >= 2 else { return }
         let type = components[0]

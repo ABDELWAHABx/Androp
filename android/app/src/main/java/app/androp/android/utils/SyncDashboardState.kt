@@ -27,13 +27,14 @@ data class SyncDashboardState(
     val link: String? = null,
     val receivedFile: String? = null,
     val phoneAlert: Boolean = false,
+    val hotspotSetup: String? = null,
     val cancelledTransfers: Set<String> = emptySet()
 ) {
     val shouldRequestPromotion: Boolean
         get() = !paused && (transport != null || transfers.isNotEmpty() || phoneAlert)
 
     val shouldShow: Boolean
-        get() = owners.isNotEmpty() || paused || phoneAlert || lastEvent != null || link != null || consents.isNotEmpty()
+        get() = owners.isNotEmpty() || paused || phoneAlert || hotspotSetup != null || lastEvent != null || link != null || consents.isNotEmpty()
 
     val connectionLine: String
         get() = when {
@@ -54,10 +55,19 @@ data class SyncDashboardState(
                 "${if (it.sending) "Sending" else "Receiving"} ${it.name} · ${it.percent}%" +
                     if (transfers.size > 1) " · +${transfers.size - 1} files" else ""
             }
+            hotspotSetup != null -> hotspotSetupMessage ?: "Hotspot setup"
             lastEvent != null -> lastEvent
             ownerStatuses.containsKey("send") -> ownerStatuses.getValue("send")
             ownerStatuses.containsKey("receive") -> ownerStatuses.getValue("receive")
             else -> connectionLine
+        }
+
+    val hotspotSetupMessage: String?
+        get() = when (hotspotSetup) {
+            "dataSaver" -> "Hotspot needs Data Saver turned off · Tap Data Saver"
+            "permission" -> "Hotspot needs Modify system settings access · Tap Allow hotspot"
+            "hotspot" -> "Hotspot setup · Tap Hotspot settings"
+            else -> null
         }
 
     fun withProgress(id: String, name: String, percent: Int, sending: Boolean, kind: String = "quickshare"): SyncDashboardState {
@@ -94,5 +104,5 @@ data class SyncDashboardState(
 
     fun pause(): SyncDashboardState = copy(paused = true, transport = null, connecting = false,
         reconnecting = false, transfers = emptyList(), consents = emptyList(), lastEvent = null,
-        link = null, receivedFile = null, phoneAlert = false)
+        link = null, receivedFile = null, phoneAlert = false, hotspotSetup = null)
 }

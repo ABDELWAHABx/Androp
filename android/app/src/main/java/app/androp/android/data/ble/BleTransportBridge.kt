@@ -42,7 +42,7 @@ object BleTransportBridge {
             .put("title", title).put("body", text))
     }
 
-    fun sendNotification(data: JSONObject) {
+    fun sendNotification(data: JSONObject): Boolean {
         // Keep the legacy four fields; newer clients decode the optional fifth
         // JSON field. Bound visible text, never truncate IDs or action names.
         fun field(value: String, limit: Int) = value.replace(BleConstants.DELIMITER, " ").take(limit)
@@ -67,12 +67,15 @@ object BleTransportBridge {
             fields.add(JSONObject().put("id", id).put("actions", actions)
                 .put("priority", field(data.optString("priority", "alerting"), 32)).toString())
         }
-        gattServer?.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DATA, fields.joinToString(BleConstants.DELIMITER))
+        return gattServer?.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DATA, fields.joinToString(BleConstants.DELIMITER)) ?: false
     }
 
     fun sendBatteryStatus(battery: BatteryInfo) {
-        val level = battery.level.toByte()
-        gattServer?.sendNotification(BleConstants.CHAR_BATTERY_LEVEL, byteArrayOf(level))
+        if (battery.level !in 0..100) return
+        // The legacy battery byte cannot represent charging; send full small state.
+        val data = JSONObject().put("battery", JSONObject().put("level", battery.level)
+            .put("isCharging", battery.isCharging)).put("isPaired", true)
+        sendControl("status", data)
     }
 
     fun sendMediaState(audio: AudioInfo) {
@@ -98,6 +101,36 @@ object BleTransportBridge {
         gattServer?.sendNotification(BleConstants.CHAR_SYSTEM_STATE, payload.toByteArray())
     }
 
+    fun sendControl(type: String, data: JSONObject): Boolean {
+        val payload = JSONObject().put("type", type).put("data", data).toString()
+        if (payload.toByteArray(Charsets.UTF_8).size > BleControlPolicy.MAX_CONTROL_BYTES) return false
+        // Full snapshots and battery-only snapshots use distinct keys so a
+        // battery event cannot replace an unsent track change. Commands/responses
+        // deliberately have no key and are never coalesced.
+        val stateKey = if (type == "status") {
+            if (data.has("music")) "phone-status" else "phone-battery"
+        } else null
+        return gattServer?.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, payload, stateKey) ?: false
+    }
+
+    fun sendCompactStatus(data: JSONObject): Boolean {
+        val battery = data.optJSONObject("battery") ?: return false
+        if (battery.optInt("level", -1) !in 0..100) return false
+        val compact = JSONObject().put("battery", JSONObject().put("level", battery.getInt("level"))
+            .put("isCharging", battery.optBoolean("isCharging"))).put("isPaired", data.optBoolean("isPaired", true))
+        data.optJSONObject("music")?.let { music ->
+            val fields = JSONObject()
+            for (name in listOf("isPlaying", "title", "artist", "volume", "isMuted", "likeStatus",
+                "duration", "position", "positionTimestamp", "isBuffering")) {
+                if (music.has(name)) fields.put(name, music.opt(name))
+            }
+            fields.put("title", music.optString("title").take(512))
+            fields.put("artist", music.optString("artist").take(512))
+            compact.put("music", fields)
+        }
+        return sendControl("status", compact)
+    }
+
     fun sendClipboardEnvelope(data: JSONObject, acknowledgement: Boolean = false): Boolean {
         val envelope = JSONObject(data.toString()).put("andropClipboard", 1).put("kind", if (acknowledgement) "ack" else "update")
         return gattServer?.sendChunkedNotification(BleConstants.CHAR_CLIPBOARD_DATA_NOTIFY, envelope.toString()) ?: false
@@ -115,9 +148,8 @@ object BleTransportBridge {
         gattServer?.sendChunkedNotification(BleConstants.CHAR_CLIPBOARD_DATA_NOTIFY, text)
     }
 
-    fun sendNotificationDismissal(id: String) {
-        gattServer?.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DISMISS_NOTIFY, id)
-    }
+    fun sendNotificationDismissal(id: String): Boolean =
+        gattServer?.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DISMISS_NOTIFY, id) ?: false
 
     fun sendManualDisconnect() {
         gattServer?.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, "remote|manual_disconnect")
@@ -140,7 +172,7 @@ object BleTransportBridge {
         // characteristic without changing legacy media command framing.
         if (action.toByteArray(Charsets.UTF_8).size <= 64 * 1024 && action.startsWith("{")) {
             val message = try { JSONObject(action) } catch (_: Exception) { null }
-            if (message?.optString("type") in setOf("macInfo", "macPowerControlResponse")) {
+            if (message != null && BleControlPolicy.acceptsIncoming(message.optString("type"), action.toByteArray(Charsets.UTF_8).size)) {
                 if (!BleGattServer.isAnyAuthenticated() || app.androp.android.utils.BackgroundWorkController.isPaused) return
                 app.androp.android.utils.WebSocketMessageHandler.handleIncomingMessage(context, action)
                 return

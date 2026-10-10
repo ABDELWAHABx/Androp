@@ -67,6 +67,10 @@ fun ConnectionStatusCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            if (isConnected && !isPaused && (connectionLabel.contains("Bluetooth", ignoreCase = true) || connectionLabel.contains("BLE", ignoreCase = true))) {
+                Text("Bluetooth supports clipboard text, media, notifications, keyboard and phone controls. Use Wi-Fi or USB for files, screen sharing and the trackpad.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 onTogglePause?.let { toggle ->
                     Button(onClick = toggle, modifier = Modifier.weight(1f).height(48.dp)) {

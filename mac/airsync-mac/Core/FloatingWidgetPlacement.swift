@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Keeps the widget reachable when a saved display is unplugged or rearranged.
 enum FloatingWidgetPlacement {

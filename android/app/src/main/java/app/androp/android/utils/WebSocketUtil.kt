@@ -672,6 +672,10 @@ object WebSocketUtil {
             val type = json.optString("type")
             val data = json.optJSONObject("data") ?: JSONObject()
 
+            if (app.androp.android.data.ble.BleControlPolicy.acceptsOutgoing(type, message.toByteArray(Charsets.UTF_8).size)) {
+                return ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, message)
+            }
+
             when (type) {
                 "macPowerControl" -> {
                     if (!ble.isAuthenticated) return false
@@ -688,24 +692,21 @@ object WebSocketUtil {
                     val pkg = data.optString("package")
                     val actionId = data.optString("actionId")
                     val payload = "$pkg|$actionId"
-                    ble.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_ACTION, payload)
-                    return true
+                    return ble.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_ACTION, payload)
                 }
 
                 "mediaControl" -> {
                     val action = data.optString("action")
                     // Protocol: type|action
                     val payload = "media|$action"
-                    ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, payload)
-                    return true
+                    return ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, payload)
                 }
 
                 "volumeControl" -> {
                     val action = data.optString("action")
                     // Protocol: type|action
-                    val payload = "volume|$action"
-                    ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, payload)
-                    return true
+                    val payload = if (action == "vol_set") "volume|$action|${data.optInt("value", -1)}" else "volume|$action"
+                    return ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, payload)
                 }
 
                 "clipboard", "clipboardUpdate" -> {
@@ -716,60 +717,28 @@ object WebSocketUtil {
 
                 "dismissNotification" -> {
                     val id = data.optString("id")
-                    ble.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DISMISS_NOTIFY, id)
-                    return true
+                    return ble.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DISMISS_NOTIFY, id)
                 }
 
                 "remoteControl" -> {
-                    val action = data.optString("action")
-                    // Filter out high-frequency cursor controls over BLE
-                    if (action == "mouse_move" || action == "mouse_click" || action == "mouse_scroll") {
-                        return false
-                    }
-                    // Include value if present (e.g. vol_set needs level)
-                    val value = if (data.has("value")) data.opt("value")?.toString() else null
-                    val payload = if (value != null) "remote|$action|$value" else "remote|$action"
-                    ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, payload)
-                    return true
+                    if (!app.androp.android.data.ble.BleControlPolicy.acceptsRemoteAction(data.optString("action")) ||
+                        message.toByteArray(Charsets.UTF_8).size > app.androp.android.data.ble.BleControlPolicy.MAX_CONTROL_BYTES) return false
+                    return ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, message)
                 }
 
                 "notification" -> {
-                    BleTransportBridge.sendNotification(data)
-                    return true
+                    return BleTransportBridge.sendNotification(data)
                 }
 
                 "notificationUpdate" -> {
                     if (data.optBoolean("dismissed") || data.optString("action") == "dismiss") {
-                        BleTransportBridge.sendNotificationDismissal(data.optString("id"))
-                        return true
+                        return BleTransportBridge.sendNotificationDismissal(data.optString("id"))
                     }
                     return false
                 }
 
-                "status" -> {
-                    val battery = data.optJSONObject("battery")
-                    if (battery != null) {
-                        val level = battery.optInt("level")
-                        ble.sendNotification(
-                            BleConstants.CHAR_BATTERY_LEVEL,
-                            byteArrayOf(level.toByte())
-                        )
-                    }
-                    val music = data.optJSONObject("music")
-                    if (music != null) {
-                        val audio = AudioInfo(
-                            isPlaying = music.optBoolean("isPlaying"),
-                            title = music.optString("title"),
-                            artist = music.optString("artist"),
-                            volume = music.optInt("volume"),
-                            isMuted = music.optBoolean("isMuted"),
-                            likeStatus = music.optString("likeStatus"),
-                            albumArtLite = music.optString("albumArtLite")
-                        )
-                        BleTransportBridge.sendMediaState(audio)
-                    }
-                    return true
-                }
+                "status" -> return BleTransportBridge.sendCompactStatus(data)
+
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error sending over BLE fallback: ${e.message}")

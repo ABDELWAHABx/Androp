@@ -79,6 +79,13 @@ extension WebSocketServer {
     }
 
     private func sendMessage(type: String, data: [String: Any]) {
+        // Fire-and-forget status/UI commands may originate from system callbacks.
+        // Move the entire route to main before touching BLE, without blocking
+        // those callers or claiming that a future enqueue has already succeeded.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.sendMessage(type: type, data: data) }
+            return
+        }
         guard !AppState.shared.isSyncPaused else { return }
         let messageDict: [String: Any] = [
             "type": type,
@@ -99,36 +106,13 @@ extension WebSocketServer {
     private func sendOverBLE(type: String, data: [String: Any]) {
         print("[ble] Sending message over BLE: \(type)")
         switch type {
-        case "notificationAction":
-            if let id = data["id"] as? String, let name = data["name"] as? String {
-                let text = data["text"] as? String ?? ""
-                let payload = [id, name, text].joined(separator: BLEConstants.delimiter)
-                BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charNotificationAction, payload: payload)
-            }
-        case "mediaControl":
-            if let action = data["action"] as? String {
-                BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: action)
-            }
-        case "volumeControl":
-            if let action = data["action"] as? String {
-                if action == "setVolume", let volume = data["volume"] as? Int {
-                    let payload = "setVolume|\(volume)"
-                    BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: payload)
-                } else {
-                    BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: action)
-                }
-            }
-        case "callControl":
-            if let action = data["action"] as? String {
-                let bleAction: String
-                switch action {
-                case "accept": bleAction = "callAccept"
-                case "decline": bleAction = "callDecline"
-                case "end": bleAction = "callEnd"
-                default: bleAction = action
-                }
-                BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: bleAction)
-            }
+        case "notificationAction", "mediaControl", "volumeControl", "callControl",
+             "toggleNowPlaying", "macVolume", "modifierStatus", "macMediaControlResponse",
+             "phoneHotspotControl":
+            // One bounded envelope preserves seek positions, reply text and action
+            // parameters; the phone uses the same validated handlers as Wi-Fi.
+            guard let payload = BLEControlPolicy.envelope(type: type, data: data) else { return }
+            BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: payload)
         case "clipboardUpdate":
             if let content = data["content"] as? String {
                 BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charClipboardDataWrite, payload: content)
@@ -138,37 +122,8 @@ extension WebSocketServer {
                 BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charNotificationDismiss, payload: id)
             }
         case "status":
-            // Handle status over BLE
-            if let battery = data["battery"] as? [String: Any],
-               let level = battery["level"] as? Int,
-               let charging = battery["isCharging"] as? Bool {
-                let payload = [String(level), charging ? "1" : "0"].joined(separator: BLEConstants.delimiter)
-                BLECentralManager.shared.write(characteristicUUID: BLEConstants.charMacBattery, data: payload.data(using: .utf8)!)
-            }
-            // For media status
-            if let music = data["music"] as? [String: Any] {
-                let isPlaying = music["isPlaying"] as? Bool ?? false
-                let title = music["title"] as? String ?? ""
-                let artist = music["artist"] as? String ?? ""
-                let volume = music["volume"] as? Int ?? 0
-                let isMuted = music["isMuted"] as? Bool ?? false
-                let likeStatus = music["likeStatus"] as? String ?? "none"
-                var fields = [
-                    isPlaying ? "1" : "0",
-                    title,
-                    artist,
-                    String(volume),
-                    isMuted ? "1" : "0",
-                    likeStatus
-                ]
-                if let albumArt = music["albumArtLite"] as? String { fields.append(albumArt) }
-                let payload = fields.joined(separator: BLEConstants.delimiter)
-                BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMacMediaState, payload: payload)
-            } else {
-                // Explicitly end the media session over BLE as well as Wi-Fi.
-                let payload = ["0", "", "", "0", "0", "none", ""].joined(separator: BLEConstants.delimiter)
-                BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMacMediaState, payload: payload)
-            }
+            guard let payload = BLEControlPolicy.envelope(type: type, data: BLEControlPolicy.compactStatus(data)) else { return }
+            BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: payload)
         case "toggleAppNotif":
             if let package = data["package"] as? String, let state = data["state"] as? String {
                 let payload = "toggleNotif|\(package)|\(state)"
@@ -285,9 +240,7 @@ extension WebSocketServer {
 
     private func sendMediaAction(_ action: String) {
         sendMessage(type: "mediaControl", data: ["action": action])
-        
-        // Also send via BLE
-        BLETransportBridge.shared.sendMediaControl(action)
+
     }
 
     /// Forward a system media command (from MPRemoteCommandCenter) back to Android.
@@ -308,9 +261,9 @@ extension WebSocketServer {
 
     // MARK: - Volume Controls
 
-    func volumeUp() { sendVolumeAction("volumeUp") }
-    func volumeDown() { sendVolumeAction("volumeDown") }
-    func toggleMute() { sendVolumeAction("mute") }
+    func volumeUp() { sendVolumeAction("increaseVolume") }
+    func volumeDown() { sendVolumeAction("decreaseVolume") }
+    func toggleMute() { sendVolumeAction("toggleMute") }
 
     func setVolume(_ volume: Int) {
         sendMessage(type: "volumeControl", data: ["action": "setVolume", "volume": volume])
@@ -318,14 +271,7 @@ extension WebSocketServer {
 
     private func sendVolumeAction(_ action: String) {
         sendMessage(type: "volumeControl", data: ["action": action])
-        
-        // Map volume actions to media actions or specific BLE writes if needed
-        // For now, only media control is explicitly in the BLE protocol
-        if action == "volumeUp" {
-            BLETransportBridge.shared.sendMediaControl("volUp")
-        } else if action == "volumeDown" {
-            BLETransportBridge.shared.sendMediaControl("volDown")
-        }
+
     }
 
     func sendMacVolumeUpdate(level: Int) {
@@ -389,23 +335,6 @@ extension WebSocketServer {
                 if art.isEmpty { musicDict["albumArtLite"] = "" }
             }
 
-            // Create lite version for BLE (scaled down and compressed)
-            if albumArtBase64 != nil, AppState.shared.device?.isBLE == true,
-               let artworkData = musicInfo.artworkData, let image = NSImage(data: artworkData) {
-                let size = NSSize(width: 80, height: 80)
-                let frame = NSRect(x: 0, y: 0, width: size.width, height: size.height)
-                if let representation = image.bestRepresentation(for: frame, context: nil, hints: nil) {
-                    let resizedImage = NSImage(size: size, flipped: false, drawingHandler: { (_) -> Bool in
-                        return representation.draw(in: frame)
-                    })
-                    if let tiff = resizedImage.tiffRepresentation,
-                       let bitmap = NSBitmapImageRep(data: tiff),
-                       let jpegData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.3]) {
-                        musicDict["albumArtLite"] = jpegData.base64EncodedString()
-                    }
-                }
-            }
-            
             statusDict["music"] = musicDict
         }
 

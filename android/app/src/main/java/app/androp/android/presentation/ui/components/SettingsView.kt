@@ -227,6 +227,7 @@ fun SettingsView(
                 )
 
                 ExpandNetworkingCard(context)
+                app.androp.android.presentation.ui.components.cards.HotspotSettingsCard(context)
             }
 
             AnimatedVisibility(

@@ -275,10 +275,11 @@ class BLECentralManager: NSObject, ObservableObject {
 
     @discardableResult
     func writeChunked(characteristicUUID: CBUUID, payload: String) -> Bool {
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self] in _ = self?.writeChunked(characteristicUUID: characteristicUUID, payload: payload) }
-            return true
-        }
+        // CoreBluetooth and this queue are main-thread confined. Synchronous
+        // callers need an actual acceptance result: never schedule a future send
+        // and report success before authentication/capacity checks can run.
+        // In particular, do not main.sync here: callers can hold transport locks.
+        guard Thread.isMainThread else { return false }
         guard isAuthenticated, !AppState.shared.isSyncPaused, let peripheral = discoveredPeripheral,
               let char = characteristics[characteristicUUID],
               char.properties.contains(.write) || char.properties.contains(.writeWithoutResponse) else { return false }

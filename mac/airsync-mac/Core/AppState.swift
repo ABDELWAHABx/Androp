@@ -1669,7 +1669,7 @@ class AppState: ObservableObject {
         if let entry = clipboardOutbox.due(at: now) {
             // Mark the attempt before sending: a synchronous transport callback can
             // acknowledge and remove it without invalidating an array index.
-            clipboardOutbox.attempted(id: entry.id, at: now, delay: device?.isBLE == true ? 60 : 4)
+            clipboardOutbox.attempted(id: entry.id, at: now, delay: BLEControlPolicy.clipboardRetryDelay(bytes: entry.text.utf8.count, wifi: device?.isBLE != true))
             let queued = WebSocketServer.shared.sendClipboardProtocol(data: [
                 "text": entry.text, "id": entry.id, "videoHandoff": entry.videoHandoff
             ])
