@@ -9,6 +9,11 @@ import CryptoKit
 import AppKit
 
 extension WebSocketServer {
+    // A receiver advertises a bounded chunk inbox. Multiple independent 8-chunk
+    // windows can overflow it, so file sends share one FIFO while control traffic
+    // continues on the existing transport queues.
+    private static let fileSendQueue = DispatchQueue(label: "app.androp.file-send", qos: .utility)
+
     
     // MARK: - Sending Helpers
 
@@ -169,6 +174,12 @@ extension WebSocketServer {
                 let payload = "toggleNotif|\(package)|\(state)"
                 BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: payload)
             }
+        case "toggleAppNotifs":
+            if let packages = data["packages"] as? [String], let state = data["state"] as? String,
+               let json = try? JSONSerialization.data(withJSONObject: ["packages": packages, "state": state]),
+               let payload = String(data: json, encoding: .utf8) {
+                BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: "toggleNotifs|" + payload)
+            }
         case "disconnectRequest":
             BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: "manual_disconnect")
         default:
@@ -209,12 +220,32 @@ extension WebSocketServer {
     }
 
     func toggleNotification(for package: String, to state: Bool) {
-        guard var app = AppState.shared.androidApps[package] else { return }
+        guard !AppState.shared.isSyncPaused, var app = AppState.shared.androidApps[package], app.listening != state else { return }
         app.listening = state
         AppState.shared.androidApps[package] = app
         AppState.shared.saveAppsToDisk()
 
         sendMessage(type: "toggleAppNotif", data: ["package": package, "state": "\(state)"])
+    }
+
+    func toggleNotifications(for packages: [String], to state: Bool) {
+        guard !AppState.shared.isSyncPaused, AppState.shared.device != nil else { return }
+        var apps = AppState.shared.androidApps
+        var changed: [String] = []
+        for package in Set(packages) {
+            guard var app = apps[package], app.listening != state else { continue }
+            app.listening = state
+            apps[package] = app
+            changed.append(package)
+        }
+        guard !changed.isEmpty else { return }
+        AppState.shared.androidApps = apps
+        AppState.shared.saveAppsToDisk()
+        // Keep each command bounded; each batch is one transaction on Android.
+        for start in stride(from: 0, to: changed.count, by: 512) {
+            let batch = Array(changed[start..<min(start + 512, changed.count)])
+            sendMessage(type: "toggleAppNotifs", data: ["packages": batch, "state": "\(state)"])
+        }
     }
 
     func sendBrowseRequest(path: String, showHidden: Bool = false) {
@@ -248,7 +279,7 @@ extension WebSocketServer {
 
     /// Seek Android playback to a specific position (in seconds).
     func seekTo(positionSeconds: Double) {
-        let positionMs = Int(positionSeconds * 1000)
+        guard let positionMs = NowPlayingInfo.seekMilliseconds(positionSeconds) else { return }
         sendMessage(type: "mediaControl", data: ["action": "seekTo", "positionMs": positionMs])
     }
 
@@ -435,14 +466,18 @@ extension WebSocketServer {
         lock.lock()
         let session = activeSessions.first { ObjectIdentifier($0) == primarySessionID }
         let generation = lifecycleGeneration
-        let available = shouldRun && deviceMatches && session != nil
+        let queueFull = outgoingAcks.count >= 64
+        let available = shouldRun && deviceMatches && session != nil && !queueFull && outgoingAcks[transferID] == nil
         if available { outgoingAcks[transferID] = [] }
         lock.unlock()
         guard available, let session else {
-            DispatchQueue.main.async { completion?(false, "Connect your phone over Wi-Fi before sending files.") }
+            DispatchQueue.main.async {
+                completion?(false, queueFull ? "The transfer queue is full. Wait for current files to finish and try again."
+                    : "Connect your phone over Wi-Fi before sending files.")
+            }
             return transferID
         }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        Self.fileSendQueue.async { [weak self] in
             guard let self else { return }
             let powerID = "ws-outgoing:\(transferID)"
             var succeeded = false

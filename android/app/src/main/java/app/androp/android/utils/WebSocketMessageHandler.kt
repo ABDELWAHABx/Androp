@@ -71,6 +71,7 @@ object WebSocketMessageHandler {
             }
 
             when (type) {
+                "requestWebDavAccess" -> WebDavServer.publishAccess()
                 "fileTransferInit", "fileChunk", "fileTransferComplete", "fileTransferCancel" ->
                     WebSocketFileTransfer.handle(context, type, data)
                 "clipboardUpdate" -> handleClipboardUpdate(context, data)
@@ -385,7 +386,7 @@ object WebSocketMessageHandler {
             val actionName = data.optString("name", data.optString("action", "")).ifEmpty { "" }
             // Absent "text" must stay null: an empty string would be taken as an
             // inline reply and plain action buttons would never be invoked.
-            val replyText = data.optString("text").takeIf { it.isNotEmpty() }
+            val replyText = (data.opt("text") as? String)?.takeIf { it.isNotEmpty() }
 
             if (actionName.isEmpty()) {
                 sendNotificationActionResponse(
@@ -758,61 +759,37 @@ object WebSocketMessageHandler {
                     return@launch
                 }
 
-                val packageName = data.optString("package")
-                val stateString = data.optString("state")
-
-                if (packageName.isEmpty()) {
-                    Log.e(TAG, "Package name is empty in toggle app notification")
-                    return@launch
+                val packagesArray = data.optJSONArray("packages")
+                if (packagesArray != null && packagesArray.length() > 512) return@launch
+                val packages = if (packagesArray != null) {
+                    (0 until packagesArray.length()).mapNotNull {
+                        packagesArray.opt(it) as? String
+                    }.filter { it.isNotBlank() && it.length <= 255 }.toSet()
+                } else setOf(data.optString("package")).filter { it.isNotBlank() && it.length <= 255 }.toSet()
+                val newState = when (val state = data.opt("state")) {
+                    is Boolean -> state
+                    "true" -> true
+                    "false" -> false
+                    else -> return@launch
                 }
+                if (packages.isEmpty()) return@launch
 
-                val newState = stateString.toBoolean()
-
-                Log.d(TAG, "Toggling notification for package: $packageName to state: $newState")
-
-                // Get the repository
-                val dataStoreManager = DataStoreManager(context)
-                val repository = AirSyncRepositoryImpl(dataStoreManager)
-
-                // Get current apps
-                val currentApps = repository.getNotificationApps().first().toMutableList()
-
-                // Find and update the app
-                val appIndex = currentApps.indexOfFirst { it.packageName == packageName }
-
-                if (appIndex != -1) {
-                    // Update existing app
-                    val updatedApp = currentApps[appIndex].copy(isEnabled = newState)
-                    currentApps[appIndex] = updatedApp
-
-                    // Save updated apps
-                    repository.saveNotificationApps(currentApps)
-
-                    Log.d(
-                        TAG,
-                        "Successfully updated notification state for $packageName to $newState"
-                    )
-
-                    // Send confirmation response back
-                    val responseMessage = JsonUtil.createToggleAppNotificationResponse(
-                        packageName = packageName,
-                        success = true,
-                        newState = newState,
-                        message = "App notification state updated successfully"
-                    )
-                    WebSocketUtil.sendMessage(responseMessage)
-                } else {
-                    Log.w(TAG, "App with package name $packageName not found in notification apps")
-
-                    // Send error response
-                    val responseMessage = JsonUtil.createToggleAppNotificationResponse(
-                        packageName = packageName,
-                        success = false,
-                        newState = newState,
-                        message = "App not found"
-                    )
-                    WebSocketUtil.sendMessage(responseMessage)
+                val apps = DataStoreManager(context).updateNotificationApps { current ->
+                    current.map { app ->
+                        if (app.packageName in packages) app.copy(isEnabled = newState) else app
+                    }
                 }
+                val found = apps.map { it.packageName }.toSet()
+                // A bulk selection is one write and one acknowledgement, not hundreds of frames.
+                val response = JSONObject(JsonUtil.createToggleAppNotificationResponse(
+                    packageName = packages.singleOrNull().orEmpty(),
+                    success = packages.all { it in found },
+                    newState = newState,
+                    message = "Updated ${packages.count { it in found }} app notification settings"
+                ))
+                if (packagesArray != null) response.getJSONObject("data")
+                    .put("packages", org.json.JSONArray(packages.toList()))
+                WebSocketUtil.sendMessage(response.toString())
             } catch (e: Exception) {
                 Log.e(TAG, "Error handling toggle app notification: ${e.message}")
                 val packageName = data?.optString("package") ?: ""

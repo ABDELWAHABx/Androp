@@ -80,7 +80,10 @@ extension UserDefaults {
 
     var manualPositionCoords: [String] {
         get {
-            return object(forKey: Keys.manualPositionCoords) as? [String] ?? ["0", "0"]
+            guard let coordinates = object(forKey: Keys.manualPositionCoords) as? [String],
+                  coordinates.count == 2,
+                  coordinates.allSatisfy({ Int32($0) != nil }) else { return ["0", "0"] }
+            return coordinates
         }
         set {
             set(newValue, forKey: Keys.manualPositionCoords)

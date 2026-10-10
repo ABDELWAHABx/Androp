@@ -67,7 +67,11 @@ data class SyncDashboardState(
         val transfer = DashboardTransfer(id, name, step, sending, kind)
         val existing = transfers.firstOrNull { it.id == id && it.sending == sending }
         if (existing == transfer) return this
-        return copy(transfers = (transfers.filterNot { it.id == id && it.sending == sending } + transfer).takeLast(8),
+        // Updating progress must not rotate the first row (and its Cancel action) to another file.
+        val updated = if (existing != null) transfers.map {
+            if (it.id == id && it.sending == sending) transfer else it
+        } else (transfers + transfer).takeLast(8)
+        return copy(transfers = updated,
             lastEvent = null, receivedFile = null)
     }
 

@@ -142,10 +142,11 @@ class AirSyncService : Service() {
             val dataStoreManager = DataStoreManager.getInstance(applicationContext)
             combine(
                 dataStoreManager.isFileAccessEnabled(),
-                dataStoreManager.getLastConnectedDevice()
-            ) { isEnabled, device ->
+                dataStoreManager.getLastConnectedDevice(),
+                WebSocketUtil.connectionState
+            ) { isEnabled, device, connected ->
                 Log.d(TAG, "WebDAV flow evaluation: isEnabled=$isEnabled, isPlus=${device?.isPlus}")
-                isEnabled && device?.isPlus == true && WebSocketUtil.isConnected()
+                isEnabled && device?.isPlus == true && connected
             }.collect { shouldStart ->
                 Log.d(TAG, "WebDAV requirement state updated: shouldStart = $shouldStart")
                 if (shouldStart && !isStopping && !app.androp.android.utils.BackgroundWorkController.isPaused) {

@@ -14,6 +14,8 @@ class DiscoveryManager: ObservableObject {
     private var mdnsDevices: [String: DiscoveredDevice] = [:]
     private var cancellables = Set<AnyCancellable>()
     private var isRunning = false
+    private var lifecycleGeneration: UInt64 = 0
+    private var reachabilityGeneration: UInt64 = 0
     var isServiceRunning: Bool { isRunning }
     private var networkMonitor: NWPathMonitor?
     private var reachabilityTimer: Timer?
@@ -93,10 +95,11 @@ class DiscoveryManager: ObservableObject {
         }
 
         // Verify TCP reachability over Wi-Fi socket before exposing to UI or auto-switching
+        let revision = reachabilityGeneration
         verifyIPReachability(ip: bestIP, port: detected.port) { [weak self] isReachable in
             guard let self = self else { return }
             DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.isRunning, !AppState.shared.isSyncPaused,
+                guard let self = self, self.isRunning, self.reachabilityGeneration == revision, !AppState.shared.isSyncPaused,
                       self.evaluateAvailableWifiDeviceForCurrentBLE()?.id == detected.id else { return }
                 guard isReachable else {
                     print("[DiscoveryManager] Discovered Wi-Fi device (\(detected.name)) is NOT reachable over TCP at \(bestIP):\(detected.port). Ignoring stale mDNS record.")
@@ -186,6 +189,7 @@ class DiscoveryManager: ObservableObject {
             print("[Discovery] Connection mode is Nearby only. Skipping DiscoveryManager start.")
             return
         }
+        lifecycleGeneration &+= 1
         isRunning = true
         
         setupNetworkMonitor()
@@ -197,6 +201,8 @@ class DiscoveryManager: ObservableObject {
     }
     
     func stop() {
+        lifecycleGeneration &+= 1
+        reachabilityGeneration &+= 1
         isRunning = false
         networkMonitor?.cancel()
         networkMonitor = nil
@@ -327,10 +333,11 @@ class DiscoveryManager: ObservableObject {
         }
 
         lastDeviceReconnectAttemptAt = Date()
+        let revision = reachabilityGeneration
         verifyIPReachability(ip: bestIP, port: candidate.port) { [weak self] isReachable in
             guard let self = self, isReachable else { return }
             DispatchQueue.main.async {
-                guard self.isRunning, !AppState.shared.isSyncPaused, AppState.shared.device == nil, !UserDefaults.standard.isManuallyDisconnected else { return }
+                guard self.isRunning, self.reachabilityGeneration == revision, !AppState.shared.isSyncPaused, AppState.shared.device == nil, !UserDefaults.standard.isManuallyDisconnected else { return }
                 print("[DiscoveryManager] Last connected device '\(candidate.name)' reappeared on the network. Auto-reconnecting...")
                 self.lastDeviceReconnectAttemptAt = Date()
                 QuickConnectManager.shared.connect(to: candidate)
@@ -369,13 +376,25 @@ class DiscoveryManager: ObservableObject {
     }
     
     private func setupNetworkMonitor() {
+        let generation = lifecycleGeneration
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
+        monitor.pathUpdateHandler = { [weak self, weak monitor] path in
             guard let self = self else { return }
             print("[DiscoveryManager] Network path update: \(path.status)")
             
             DispatchQueue.main.async {
-                guard self.isRunning, !AppState.shared.isSyncPaused else { return }
+                guard self.isRunning, self.lifecycleGeneration == generation,
+                      self.networkMonitor === monitor, !AppState.shared.isSyncPaused else { return }
+                // Probes from the old interface must not prune or auto-connect devices
+                // discovered on the replacement network.
+                self.reachabilityGeneration &+= 1
+                let probes = Array(self.reachabilityConnections.values)
+                self.reachabilityConnections.removeAll()
+                self.reachabilityCallbacks.removeAll()
+                for probe in probes { probe.stateUpdateHandler = nil; probe.cancel() }
+                self.wifiAutoSwitchTimer?.invalidate()
+                self.wifiAutoSwitchTimer = nil
+                self.lastDeviceReconnectAttemptAt = nil
                 self.reachabilityCache.removeAll()
                 // Clear out stale network devices on network change/disconnect
                 self.mdnsDevices.removeAll()
@@ -384,7 +403,10 @@ class DiscoveryManager: ObservableObject {
                 
                 // Restart Bonjour browser to trigger fresh searches on the new interface
                 self.bonjourBrowser.stop()
-                self.bonjourBrowser.start()
+                if path.status == .satisfied {
+                    self.bonjourBrowser.start()
+                    self.udpDiscovery.broadcastBurst()
+                }
             }
         }
         self.networkMonitor = monitor
@@ -392,8 +414,9 @@ class DiscoveryManager: ObservableObject {
     }
     
     private func startReachabilityTimer() {
+        let generation = lifecycleGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.isRunning, !AppState.shared.isSyncPaused else { return }
+            guard let self = self, self.lifecycleGeneration == generation, self.isRunning, !AppState.shared.isSyncPaused else { return }
             self.reachabilityTimer?.invalidate()
             self.reachabilityTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
                 self?.checkMdnsDevicesReachability()
@@ -404,13 +427,12 @@ class DiscoveryManager: ObservableObject {
     }
     
     private func stopReachabilityTimer() {
-        DispatchQueue.main.async {
-            self.reachabilityTimer?.invalidate()
-            self.reachabilityTimer = nil
-        }
+        reachabilityTimer?.invalidate()
+        reachabilityTimer = nil
     }
     
     private func checkMdnsDevicesReachability() {
+        let revision = reachabilityGeneration
         let devices = mdnsDevices.values
         if devices.isEmpty { return }
         
@@ -426,6 +448,7 @@ class DiscoveryManager: ObservableObject {
             
             if total == 0 {
                 DispatchQueue.main.async {
+                    guard self.isRunning, self.reachabilityGeneration == revision else { return }
                     self.mdnsDevices.removeValue(forKey: deviceId)
                     self.mergeAndPublish()
                 }
@@ -444,6 +467,7 @@ class DiscoveryManager: ObservableObject {
                         if !reachable {
                             print("[Discovery] Device \(name) (\(deviceId)) is not reachable on any IP. Removing device.")
                             DispatchQueue.main.async {
+                                guard self.isRunning, self.reachabilityGeneration == revision else { return }
                                 self.mdnsDevices.removeValue(forKey: deviceId)
                                 self.mergeAndPublish()
                             }

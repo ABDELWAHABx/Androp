@@ -27,6 +27,10 @@ import app.androp.android.utils.SyncManager
 import app.androp.android.utils.discovery.DiscoveryOrchestrator
 import app.androp.android.utils.WebSocketUtil
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -1152,9 +1156,8 @@ class AirSyncViewModel(
         _uiState.value = _uiState.value.copy(isEssentialsConnectionEnabled = enabled)
         viewModelScope.launch {
             repository.setEssentialsConnectionEnabled(enabled)
-            // wait for next up[date to sync
             if (enabled) {
-                // later: Trigger broadcast update immediately
+                appContext?.let { app.androp.android.utils.MacDeviceStatusManager.broadcastCurrentStatus(it) }
             }
         }
     }
@@ -1291,44 +1294,73 @@ class AirSyncViewModel(
     val notificationApps: StateFlow<List<app.androp.android.domain.model.NotificationApp>> =
         _notificationApps.asStateFlow()
 
+    private val notificationAppsMutex = Mutex()
+    private var notificationAppsJob: Job? = null
+    private val _notificationAppsLoading = MutableStateFlow(false)
+    val notificationAppsLoading: StateFlow<Boolean> = _notificationAppsLoading.asStateFlow()
+
     fun loadNotificationApps(context: Context) {
-        viewModelScope.launch(Dispatchers.IO) {
+        notificationAppsJob?.cancel()
+        notificationAppsJob = viewModelScope.launch {
+            _notificationAppsLoading.value = true
             try {
                 val installed = app.androp.android.utils.AppUtil.getInstalledApps(context)
-                val saved = repository.getNotificationApps().first()
-                val merged =
-                    app.androp.android.utils.AppUtil.mergeWithSavedApps(installed, saved)
-                _notificationApps.value = merged
+                // Keep the open settings sheet current when the Mac or discovery changes preferences.
+                repository.getNotificationApps().collect { saved ->
+                    _notificationApps.value = app.androp.android.utils.AppUtil.mergeWithSavedApps(installed, saved)
+                    _notificationAppsLoading.value = false
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (e: Exception) {
                 Log.e("AirSyncViewModel", "Failed to load notification apps: ${e.message}")
+            } finally {
+                _notificationAppsLoading.value = false
             }
         }
     }
 
     fun toggleNotificationApp(context: Context, packageName: String, enabled: Boolean) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val current = _notificationApps.value.map {
-                    if (it.packageName == packageName) it.copy(isEnabled = enabled) else it
-                }
-                _notificationApps.value = current
-                repository.saveNotificationApps(current)
-            } catch (e: Exception) {
-                Log.e("AirSyncViewModel", "Failed to toggle notification app: ${e.message}")
-            }
-        }
+        setNotificationAppsEnabled(setOf(packageName), enabled)
+    }
+
+    fun setNotificationAppsEnabled(packages: Set<String>, enabled: Boolean) {
+        if (packages.isEmpty()) return
+        updateNotificationAppSelection(packages.associateWith { enabled })
     }
 
     fun saveAllNotificationApps(
         context: Context,
         apps: List<app.androp.android.domain.model.NotificationApp>
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                _notificationApps.value = apps
-                repository.saveNotificationApps(apps)
-            } catch (e: Exception) {
-                Log.e("AirSyncViewModel", "Failed to save all notification apps: ${e.message}")
+        // Apply only the user's changed rows; preserve newer remote choices on other apps.
+        val previous = _notificationApps.value.associateBy { it.packageName }
+        val changes = apps.filter { previous[it.packageName]?.isEnabled != it.isEnabled }
+            .associate { it.packageName to it.isEnabled }
+        updateNotificationAppSelection(changes)
+    }
+
+    private fun updateNotificationAppSelection(changes: Map<String, Boolean>) {
+        if (changes.isEmpty()) return
+        viewModelScope.launch {
+            notificationAppsMutex.withLock {
+                try {
+                    val installed = _notificationApps.value.associateBy { it.packageName }
+                    val timestamp = System.currentTimeMillis()
+                    val updated = repository.updateNotificationApps { saved ->
+                        val byPackage = saved.associateBy { it.packageName }.toMutableMap()
+                        for ((pkg, enabled) in changes) {
+                            val current = byPackage[pkg] ?: installed[pkg] ?: continue
+                            byPackage[pkg] = current.copy(isEnabled = enabled, lastUpdated = timestamp)
+                        }
+                        byPackage.values.toList()
+                    }
+                    _notificationApps.value = app.androp.android.utils.AppUtil.mergeWithSavedApps(installed.values.toList(), updated)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (e: Exception) {
+                    Log.e("AirSyncViewModel", "Failed to save notification selection: ${e.message}")
+                }
             }
         }
     }

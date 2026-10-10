@@ -29,24 +29,55 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.ServerSocket
-import java.net.URLDecoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
 class WebDavServer(private val context: Context) {
+    companion object {
+        @Volatile private var activeServer: WebDavServer? = null
+        private val lifecycleExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { work ->
+            Thread(work, "androp-webdav-lifecycle").apply { isDaemon = true }
+        }
+
+        /** Nonblocking revocation at the transport boundary, including rapid reconnects. */
+        fun revokeAccess() {
+            activeServer?.let { server -> synchronized(server.tokenLock) { server.accessToken = null } }
+        }
+
+        /** Called only from the authenticated WebSocket message handler. */
+        fun publishAccess() {
+            val server = activeServer
+            if (server != null) server.sendAccess() else sendUnavailable()
+        }
+
+        private fun sendUnavailable() {
+            if (WebSocketUtil.connectionState.value && !BackgroundWorkController.isPaused) {
+                WebSocketUtil.sendMessage(org.json.JSONObject().put("type", "webDavAccess")
+                    .put("data", org.json.JSONObject().put("enabled", false)).toString())
+            }
+        }
+    }
+
+    private val lifecycleGeneration = java.util.concurrent.atomic.AtomicLong()
+    private val tokenLock = Any()
+    @Volatile private var accessToken: String? = null
     private var engine: ApplicationEngine? = null
     private val port = 9081
     private val TAG = "WebDavServer"
 
     private val storageRoot = Environment.getExternalStorageDirectory()
 
-    @Synchronized
     fun start() {
-        if (BackgroundWorkController.isPaused) return
+        val generation = lifecycleGeneration.incrementAndGet()
+        lifecycleExecutor.execute { startBlocking(generation) }
+    }
+
+    private fun startBlocking(generation: Long) {
+        if (lifecycleGeneration.get() != generation || BackgroundWorkController.isPaused || !WebSocketUtil.connectionState.value) return
         if (engine != null) {
-            Log.d(TAG, "WebDAV server already initialized")
+            sendAccess()
             return
         }
 
@@ -56,6 +87,7 @@ class WebDavServer(private val context: Context) {
         }
 
         try {
+            accessToken = WebDavAccessPolicy.newToken()
             engine = embeddedServer(CIO, port = port, host = "0.0.0.0") {
                 install(StatusPages) {
                     exception<Throwable> { call, cause ->
@@ -75,8 +107,10 @@ class WebDavServer(private val context: Context) {
                         head { withContext(Dispatchers.IO) { handleHead(call) } }
                         method(HttpMethod.Options) {
                             handle {
+                                if (authenticatedPath(call) == null) return@handle
                                 call.response.header("Allow", "GET, HEAD, OPTIONS, PROPFIND")
-                                call.response.header("DAV", "1, 2")
+                                // No LOCK/UNLOCK or writes are implemented: DAV class 2 was false advertising.
+                                call.response.header("DAV", "1")
                                 call.respond(HttpStatusCode.OK)
                             }
                         }
@@ -84,12 +118,30 @@ class WebDavServer(private val context: Context) {
                 }
             }
             engine?.start(wait = false)
+            if (lifecycleGeneration.get() != generation || BackgroundWorkController.isPaused || !WebSocketUtil.connectionState.value) {
+                stopBlocking()
+                return
+            }
+            activeServer = this
+            sendAccess()
             Log.i(TAG, "WebDAV server started on port $port")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start WebDAV server on port $port", e)
             runCatching { engine?.stop(0, 1000) }
             engine = null
+            accessToken = null
+            if (activeServer === this) activeServer = null
         }
+    }
+
+    private fun sendAccess() {
+        if (!WebSocketUtil.connectionState.value || BackgroundWorkController.isPaused || activeServer !== this) return
+        val token = synchronized(tokenLock) {
+            if (!WebSocketUtil.connectionState.value || BackgroundWorkController.isPaused || activeServer !== this) return
+            accessToken ?: WebDavAccessPolicy.newToken().also { accessToken = it }
+        }
+        WebSocketUtil.sendMessage(org.json.JSONObject().put("type", "webDavAccess")
+            .put("data", org.json.JSONObject().put("enabled", true).put("token", token).put("port", port)).toString())
     }
 
     private fun isPortAvailable(port: Int): Boolean {
@@ -100,28 +152,35 @@ class WebDavServer(private val context: Context) {
         }
     }
 
-    @Synchronized
     fun stop() {
+        lifecycleGeneration.incrementAndGet()
+        if (activeServer === this) activeServer = null
+        synchronized(tokenLock) { accessToken = null } // Revoke before draining requests.
+        sendUnavailable()
+        lifecycleExecutor.execute { stopBlocking() }
+    }
+
+    private fun stopBlocking() {
         try {
-            engine?.stop(500, 1000)
+            engine?.stop(0, 1000)
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping WebDAV server", e)
         } finally {
             engine = null
+            synchronized(tokenLock) { accessToken = null }
+            if (activeServer === this) activeServer = null
             Log.i(TAG, "WebDAV server stopped")
         }
     }
 
-    /**
-     * Extracts the filesystem-relative path from the request URI.
-     * URL-decodes the path and strips the leading slash so it can be
-     * joined with storageRoot via File(storageRoot, relativePath).
-     * Trailing slashes are removed before file resolution.
-     */
-    private fun resolveRequestPath(call: ApplicationCall): String {
-        val raw = call.request.path() // e.g. "/", "/DCIM/", "/DCIM/Camera/IMG_001.jpg"
-        val decoded = URLDecoder.decode(raw.replace("+", "%2B"), "UTF-8")
-        return decoded.trimStart('/').trimEnd('/')
+    private suspend fun authenticatedPath(call: ApplicationCall): String? {
+        if (BackgroundWorkController.isPaused || !WebSocketUtil.connectionState.value) {
+            call.respond(HttpStatusCode.ServiceUnavailable)
+            return null
+        }
+        val relative = WebDavAccessPolicy.relativePath(call.request.path(), accessToken)
+        if (relative == null) call.respond(HttpStatusCode.Forbidden)
+        return relative
     }
 
     private suspend fun ensureFileAccess(call: ApplicationCall): Boolean {
@@ -134,15 +193,14 @@ class WebDavServer(private val context: Context) {
     }
 
     private suspend fun handlePropfind(call: ApplicationCall) {
+        val relativePath = authenticatedPath(call) ?: return
         if (!ensureFileAccess(call)) return
-        val relativePath = resolveRequestPath(call)
         val file = StoragePathResolver.resolve(storageRoot, relativePath)
         if (file == null) {
             call.respond(HttpStatusCode.Forbidden)
             return
         }
 
-        Log.d(TAG, "PROPFIND: raw=${call.request.path()} -> resolved=${file.absolutePath}")
 
         if (!file.exists()) {
             Log.w(TAG, "PROPFIND 404: ${file.absolutePath}")
@@ -151,6 +209,10 @@ class WebDavServer(private val context: Context) {
         }
 
         val depth = call.request.headers["Depth"] ?: "1"
+        if (!WebDavAccessPolicy.supportsDepth(depth)) {
+            call.respond(HttpStatusCode.Forbidden, "Only Depth 0 and 1 are supported")
+            return
+        }
         val xml = buildPropfindXml(file, relativePath, depth)
 
         call.respondText(
@@ -172,7 +234,7 @@ class WebDavServer(private val context: Context) {
 
         if (file.isDirectory && depth != "0") {
             file.listFiles()
-                ?.filter { !it.name.startsWith(".") }
+                ?.filter { !it.name.startsWith(".") && StoragePathResolver.resolve(storageRoot, it.path, allowAbsolute = true) != null }
                 ?.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
                 ?.forEach { child ->
                     val childRelPath =
@@ -190,14 +252,15 @@ class WebDavServer(private val context: Context) {
 
         // Build the href: each path segment is percent-encoded individually,
         // but the "/" separators are preserved. Root is always "/".
+        val prefix = accessToken?.let(WebDavAccessPolicy::prefix) ?: return
         val href = if (relativePath.isEmpty()) {
-            "/"
+            prefix
         } else {
             val encodedSegments = relativePath.split("/").joinToString("/") { segment ->
                 segment.encodeURLPathPart()
             }
             // Directories must have trailing slash for WebDAV clients to recognise them
-            if (file.isDirectory) "/$encodedSegments/" else "/$encodedSegments"
+            if (file.isDirectory) "$prefix$encodedSegments/" else "$prefix$encodedSegments"
         }
 
         val lastModified = dateFormat.format(Date(file.lastModified()))
@@ -227,15 +290,14 @@ class WebDavServer(private val context: Context) {
         .replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&apos;")
 
     private suspend fun handleGet(call: ApplicationCall) {
+        val relativePath = authenticatedPath(call) ?: return
         if (!ensureFileAccess(call)) return
-        val relativePath = resolveRequestPath(call)
         val file = StoragePathResolver.resolve(storageRoot, relativePath)
         if (file == null) {
             call.respond(HttpStatusCode.Forbidden)
             return
         }
 
-        Log.d(TAG, "GET: raw=${call.request.path()} -> resolved=${file.absolutePath}")
 
         if (!file.exists()) {
             call.respond(HttpStatusCode.NotFound)
@@ -251,8 +313,8 @@ class WebDavServer(private val context: Context) {
     }
 
     private suspend fun handleHead(call: ApplicationCall) {
+        val relativePath = authenticatedPath(call) ?: return
         if (!ensureFileAccess(call)) return
-        val relativePath = resolveRequestPath(call)
         val file = StoragePathResolver.resolve(storageRoot, relativePath)
         if (file == null) {
             call.respond(HttpStatusCode.Forbidden)

@@ -39,14 +39,24 @@ class OutboundQuickShareService : Service() {
 
         const val EXTRA_URIS = "uris"
 
-        fun start(context: Context, uris: List<Uri>) {
+        @Volatile var isSending = false
+            private set
+
+        @Synchronized
+        fun start(context: Context, uris: List<Uri>): Boolean {
+            if (isSending || uris.isEmpty() || uris.size > 256 || app.androp.android.utils.BackgroundWorkController.isPaused) return false
+            isSending = true
             val intent = Intent(context, OutboundQuickShareService::class.java).apply {
                 putParcelableArrayListExtra(EXTRA_URIS, ArrayList(uris))
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+                else context.startService(intent)
+                true
+            } catch (error: RuntimeException) {
+                isSending = false
+                Log.w(TAG, "Couldn't start file transfer service", error)
+                false
             }
         }
     }
@@ -71,17 +81,21 @@ class OutboundQuickShareService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!foregroundReady) { stopSelf(); return START_NOT_STICKY }
         val uris: List<Uri> = intent?.getParcelableArrayListExtra(EXTRA_URIS) ?: emptyList()
+        if (activeStart) return START_NOT_STICKY
+        // Own the complete staged batch before any permission, pause or discovery failure.
+        // This also cleans unreadable files instead of only the metadata-success subset.
+        outgoingCacheFiles = uris.filter { it.scheme == "file" }.mapNotNull { it.path?.let(::File) }
+        if (!foregroundReady) { stopSelf(); return START_NOT_STICKY }
         if (uris.isEmpty()) {
             Log.w(TAG, "No files to send, stopping")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        if (activeStart) return START_NOT_STICKY
         activeStart = true
         serviceScope.launch {
+            try {
             if ((app.androp.android.utils.BackgroundWorkController.isPaused || dataStoreManager.isAppPaused().first())) {
                 stopSelf()
                 return@launch
@@ -100,7 +114,7 @@ class OutboundQuickShareService : Service() {
             // it silently falls through to a manual consent notification instead of auto-accepting.
             val ourName = dataStoreManager.getDeviceName().first().ifBlank { null }
                 ?: app.androp.android.utils.DeviceInfoUtil.getDeviceName(this@OutboundQuickShareService)
-            val files = uris.mapNotNull { toPendingFile(it) }
+            val files = uris.map { requireNotNull(toPendingFile(it)) { "Couldn't read all selected files" } }
             if (files.isEmpty()) {
                 Log.w(TAG, "Could not read any of the shared files")
                 updateNotification("Couldn't read the selected file(s)")
@@ -108,9 +122,14 @@ class OutboundQuickShareService : Service() {
                 return@launch
             }
 
-            outgoingCacheFiles = files.filter { it.uri.scheme == "file" }.mapNotNull { it.uri.path?.let(::File) }
             updateNotification("Looking for ${pairedDevice.name}...")
             findAndSend(pairedDevice.name, ourName, files)
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                Log.w(TAG, "Couldn't prepare transfer", error)
+                updateNotification("Couldn't prepare all selected files. Share them again.")
+                stopSelf()
+            }
         }
 
         return START_NOT_STICKY
@@ -307,6 +326,7 @@ class OutboundQuickShareService : Service() {
             }
         }
         SyncDashboardController.release(this, SyncDashboardController.OWNER_SEND)
+        isSending = false
         super.onDestroy()
     }
 }

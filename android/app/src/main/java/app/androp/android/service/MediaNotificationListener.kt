@@ -19,6 +19,7 @@ import android.util.Log
 import app.androp.android.data.local.DataStoreManager
 import app.androp.android.domain.model.MediaInfo
 import app.androp.android.utils.JsonUtil
+import app.androp.android.utils.NotificationActionPolicy
 import app.androp.android.utils.NotificationDismissalUtil
 import app.androp.android.utils.SyncManager
 import app.androp.android.utils.WebSocketUtil
@@ -573,15 +574,7 @@ class MediaNotificationListener : NotificationListenerService() {
             val currentKeys = mutableSetOf<String>()
             activeNotifications?.forEach { sbn ->
                 currentKeys.add(sbn.key)
-                val title = sbn.notification?.extras?.getString(Notification.EXTRA_TITLE) ?: ""
-                val notificationId = NotificationDismissalUtil.getIdBySystemKey(sbn.key)
-                    ?: NotificationDismissalUtil.getPersistedIdBySystemKey(sbn.key)
-                    ?: NotificationDismissalUtil.generateNotificationId(
-                        sbn.packageName,
-                        title,
-                        sbn.postTime
-                    )
-                NotificationDismissalUtil.storeNotification(notificationId, sbn)
+                NotificationDismissalUtil.registerNotification(sbn)
             }
             NotificationDismissalUtil.prunePersistedMappings(currentKeys)
         } catch (e: Exception) {
@@ -613,7 +606,7 @@ class MediaNotificationListener : NotificationListenerService() {
             Log.d(
                 TAG,
                 "Notification posted: ${notification.packageName} - ${
-                    notification.notification?.extras?.getString(Notification.EXTRA_TITLE)
+                    notification.notification?.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString()
                 }"
             )
 
@@ -641,44 +634,24 @@ class MediaNotificationListener : NotificationListenerService() {
         if (sbn.packageName == packageName) return
         Log.d(TAG, "Notification removed: ${sbn.packageName}")
 
+        // A queued removal for an older instance must not clear a replacement with the same key.
+        val replacementIsActive = try {
+            getActiveNotifications(arrayOf(sbn.key))?.any { it.key == sbn.key } == true
+        } catch (_: Exception) { false }
+        if (replacementIsActive) return
         sentNotifications.remove(sbn.key)
-        if (BackgroundWorkController.isPaused || !WebSocketUtil.isConnected()) {
-            NotificationDismissalUtil.getIdForSbn(sbn)?.let(NotificationDismissalUtil::removeFromCaches)
-            return
-        }
+        // Capture and clear synchronously: queued removal jobs must not delete a later repost,
+        // and duplicate callback overloads must not echo the raw Android key to the Mac.
+        val id = NotificationDismissalUtil.getIdForSbn(sbn) ?: return
+        val suppressed = NotificationDismissalUtil.consumeSuppressed(id)
+        NotificationDismissalUtil.removeFromCaches(id)
+        if (BackgroundWorkController.isPaused || !WebSocketUtil.isConnected()) return
         scheduleMediaRefresh()
-
-        // Sync dismissal to Mac
+        if (suppressed) return
         workScope.launch {
             if (BackgroundWorkController.isPaused) return@launch
-            try {
-                val id = NotificationDismissalUtil.getIdForSbn(sbn) ?: sbn.key
-
-                // If this dismissal was initiated by our own dismiss request, skip echo
-                val wasSuppressed = NotificationDismissalUtil.consumeSuppressed(id)
-                if (wasSuppressed) {
-                    Log.d(TAG, "Dismissal for $id was suppressed (originated from Mac)")
-                    NotificationDismissalUtil.removeFromCaches(id)
-                    return@launch
-                }
-
-                // Build and send update via WebSocket
-                val updateJson = JsonUtil.toSingleLine(
-                    JsonUtil.createNotificationUpdateJson(
-                        id,
-                        dismissed = true,
-                        action = "dismiss"
-                    )
-                )
-                WebSocketUtil.sendMessage(updateJson)
-
-                Log.d(TAG, "Sent notification removal sync for $id")
-
-                // Remove from caches since it's gone now
-                NotificationDismissalUtil.removeFromCaches(id)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error syncing notification removal: ${e.message}")
-            }
+            WebSocketUtil.sendMessage(JsonUtil.toSingleLine(
+                JsonUtil.createNotificationUpdateJson(id, dismissed = true, action = "dismiss")))
         }
     }
 
@@ -687,6 +660,7 @@ class MediaNotificationListener : NotificationListenerService() {
             notificationSendMutex.withLock {
             try {
                 if (BackgroundWorkController.isPaused || !WebSocketUtil.isConnected()) return@launch
+                if (!isCurrentNotification(sbn)) return@launch
                 // Skip notifications from AirSync itself to prevent feedback loops
                 if (sbn.packageName == packageName) {
                     return@launch
@@ -727,7 +701,7 @@ class MediaNotificationListener : NotificationListenerService() {
                 val notification = sbn.notification
                 val extras = notification.extras
 
-                val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+                val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
                 val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
                 val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
 
@@ -750,34 +724,17 @@ class MediaNotificationListener : NotificationListenerService() {
                         saveNewAppToPreferences(sbn.packageName, appName)
                     }
 
-                    // Retrieve existing notification ID (in-memory, then persisted
-                    // from a previous process) or generate a new one
-                    val notificationId = NotificationDismissalUtil.getIdBySystemKey(sbn.key)
-                        ?: NotificationDismissalUtil.getPersistedIdBySystemKey(sbn.key)
-                        ?: NotificationDismissalUtil.generateNotificationId(
-                            sbn.packageName,
-                            title,
-                            sbn.postTime
-                        )
+                    ensureActive()
+                    if (!isCurrentNotification(sbn)) return@launch
+                    val notificationId = NotificationDismissalUtil.registerNotification(sbn)
 
-                    // Store notification for potential dismissal or actions
-                    NotificationDismissalUtil.storeNotification(notificationId, sbn)
-
-                    // Extract actions: button or reply
-                    val actions = mutableListOf<Pair<String, String>>()
-                    try {
-                        val notifActions = notification.actions
-                        if (notifActions != null) {
-                            for (action in notifActions) {
-                                val hasReply =
-                                    action.remoteInputs?.any { it.allowFreeFormInput } == true
-                                val type = if (hasReply) "reply" else "button"
-                                val name = action.title?.toString() ?: "Action"
-                                actions.add(name to type)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to extract actions: ${e.message}")
+                    // Titles are the protocol action identifiers. Do not expose ambiguous actions
+                    // or manufacture a "Mark as read" action an Android app did not supply.
+                    val nativeActions = notification.actions.orEmpty()
+                    val descriptors = NotificationDismissalUtil.actionDescriptors(nativeActions)
+                    val actions = NotificationActionPolicy.unambiguousIndices(descriptors).map { index ->
+                        val descriptor = descriptors[index]
+                        descriptor.name to if (descriptor.supportsReply) "reply" else "button"
                     }
 
                     // Check for progress bar extras
@@ -827,8 +784,9 @@ class MediaNotificationListener : NotificationListenerService() {
                         )
                     )
 
+                    ensureActive()
                     if (sentNotifications.matches(sbn.key, notificationJson)) return@launch
-                    if (BackgroundWorkController.isPaused) return@launch
+                    if (BackgroundWorkController.isPaused || !isCurrentNotification(sbn)) return@launch
 
                     Log.d(TAG, "Sending notification via WS/BLE")
                     val success = WebSocketUtil.sendMessage(notificationJson)
@@ -880,6 +838,12 @@ class MediaNotificationListener : NotificationListenerService() {
         super.onDestroy()
     }
 
+    private fun isCurrentNotification(sbn: StatusBarNotification): Boolean = try {
+        getActiveNotifications(arrayOf(sbn.key))?.singleOrNull()?.let {
+            it.key == sbn.key && it.postTime == sbn.postTime
+        } == true
+    } catch (_: Exception) { false }
+
     private fun getNotificationPriority(sbn: StatusBarNotification): String {
         return try {
             val ranking = Ranking()
@@ -915,7 +879,6 @@ class MediaNotificationListener : NotificationListenerService() {
 
     private suspend fun saveNewAppToPreferences(packageName: String, appName: String) {
         try {
-            val currentApps = dataStoreManager.getNotificationApps().first().toMutableList()
             val isSystemApp = try {
                 val applicationInfo = packageManager.getApplicationInfo(packageName, 0)
                 (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
@@ -931,8 +894,9 @@ class MediaNotificationListener : NotificationListenerService() {
                 lastUpdated = System.currentTimeMillis()
             )
 
-            currentApps.add(newApp)
-            dataStoreManager.saveNotificationApps(currentApps)
+            dataStoreManager.updateNotificationApps { currentApps ->
+                if (currentApps.any { it.packageName == packageName }) currentApps else currentApps + newApp
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error saving new app to preferences", e)
         }

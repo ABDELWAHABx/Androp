@@ -122,6 +122,10 @@ class AirSyncRepositoryImpl(
         dataStoreManager.saveNotificationApps(apps)
     }
 
+    override suspend fun updateNotificationApps(
+        transform: (List<NotificationApp>) -> List<NotificationApp>
+    ): List<NotificationApp> = dataStoreManager.updateNotificationApps(transform)
+
     override fun getNotificationApps(): Flow<List<NotificationApp>> {
         return dataStoreManager.getNotificationApps()
     }

@@ -11,6 +11,7 @@ import Foundation
 import AppKit
 import AVFoundation
 import MediaPlayer
+import ImageIO
 
 final class NowPlayingPublisher {
     static let shared = NowPlayingPublisher()
@@ -23,11 +24,14 @@ final class NowPlayingPublisher {
     // MARK: - State
     private var currentInfo: NowPlayingInfo?
     private var commandCenterRegistered = false
+    private var deferredUpdate: DispatchWorkItem?
+    private var cachedArtworkData: Data?
+    private var cachedArtwork: MPMediaItemArtwork?
 
     /// Timestamp of the last remote command we sent to Android.
-    private var lastCommandSentAt: Date = .distantPast
+    private var lastCommandSentAt: TimeInterval = -.infinity
     /// Timestamp of the last time we updated MPNowPlayingInfoCenter.
-    private var lastStateUpdateAt: Date = .distantPast
+    private var lastStateUpdateAt: TimeInterval = -.infinity
     
     // Short debounces to provide an instant UI while preventing macOS feedback loops:
     // 0.35s limits how fast the user can mash buttons, and blocks automated
@@ -65,7 +69,7 @@ final class NowPlayingPublisher {
 
     /// Update now-playing with Android media info.
     /// During the 1-second window after the user clicks a button, we ignore incoming
-    /// status updates. This protects our instant optimistic UI from being overwritten
+    /// status updates briefly, then apply the latest one. This protects our instant optimistic UI from being overwritten
     /// by stale network packets that Android dispatched before the command took effect.
     func update(info: NowPlayingInfo) {
         guard Thread.isMainThread else {
@@ -78,17 +82,24 @@ final class NowPlayingPublisher {
             clear()
             return
         }
-        let timeSinceCommand = Date().timeIntervalSince(lastCommandSentAt)
+        let timeSinceCommand = (ProcessInfo.processInfo.systemUptime - lastCommandSentAt)
+        deferredUpdate?.cancel()
+        deferredUpdate = nil
         if timeSinceCommand < 1.0 {
+            // Media-session notifications are event-driven: dropping the final pause
+            // update here could leave silent audio running forever. Keep the latest.
+            let update = DispatchWorkItem { [weak self] in self?.update(info: info) }
+            deferredUpdate = update
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0.01, 1.0 - timeSinceCommand), execute: update)
             return
         }
-        
+
         currentInfo = info
 
         // Paused/idle sessions must not keep an audio engine waking the CPU.
         if info.isPlaying == true { startSilentAudio() }
         else { stopSilentAudio() }
-        lastStateUpdateAt = Date()
+        lastStateUpdateAt = ProcessInfo.processInfo.systemUptime
         publishToNowPlayingInfoCenter(info: info)
     }
 
@@ -98,7 +109,13 @@ final class NowPlayingPublisher {
             DispatchQueue.main.async { self.clear() }
             return
         }
+        deferredUpdate?.cancel()
+        deferredUpdate = nil
         currentInfo = nil
+        cachedArtworkData = nil
+        cachedArtwork = nil
+        lastCommandSentAt = -.infinity
+        lastStateUpdateAt = -.infinity
         stopSilentAudio()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
@@ -182,24 +199,40 @@ final class NowPlayingPublisher {
             MPMediaItemPropertyAlbumTitle: info.album ?? "",
         ]
 
-        if let duration = info.duration, duration > 0 {
+        if let duration = info.duration, duration.isFinite, duration > 0 {
             mpInfo[MPMediaItemPropertyPlaybackDuration] = duration
         }
-        if let elapsed = info.elapsedTime {
-            mpInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
+        if let elapsed = info.elapsedTime, elapsed.isFinite {
+            mpInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = max(0, elapsed)
         }
         let rate = info.playbackRate ?? 1.0
         mpInfo[MPNowPlayingInfoPropertyPlaybackRate] = info.isPlaying == true ? (rate.isFinite && rate > 0 ? rate : 1.0) : 0.0
-        mpInfo[MPNowPlayingInfoPropertyIsLiveStream] = (info.duration ?? 0) <= 0
+        let hasDuration = info.duration.map { $0.isFinite && $0 > 0 } ?? false
+        mpInfo[MPNowPlayingInfoPropertyIsLiveStream] = !hasDuration
         MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled =
-            (info.duration ?? 0) > 0 && (AppState.shared.device?.isRegularConnection ?? false)
+            hasDuration && (AppState.shared.device?.isRegularConnection ?? false)
 
-        if let artworkData = info.artworkData,
-           let nsImage = NSImage(data: artworkData) {
-            let artwork = MPMediaItemArtwork(boundsSize: CGSize(width: nsImage.size.width, height: nsImage.size.height)) { _ in
-                return nsImage
+        if let artworkData = info.artworkData, artworkData.count <= 5 * 1024 * 1024 {
+            if artworkData != cachedArtworkData {
+                cachedArtworkData = artworkData
+                cachedArtwork = nil
+                // Decode at the display size. Untrusted full-resolution artwork can
+                // otherwise allocate hundreds of MB just for a tiny control-center tile.
+                if let source = CGImageSourceCreateWithData(artworkData as CFData, nil),
+                   let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 512,
+                    kCGImageSourceShouldCacheImmediately: true
+                   ] as CFDictionary) {
+                    let nsImage = NSImage(cgImage: thumbnail, size: NSSize(width: CGFloat(thumbnail.width), height: CGFloat(thumbnail.height)))
+                    cachedArtwork = MPMediaItemArtwork(boundsSize: nsImage.size) { _ in nsImage }
+                }
             }
-            mpInfo[MPMediaItemPropertyArtwork] = artwork
+            if let artwork = cachedArtwork { mpInfo[MPMediaItemPropertyArtwork] = artwork }
+        } else {
+            cachedArtworkData = nil
+            cachedArtwork = nil
         }
 
         center.nowPlayingInfo = mpInfo
@@ -218,9 +251,9 @@ final class NowPlayingPublisher {
         }
         guard !AppState.shared.isSyncPaused, AppState.shared.device != nil,
               currentInfo?.hasMediaSession == true else { return .noSuchContent }
-        let now = Date()
-        let timeSinceCommand = now.timeIntervalSince(lastCommandSentAt)
-        let timeSinceState = now.timeIntervalSince(lastStateUpdateAt)
+        let now = ProcessInfo.processInfo.systemUptime
+        let timeSinceCommand = now - lastCommandSentAt
+        let timeSinceState = now - lastStateUpdateAt
         
         if timeSinceCommand < commandDebounceInterval {
             return .success
@@ -304,15 +337,15 @@ final class NowPlayingPublisher {
         }
         guard var info = currentInfo, info.hasMediaSession,
               (AppState.shared.device?.isRegularConnection ?? false),
-              !AppState.shared.isSyncPaused, let duration = info.duration, duration > 0,
+              !AppState.shared.isSyncPaused, let duration = info.duration, duration.isFinite, duration > 0,
               positionSeconds.isFinite else { return .commandFailed }
-        guard Date().timeIntervalSince(lastCommandSentAt) >= commandDebounceInterval else { return .success }
+        guard (ProcessInfo.processInfo.systemUptime - lastCommandSentAt) >= commandDebounceInterval else { return .success }
         let position = min(max(0, positionSeconds), duration)
-        lastCommandSentAt = Date()
+        lastCommandSentAt = ProcessInfo.processInfo.systemUptime
         WebSocketServer.shared.seekTo(positionSeconds: position)
         info.elapsedTime = position
         currentInfo = info
-        lastStateUpdateAt = Date()
+        lastStateUpdateAt = ProcessInfo.processInfo.systemUptime
         publishToNowPlayingInfoCenter(info: info)
         return .success
     }
@@ -322,7 +355,7 @@ final class NowPlayingPublisher {
         info.isPlaying = playing
         currentInfo = info
         if playing { startSilentAudio() } else { stopSilentAudio() }
-        lastStateUpdateAt = Date()
+        lastStateUpdateAt = ProcessInfo.processInfo.systemUptime
         publishToNowPlayingInfoCenter(info: info)
     }
 }

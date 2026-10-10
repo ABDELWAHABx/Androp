@@ -45,14 +45,7 @@ class AppState: ObservableObject {
     private var clipboardCancellable: AnyCancellable?
     private var lastClipboardValue: String? = nil
     private var lastClipboardChangeCount: Int = -1
-    private struct PendingClipboard {
-        let id: String
-        let text: String
-        let videoHandoff: Bool
-        var attempts = 0
-        var deadline = Date.distantPast
-    }
-    private var clipboardOutbox: [PendingClipboard] = []
+    private var clipboardOutbox = ClipboardDeliveryQueue()
     private var clipboardRetryWorkItem: DispatchWorkItem?
     private var clipboardReceivedIDs: [String] = []
     private var lastDeliveredClipboardText: String?
@@ -267,7 +260,7 @@ class AppState: ObservableObject {
                 clipboardRetryWorkItem = nil
                 if !clipboardOutbox.isEmpty { clipboardDeliveryStatus = "Clipboard delivery cancelled: device changed" }
                 clipboardOutbox.removeAll()
-                lastDeliveredClipboardText = nil
+                self.lastDeliveredClipboardText = nil
                 clipboardReceivedIDs.removeAll()
             }
             updateConnectionMonitoring()
@@ -282,6 +275,7 @@ class AppState: ObservableObject {
                 // Mount WebDAV volume
                 if newDevice.isRegularConnection && isPlus && isFileAccessEnabled {
                     WebDAVManager.shared.mount(ipAddress: newDevice.ipAddress, port: 9081, volumeName: newDevice.name)
+                    WebSocketServer.shared.sendToFirstAvailable(message: "{\"type\":\"requestWebDavAccess\",\"data\":{}}")
                 }
             } else {
                 recentApps = []
@@ -912,6 +906,7 @@ class AppState: ObservableObject {
                 if isFileAccessEnabled {
                     if let newDevice = device, newDevice.isRegularConnection {
                         WebDAVManager.shared.mount(ipAddress: newDevice.ipAddress, port: 9081, volumeName: newDevice.name)
+                        WebSocketServer.shared.sendToFirstAvailable(message: "{\"type\":\"requestWebDavAccess\",\"data\":{}}")
                     }
                 } else {
                     WebDAVManager.shared.unmount()
@@ -1022,26 +1017,20 @@ class AppState: ObservableObject {
 
     // Remove notification by model instance and system notif center
     func removeNotification(_ notif: Notification) {
-        DispatchQueue.main.async {
-            withAnimation {
-                self.notifications.removeAll { $0.id == notif.id }
-            }
-            if self.dismissNotif {
-                WebSocketServer.shared.dismissNotification(id: notif.nid)
-            }
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notif.nid])
-        }
+        removeNotificationById(notif.nid)
     }
 
-    func removeNotificationById(_ nid: String) {
+    func removeNotificationById(_ nid: String, notifyPhone: Bool = true) {
         DispatchQueue.main.async {
-            withAnimation {
-                self.notifications.removeAll { $0.nid == nid }
-            }
-            if self.dismissNotif {
+            let wasPresent = self.notifications.contains { $0.nid == nid }
+            withAnimation { self.notifications.removeAll { $0.nid == nid } }
+            self.observedDeliveredNotificationIDs.remove(nid)
+            if wasPresent && notifyPhone && self.dismissNotif && !self.isSyncPaused {
                 WebSocketServer.shared.dismissNotification(id: nid)
             }
-            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [nid])
+            let center = UNUserNotificationCenter.current()
+            center.removePendingNotificationRequests(withIdentifiers: [nid])
+            center.removeDeliveredNotifications(withIdentifiers: [nid])
         }
     }
 
@@ -1218,14 +1207,14 @@ class AppState: ObservableObject {
         }
 
         let category = UNNotificationCategory(
-            identifier: "CALL_NOTIFICATION",
+            identifier: callEvent.direction == .incoming ? "CALL_INCOMING" : "CALL_OUTGOING",
             actions: actions,
             intentIdentifiers: [],
             options: [.customDismissAction]
         )
-        center.setNotificationCategories([category])
+        NotificationCategoryRegistry.shared.register(category)
 
-        content.categoryIdentifier = "CALL_NOTIFICATION"
+        content.categoryIdentifier = category.identifier
         content.userInfo = [
             "eventId": callEvent.eventId,
             "contactName": callEvent.contactName,
@@ -1270,12 +1259,13 @@ class AppState: ObservableObject {
 
     func clearNotifications() {
         DispatchQueue.main.async {
-            if !self.notifications.isEmpty {
-                withAnimation {
-                    self.notifications.removeAll()
-                }
+            let ids = self.notifications.map(\.nid)
+            if self.dismissNotif && !self.isSyncPaused {
+                ids.forEach { WebSocketServer.shared.dismissNotification(id: $0) }
             }
-            UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+            withAnimation { self.notifications.removeAll() }
+            self.observedDeliveredNotificationIDs.removeAll()
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
         }
     }
 
@@ -1554,16 +1544,15 @@ class AppState: ObservableObject {
             content.userInfo["actions"] = []
             finalizeAndSchedule(center: center, content: content, id: id, appIcon: appIcon)
         } else {
-            let actionNamesKey = unActions.map { $0.identifier }.joined(separator: "_")
-            let catId = "DYN_\(actionNamesKey)"
+            let catId = NotificationCategoryPolicy.identifier(for: unActions.flatMap {
+                [$0.identifier, $0.title, $0 is UNTextInputNotificationAction ? "reply" : "button"]
+            })
             content.categoryIdentifier = catId
             content.userInfo["actions"] = actions.map { ["name": $0.name, "type": $0.type.rawValue] }
 
-            center.getNotificationCategories { existing in
-                if existing.first(where: { $0.identifier == catId }) == nil {
-                    let newCat = UNNotificationCategory(identifier: catId, actions: unActions, intentIdentifiers: [], options: [])
-                    center.setNotificationCategories(existing.union([newCat]))
-                }
+            let category = UNNotificationCategory(identifier: catId, actions: unActions,
+                intentIdentifiers: [], options: [.customDismissAction])
+            NotificationCategoryRegistry.shared.register(category) {
                 self.finalizeAndSchedule(center: center, content: content, id: id, appIcon: appIcon)
             }
         }
@@ -1602,6 +1591,8 @@ class AppState: ObservableObject {
         }
     }
 
+    private var observedDeliveredNotificationIDs = Set<String>()
+
     func syncWithSystemNotifications() {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             guard settings.authorizationStatus == .authorized else {
@@ -1613,7 +1604,10 @@ class AppState: ObservableObject {
                 DispatchQueue.main.async {
                     // Only sync notifications that were actually posted to system (non-silent)
                     let currentSystemNIDs = Set(self.notifications.filter { $0.priority != "silent" }.map { $0.nid })
-                    let removedNIDs = currentSystemNIDs.subtracting(systemNIDs)
+                    let removedNIDs = NotificationCategoryPolicy.removed(
+                        previouslyDelivered: self.observedDeliveredNotificationIDs,
+                        currentlyDelivered: systemNIDs, mirrored: currentSystemNIDs)
+                    self.observedDeliveredNotificationIDs = systemNIDs.intersection(currentSystemNIDs)
 
                     for nid in removedNIDs {
                         print("[state] (notification) System notification \(nid) was dismissed manually.")
@@ -1637,6 +1631,12 @@ class AppState: ObservableObject {
                 guard currentChangeCount != self.lastClipboardChangeCount else { return }
                 self.lastClipboardChangeCount = currentChangeCount
 
+                // Password managers use these standard pasteboard markers. Never
+                // automatically forward concealed/transient/autogenerated secrets.
+                let privateTypes = ["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType", "org.nspasteboard.AutoGeneratedType"]
+                guard !privateTypes.contains(where: { pasteboard.types?.contains(NSPasteboard.PasteboardType($0)) == true }) else { return }
+                // A new copy gesture may intentionally repeat the last delivered link.
+                self.lastDeliveredClipboardText = nil
                 if let copiedString = pasteboard.string(forType: .string),
                    copiedString != self.lastClipboardValue {
                     self.lastClipboardValue = nil
@@ -1646,11 +1646,9 @@ class AppState: ObservableObject {
     }
 
     func sendClipboardToAndroid(text: String, force: Bool = false, videoHandoff: Bool = false) {
-        guard !isSyncPaused, (isClipboardSyncEnabled || force), device != nil,
-              !text.isEmpty, text.utf8.count <= 64 * 1024, clipboardOutbox.count < 8,
-              clipboardOutbox.reduce(0, { $0 + $1.text.utf8.count }) + text.utf8.count <= 512 * 1024 else { return }
-        if !force && (text == lastDeliveredClipboardText || clipboardOutbox.contains(where: { $0.text == text })) { return }
-        clipboardOutbox.append(PendingClipboard(id: UUID().uuidString, text: text, videoHandoff: videoHandoff))
+        guard !isSyncPaused, (isClipboardSyncEnabled || force), device != nil else { return }
+        if !force && text == lastDeliveredClipboardText { return }
+        guard clipboardOutbox.enqueue(text: text, videoHandoff: videoHandoff, explicit: force) else { return }
         clipboardDeliveryStatus = "Clipboard queued"
         pumpClipboardOutbox()
     }
@@ -1664,32 +1662,27 @@ class AppState: ObservableObject {
         clipboardRetryWorkItem?.cancel()
         clipboardRetryWorkItem = nil
         guard !isSyncPaused, device != nil else { return }
-        let now = Date()
-        clipboardOutbox.removeAll { entry in
-            if entry.attempts >= 3 && entry.deadline <= now {
-                clipboardDeliveryStatus = "Clipboard delivery not confirmed"
-                return true
-            }
-            return false
+        let now = ProcessInfo.processInfo.systemUptime
+        if clipboardOutbox.expire(at: now) {
+            clipboardDeliveryStatus = "Clipboard delivery not confirmed"
         }
-        for index in clipboardOutbox.indices where clipboardOutbox[index].attempts < 3 && clipboardOutbox[index].deadline <= now {
-            let entry = clipboardOutbox[index]
+        if let entry = clipboardOutbox.due(at: now) {
+            // Mark the attempt before sending: a synchronous transport callback can
+            // acknowledge and remove it without invalidating an array index.
+            clipboardOutbox.attempted(id: entry.id, at: now, delay: device?.isBLE == true ? 60 : 4)
             let queued = WebSocketServer.shared.sendClipboardProtocol(data: [
                 "text": entry.text, "id": entry.id, "videoHandoff": entry.videoHandoff
             ])
-            clipboardOutbox[index].attempts += 1
-            clipboardOutbox[index].deadline = now.addingTimeInterval(device?.isBLE == true ? 60 : 4)
             clipboardDeliveryStatus = queued ? "Waiting for clipboard confirmation" : "Clipboard transport busy"
         }
-        guard let deadline = clipboardOutbox.map({ $0.deadline }).min() else { return }
+        guard let deadline = clipboardOutbox.nextDeadline else { return }
         let work = DispatchWorkItem { [weak self] in self?.pumpClipboardOutbox() }
         clipboardRetryWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, deadline.timeIntervalSinceNow), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, deadline - ProcessInfo.processInfo.systemUptime), execute: work)
     }
 
     func acknowledgeClipboard(id: String, ok: Bool) {
-        guard !isSyncPaused, let index = clipboardOutbox.firstIndex(where: { $0.id == id }) else { return }
-        let entry = clipboardOutbox.remove(at: index)
+        guard !isSyncPaused, let entry = clipboardOutbox.acknowledge(id: id) else { return }
         if ok { lastDeliveredClipboardText = entry.text }
         clipboardDeliveryStatus = ok ? "Clipboard delivered" : "Phone could not store clipboard"
         pumpClipboardOutbox()
@@ -1753,6 +1746,8 @@ class AppState: ObservableObject {
         clipboardRetryWorkItem = nil
         if !clipboardOutbox.isEmpty { clipboardDeliveryStatus = "Clipboard delivery cancelled" }
         clipboardOutbox.removeAll()
+        lastClipboardValue = nil
+        lastDeliveredClipboardText = nil
     }
 
     // MARK: - Continue browsing helper (exact URL detection)

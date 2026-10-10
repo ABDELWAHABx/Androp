@@ -31,12 +31,9 @@ struct airsync_macApp: App {
         let center = UNUserNotificationCenter.current()
         center.delegate = notificationDelegate
 
-        // Register base default category with generic View action; dynamic per-notification categories added later
-        let viewAction = UNNotificationAction(identifier: "VIEW_ACTION", title: "View", options: [])
-        let defaultCategory = UNNotificationCategory(identifier: "DEFAULT_CATEGORY", actions: [viewAction], intentIdentifiers: [], options: [])
-        center.getNotificationCategories { existing in
-            center.setNotificationCategories(existing.union([defaultCategory]))
-        }
+        // Generic alerts support dismissal; supported Android/View actions get a dynamic category.
+        let defaultCategory = UNNotificationCategory(identifier: "DEFAULT_CATEGORY", actions: [], intentIdentifiers: [], options: [.customDismissAction])
+        NotificationCategoryRegistry.shared.register(defaultCategory)
         center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error = error {
                 print("[main-app] Notification permission error: \(error)")

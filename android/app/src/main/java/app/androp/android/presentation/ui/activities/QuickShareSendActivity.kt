@@ -45,6 +45,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,7 +64,11 @@ import app.androp.android.utils.YouTubeHandoff
 import app.androp.android.utils.ClipboardSyncManager
 import app.androp.android.utils.ShortcutUtil
 import app.androp.android.utils.StoragePathResolver
+import app.androp.android.utils.OutgoingShareCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -107,30 +113,32 @@ class QuickShareSendActivity : ComponentActivity() {
 
     private fun extractUris(intent: Intent?): List<Uri> {
         if (intent == null) return emptyList()
-        return when (intent.action) {
-            Intent.ACTION_SEND -> {
+        if (intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_SEND_MULTIPLE) return emptyList()
+        val streams = runCatching {
+            if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
+                val list: ArrayList<out Parcelable>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                }
+                list?.filterIsInstance<Uri>().orEmpty()
+            } else {
                 val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
                 } else {
                     @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                    intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
                 }
                 listOfNotNull(uri)
             }
+        }.getOrDefault(emptyList())
+        // Samsung Gallery and other providers may carry the selection only in ClipData.
+        val clipUris = intent.clipData?.let { clip ->
+            (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }
+        }.orEmpty()
+        return (streams + clipUris).distinct().filter { it.scheme == "content" }
 
-            Intent.ACTION_SEND_MULTIPLE -> {
-                val list: ArrayList<out Parcelable>? =
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-                    }
-                list?.filterIsInstance<Uri>() ?: emptyList()
-            }
-
-            else -> emptyList()
-        }
     }
 }
 
@@ -145,7 +153,7 @@ private fun QuickShareSendScreen(
 ) {
     val context = LocalContext.current
     var uiState by remember { mutableStateOf<SendUiState>(SendUiState.Loading) }
-    var hasStarted by remember { mutableStateOf(false) }
+    val currentWindowFocus by rememberUpdatedState(hasWindowFocus)
     var showVideoChoice by remember { mutableStateOf(false) }
     val textScope = rememberCoroutineScope()
     val videoURL = remember(sharedText) { sharedText?.let(YouTubeHandoff::extract) }
@@ -160,33 +168,44 @@ private fun QuickShareSendScreen(
         } else uiState = SendUiState.Error("Delivery not confirmed. Check the connection and retry.")
     }
 
-    LaunchedEffect(hasWindowFocus) {
-        if (hasWindowFocus && !hasStarted) {
-            hasStarted = true
+    LaunchedEffect(Unit) {
+        snapshotFlow { currentWindowFocus }.first { it }
+        run {
             delay(100)
+            val knownPairedName = withContext(Dispatchers.IO) {
+                app.androp.android.data.local.DataStoreManager.getInstance(context).getLastConnectedDevice().first()?.name
+            }
 
             if (uris.isEmpty() && sharedText.isNullOrBlank()) {
                 uiState = SendUiState.Error("Nothing to send")
                 delay(1500)
                 onFinished()
-            } else if (pairedDeviceName.isNullOrBlank()) {
+            } else if (knownPairedName.isNullOrBlank()) {
                 uiState = SendUiState.Error("No Mac paired")
                 delay(1500)
                 onFinished()
             } else if (uris.isEmpty()) {
                 if (videoURL != null) showVideoChoice = true else sendText(false)
             } else {
-                val localUris = withContext(Dispatchers.IO) { copyUrisToCache(context, uris) }
-                if (localUris.isEmpty()) {
-                    uiState = SendUiState.Error("Couldn't read the file")
-                    delay(1500)
-                    onFinished()
-                } else {
-                    OutboundQuickShareService.start(context, localUris)
+                var staged: List<File> = emptyList()
+                var handedToService = false
+                try {
+                    check(!OutboundQuickShareService.isSending) { "A file transfer is already running. Try again when it finishes." }
+                    withContext(Dispatchers.IO) { staged = copyUrisToCache(context, uris) }
+                    handedToService = OutboundQuickShareService.start(context, staged.map(Uri::fromFile))
+                    check(handedToService) { "Couldn't start sending. Wait for the current transfer, then try again." }
                     reportSummonShortcutUsed(context)
                     uiState = SendUiState.Success
                     delay(1200)
                     onFinished()
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    Log.w("QuickShareSendActivity", "Couldn't prepare shared files", e)
+                    uiState = SendUiState.Error(e.message ?: "Couldn't read the selected files")
+                } finally {
+                    if (!handedToService) withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
+                        staged.forEach { runCatching { it.delete() } }
+                    }
                 }
             }
         }
@@ -304,46 +323,24 @@ private fun reportSummonShortcutUsed(context: Context) {
     }
 }
 
-private fun copyUrisToCache(context: Context, uris: List<Uri>): List<Uri> {
-    val outDir = File(context.cacheDir, "quickshare_outgoing").canonicalFile.apply { mkdirs() }
-    return uris.mapNotNull { uri ->
-        var cachedFile: File? = null
-        try {
-            val fallback = "file_${java.util.UUID.randomUUID()}"
-            var name = fallback
-            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (cursor.moveToFirst() && nameIdx >= 0) {
-                    cursor.getString(nameIdx)?.let { name = it }
-                }
+private suspend fun copyUrisToCache(context: Context, uris: List<Uri>): List<File> {
+    val coroutine = currentCoroutineContext()
+    val sources = uris.map { uri ->
+        coroutine.ensureActive()
+        val fallback = "file_${java.util.UUID.randomUUID()}"
+        var name = if (uri.scheme == "file") uri.lastPathSegment ?: fallback else fallback
+        if (uri.scheme == "content") {
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (cursor.moveToFirst() && index >= 0) name = cursor.getString(index) ?: fallback
             }
-            name = StoragePathResolver.safeFileName(name, fallback)
-            val input = context.contentResolver.openInputStream(uri) ?: return@mapNotNull null
-            input.use {
-                var candidateName = name
-                var counter = 1
-                while (true) {
-                    val dest = requireNotNull(StoragePathResolver.resolve(outDir, candidateName))
-                    require(dest.parentFile == outDir) { "Invalid cache destination" }
-                    // Reserve atomically so simultaneous share sheets never overwrite each other.
-                    if (dest.createNewFile()) {
-                        cachedFile = dest
-                        dest.outputStream().buffered(64 * 1024).use { output -> input.copyTo(output, 64 * 1024) }
-                        break
-                    }
-                    val base = name.substringBeforeLast(".")
-                    val ext = name.substringAfterLast(".", "")
-                    candidateName = if (ext.isEmpty()) "$base ($counter)" else "$base ($counter).$ext"
-                    counter++
-                }
-            }
-            Uri.fromFile(requireNotNull(cachedFile))
-        } catch (e: Exception) {
-            cachedFile?.delete()
-            Log.e("QuickShareSendActivity", "Failed to cache $uri", e)
-            null
+        }
+        OutgoingShareCache.Source(name) {
+            requireNotNull(context.contentResolver.openInputStream(uri)) { "Couldn't read $name" }
         }
     }
+    return OutgoingShareCache.stage(File(context.cacheDir, "quickshare_outgoing"), sources,
+        checkActive = { coroutine.ensureActive() })
 }
 
 @Preview(name = "Loading", showBackground = true)

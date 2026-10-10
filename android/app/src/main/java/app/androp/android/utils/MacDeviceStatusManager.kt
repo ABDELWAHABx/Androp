@@ -27,6 +27,8 @@ object MacDeviceStatusManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var statusJob: Job? = null
     private var decodedArtwork = ""
+    private val batteryBroadcastLock = Any()
+    private val batteryBroadcast = BatteryBroadcastPolicy()
 
     private val _macDeviceStatus = MutableStateFlow<MacDeviceStatus?>(null)
     val macDeviceStatus: StateFlow<MacDeviceStatus?> = _macDeviceStatus.asStateFlow()
@@ -227,6 +229,8 @@ object MacDeviceStatusManager {
                 // Broadcast to Essentials if enabled
                 if (!isPaused && isEssentialsEnabled) {
                     broadcastToEssentials(context, batteryLevel, isCharging, isConnected)
+                } else if (!isEssentialsEnabled) {
+                    synchronized(batteryBroadcastLock) { batteryBroadcast.reset() }
                 }
             }
 
@@ -317,21 +321,27 @@ object MacDeviceStatusManager {
         context: Context,
         level: Int,
         isCharging: Boolean,
-        isConnected: Boolean
+        isConnected: Boolean,
+        force: Boolean = false
     ) {
-        try {
-            val intent =
-                android.content.Intent("com.sameerasw.essentials.action.UPDATE_MAC_BATTERY").apply {
-                    putExtra("level", level)
-                    putExtra("isCharging", isCharging)
-                    putExtra("lastUpdated", System.currentTimeMillis())
-                    putExtra("isConnected", isConnected)
-                    setPackage("com.sameerasw.essentials")
-                }
-            context.sendBroadcast(intent, "com.sameerasw.permission.ESSENTIALS_AIRSYNC_BRIDGE")
-            Log.d(TAG, "Broadcasted Mac status to Essentials (connected: $isConnected)")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error broadcasting to Essentials: ${e.message}")
+        synchronized(batteryBroadcastLock) {
+            val state = BatteryBroadcastPolicy.State(level, isCharging, isConnected)
+            if (!batteryBroadcast.shouldPublish(state, force)) return
+            try {
+                val intent =
+                    android.content.Intent("com.sameerasw.essentials.action.UPDATE_MAC_BATTERY").apply {
+                        putExtra("level", level)
+                        putExtra("isCharging", isCharging)
+                        putExtra("lastUpdated", System.currentTimeMillis())
+                        putExtra("isConnected", isConnected)
+                        setPackage("com.sameerasw.essentials")
+                    }
+                context.sendBroadcast(intent, "com.sameerasw.permission.ESSENTIALS_AIRSYNC_BRIDGE")
+                batteryBroadcast.didPublish(state)
+                Log.d(TAG, "Broadcasted Mac status to Essentials (connected: $isConnected)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error broadcasting to Essentials: ${e.message}")
+            }
         }
     }
 
@@ -364,8 +374,11 @@ object MacDeviceStatusManager {
     }
 
     fun broadcastCurrentStatus(context: Context) {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch {
             try {
+                val settings = DataStoreManager.getInstance(context)
+                if (!settings.getEssentialsConnectionEnabled().first() ||
+                    settings.isAppPaused().first() || BackgroundWorkController.isPaused) return@launch
                 // Check current state
                 val isConnected = WebSocketUtil.isConnected() || BleGattServer.isAnyAuthenticated()
                 val currentStatus = _macDeviceStatus.value
@@ -376,11 +389,12 @@ object MacDeviceStatusManager {
                         context,
                         currentStatus.battery.level,
                         currentStatus.battery.isCharging,
-                        true
+                        true,
+                        force = true
                     )
                 } else {
                     // Send connected = false (no data needed, or stale)
-                    broadcastToEssentials(context, -1, false, false)
+                    broadcastToEssentials(context, -1, false, false, force = true)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error broadcasting current status: ${e.message}")

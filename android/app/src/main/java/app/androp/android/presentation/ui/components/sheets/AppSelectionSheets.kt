@@ -1,6 +1,6 @@
 package app.androp.android.presentation.ui.components.sheets
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,7 +17,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +24,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,11 +37,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import app.androp.android.R
 import app.androp.android.domain.model.NotificationApp
 import app.androp.android.utils.HapticUtil
+import app.androp.android.utils.AppSelectionPolicy
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -50,20 +52,23 @@ fun AppSelectionSheet(
     apps: List<NotificationApp>,
     onAppToggle: (String, Boolean) -> Unit,
     onSaveAll: (List<NotificationApp>) -> Unit,
-    isLoading: Boolean
+    isLoading: Boolean,
+    onBulkToggle: ((Set<String>, Boolean) -> Unit)? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val haptics = LocalHapticFeedback.current
     var searchQuery by remember { mutableStateOf("") }
     var showSystemApps by remember { mutableStateOf(false) }
 
-    val filteredApps = apps.filter {
-        val matchesSearch =
-            searchQuery.isEmpty() || it.appName.contains(searchQuery, ignoreCase = true)
-        val isVisible = !it.isSystemApp || showSystemApps || it.isEnabled
-        matchesSearch && isVisible
-    }.distinctBy { it.packageName }
-        .sortedWith(compareByDescending<NotificationApp> { it.isEnabled }.thenBy { it.appName.lowercase() })
+    val filteredApps = remember(apps, searchQuery, showSystemApps) {
+        AppSelectionPolicy.visible(apps, searchQuery, showSystemApps)
+    }
+    val setVisibleEnabled: (Boolean) -> Unit = { enabled ->
+        HapticUtil.performClick(haptics)
+        val packages = filteredApps.mapTo(mutableSetOf()) { it.packageName }
+        if (onBulkToggle != null) onBulkToggle(packages, enabled)
+        else onSaveAll(AppSelectionPolicy.setEnabled(apps, packages, enabled))
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismissRequest,
@@ -87,22 +92,6 @@ fun AppSelectionSheet(
                     style = MaterialTheme.typography.headlineSmall
                 )
 
-                IconButton(
-                    onClick = {
-                        HapticUtil.performClick(haptics)
-                        val updatedList = apps.map { app ->
-                            val isVisible = !app.isSystemApp || showSystemApps || app.isEnabled
-                            if (isVisible) app.copy(isEnabled = !app.isEnabled) else app
-                        }
-                        onSaveAll(updatedList)
-                    }
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.rounded_invert_colors_24),
-                        contentDescription = "Invert Selection",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
             }
 
             // Search Bar
@@ -126,9 +115,9 @@ fun AppSelectionSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .clickable {
+                    .toggleable(value = showSystemApps, role = Role.Switch) { checked ->
                         HapticUtil.performClick(haptics)
-                        showSystemApps = !showSystemApps
+                        showSystemApps = checked
                     }
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -148,10 +137,23 @@ fun AppSelectionSheet(
                 )
                 Switch(
                     checked = showSystemApps,
-                    onCheckedChange = {
-                        HapticUtil.performClick(haptics)
-                        showSystemApps = it
+                    onCheckedChange = null
+                )
+            }
+
+            Column {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { setVisibleEnabled(true) }, enabled = !isLoading && filteredApps.any { !it.isEnabled }) {
+                        Text("Select all shown")
                     }
+                    TextButton(onClick = { setVisibleEnabled(false) }, enabled = !isLoading && filteredApps.any { it.isEnabled }) {
+                        Text("Deselect all shown")
+                    }
+                }
+                Text(
+                    text = "${filteredApps.count { it.isEnabled }} of ${filteredApps.size} shown selected",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
@@ -164,6 +166,8 @@ fun AppSelectionSheet(
                 ) {
                     CircularProgressIndicator()
                 }
+            } else if (filteredApps.isEmpty()) {
+                Text("No matching apps", modifier = Modifier.weight(1f).padding(16.dp))
             } else {
                 LazyColumn(
                     modifier = Modifier
@@ -210,9 +214,9 @@ fun AppToggleItem(
     ListItem(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(enabled = enabled) {
+            .toggleable(value = isChecked, enabled = enabled, role = Role.Switch) { checked ->
                 HapticUtil.performClick(haptics)
-                onCheckedChange(!isChecked)
+                onCheckedChange(checked)
             },
         leadingContent = {
             if (icon != null) {

@@ -189,65 +189,51 @@ object BleTransportBridge {
                 }
             }
 
+            action.startsWith("toggleNotifs|") -> {
+                if (action.length > 140_000) return
+                val payload = try { JSONObject(action.substringAfter('|')) } catch (_: Exception) { return }
+                val items = payload.optJSONArray("packages") ?: return
+                val enabled = payload.optString("state").toBooleanStrictOrNull() ?: return
+                if (items.length() !in 1..512) return
+                val packages = (0 until items.length()).map { items.optString(it) }.toSet()
+                updateNotificationSelection(context, packages, enabled)
+            }
+
             action.startsWith("toggleNotif|") -> {
-                val parts = action.split("|")
-                if (parts.size >= 3) {
-                    val pkg = parts[1]
-                    val state = parts[2] == "true"
-                    Log.d(TAG, "Received toggleAppNotif via BLE: pkg=$pkg, state=$state")
-                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                        try {
-                            val dataStoreManager =
-                                app.androp.android.data.local.DataStoreManager.getInstance(
-                                    context
-                                )
-                            val currentApps =
-                                dataStoreManager.getNotificationApps().first().toMutableList()
-                            val idx = currentApps.indexOfFirst { it.packageName == pkg }
-                            if (idx != -1) {
-                                currentApps[idx] = currentApps[idx].copy(
-                                    isEnabled = state,
-                                    lastUpdated = System.currentTimeMillis()
-                                )
-                                dataStoreManager.saveNotificationApps(currentApps)
-                                Log.d(
-                                    TAG,
-                                    "Successfully toggled app notification preference via BLE for $pkg to $state"
-                                )
-                            } else {
-                                val isSystemApp = try {
-                                    val applicationInfo =
-                                        context.packageManager.getApplicationInfo(pkg, 0)
-                                    (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                                } catch (_: Exception) {
-                                    false
-                                }
-                                val newApp = app.androp.android.domain.model.NotificationApp(
-                                    packageName = pkg,
-                                    appName = pkg,
-                                    isEnabled = state,
-                                    isSystemApp = isSystemApp,
-                                    lastUpdated = System.currentTimeMillis()
-                                )
-                                currentApps.add(newApp)
-                                dataStoreManager.saveNotificationApps(currentApps)
-                                Log.d(
-                                    TAG,
-                                    "Saved new app notification preference via BLE for $pkg to $state"
-                                )
-                            }
-                            app.androp.android.utils.SyncManager.checkAndSyncDeviceStatus(
-                                context,
-                                forceSync = true
-                            )
-                        } catch (e: Exception) {
-                            Log.e(
-                                TAG,
-                                "Error toggling app notification preference via BLE: ${e.message}"
-                            )
-                        }
-                    }
+                val parts = action.split("|", limit = 3)
+                if (parts.size != 3) return
+                val enabled = parts[2].toBooleanStrictOrNull() ?: return
+                updateNotificationSelection(context, setOf(parts[1]), enabled)
+            }
+        }
+    }
+
+    private fun updateNotificationSelection(context: android.content.Context, packages: Set<String>, enabled: Boolean) {
+        if (packages.isEmpty() || packages.size > 512 ||
+            packages.any { it.length !in 1..255 || !it.matches(Regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*")) }) return
+        if (!BleGattServer.isAnyAuthenticated() || app.androp.android.utils.BackgroundWorkController.isPaused) return
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                val dataStore = app.androp.android.data.local.DataStoreManager.getInstance(context)
+                val now = System.currentTimeMillis()
+                val defaults = packages.associateWith { pkg ->
+                    val system = try {
+                        (context.packageManager.getApplicationInfo(pkg, 0).flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                    } catch (_: Exception) { false }
+                    app.androp.android.domain.model.NotificationApp(pkg, pkg, enabled, isSystemApp = system, lastUpdated = now)
                 }
+                dataStore.updateNotificationApps { saved ->
+                    val current = saved.associateBy { it.packageName }.toMutableMap()
+                    for (pkg in packages) {
+                        current[pkg] = (current[pkg] ?: defaults.getValue(pkg)).copy(isEnabled = enabled, lastUpdated = now)
+                    }
+                    current.values.toList()
+                }
+                app.androp.android.utils.SyncManager.checkAndSyncDeviceStatus(context, forceSync = true)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.e(TAG, "Error updating app notification preferences via BLE", failure)
             }
         }
     }

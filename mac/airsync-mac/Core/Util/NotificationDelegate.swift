@@ -80,6 +80,11 @@ class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 }
             }
         }
+        // Explicit system dismissal follows the user's phone-dismiss preference.
+        else if response.actionIdentifier == UNNotificationDismissActionIdentifier,
+                let nid = userInfo["nid"] as? String {
+            AppState.shared.removeNotificationById(nid)
+        }
         // Handle custom actions
         else if response.actionIdentifier.hasPrefix("ACT_") {
             let actionName = String(response.actionIdentifier.dropFirst(4))

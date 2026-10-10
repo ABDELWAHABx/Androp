@@ -718,6 +718,7 @@ fun SettingsView(
 
     if (showAppSelectionSheet) {
         val apps by viewModel.notificationApps.collectAsState()
+        val appsLoading by viewModel.notificationAppsLoading.collectAsState()
         AppSelectionSheet(
             onDismissRequest = { showAppSelectionSheet = false },
             apps = apps,
@@ -727,7 +728,8 @@ fun SettingsView(
             onSaveAll = { updatedList ->
                 viewModel.saveAllNotificationApps(context, updatedList)
             },
-            isLoading = apps.isEmpty()
+            isLoading = appsLoading,
+            onBulkToggle = { packages, enabled -> viewModel.setNotificationAppsEnabled(packages, enabled) }
         )
     }
 

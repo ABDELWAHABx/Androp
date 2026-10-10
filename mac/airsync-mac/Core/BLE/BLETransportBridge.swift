@@ -240,7 +240,7 @@ class BLETransportBridge {
         DispatchQueue.main.async {
             guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
                   BLECentralManager.shared.sessionGeneration == generation else { return }
-            AppState.shared.removeNotificationById(id)
+            AppState.shared.removeNotificationById(id, notifyPhone: false)
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
         }
     }

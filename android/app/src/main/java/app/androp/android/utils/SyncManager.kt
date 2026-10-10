@@ -462,14 +462,10 @@ object SyncManager {
                 return
             }
 
-            // Get saved notification app preferences
-            val savedNotificationApps = dataStoreManager.getNotificationApps().first()
-
-            // Merge installed apps with saved preferences
-            val allApps = AppUtil.mergeWithSavedApps(installedApps, savedNotificationApps)
-
-            // Save the merged list back to DataStore
-            dataStoreManager.saveNotificationApps(allApps)
+            // Merge against the latest choices inside the write transaction.
+            val allApps = dataStoreManager.updateNotificationApps { saved ->
+                AppUtil.mergeWithSavedApps(installedApps, saved)
+            }
 
             Log.d(
                 TAG,

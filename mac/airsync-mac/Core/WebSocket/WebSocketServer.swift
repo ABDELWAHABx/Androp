@@ -38,6 +38,7 @@ class WebSocketServer: ObservableObject {
     internal let lifecycleQueue = DispatchQueue(label: "app.androp.server.lifecycle", qos: .utility)
     internal var networkMonitorTimer: Timer?
     internal var networkPathMonitor: NWPathMonitor?
+    internal var networkRecovery = NetworkRecoveryPolicy()
     internal let networkMonitorQueue = DispatchQueue(label: "com.airsync.networkmonitor", qos: .utility)
     internal let networkCheckInterval: TimeInterval = 10.0
     internal let lock = NSRecursiveLock()
@@ -86,6 +87,7 @@ class WebSocketServer: ObservableObject {
         DispatchQueue.main.async {
             guard self.isCurrentLifecycle(generation) else { return }
             AppState.shared.webSocketStatus = .starting
+            self.startNetworkMonitoring()
         }
         lifecycleQueue.async { [weak self] in
             guard let self = self, self.isCurrentLifecycle(generation) else { return }
@@ -100,7 +102,7 @@ class WebSocketServer: ObservableObject {
                 // Swifter binds all interfaces. One listener is sufficient even when
                 // the Mac has no address yet; NWPathMonitor handles subsequent changes.
                 let server = HttpServer()
-                self.setupWebSocket(for: server)
+                self.setupWebSocket(for: server, generation: generation)
                 if let adapterName = adapterName {
                     server.listenAddressIPv4 = self.getLocalIPAddress(adapterName: adapterName)
                 }
@@ -117,7 +119,6 @@ class WebSocketServer: ObservableObject {
                     self.localIPAddress = ip
                     self.lastKnownIP = ip
                     AppState.shared.webSocketStatus = .started(port: port, ip: ip)
-                    self.startNetworkMonitoring()
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -171,7 +172,7 @@ class WebSocketServer: ObservableObject {
 
     /// Configures WebSocket routes and event callbacks.
     /// Handles message decryption before passing payload to the message router.
-    private func setupWebSocket(for server: HttpServer) {
+    private func setupWebSocket(for server: HttpServer, generation: UInt64 = 0) {
         server["/socket"] = websocket(
             text: { [weak self] session, text in
                 guard let self = self, !AppState.shared.isSyncPaused else { return }
@@ -229,7 +230,7 @@ class WebSocketServer: ObservableObject {
             connected: { [weak self] session in
                 guard let self = self else { return }
                 self.lock.lock()
-                guard self.shouldRun else { self.lock.unlock(); return }
+                guard self.shouldRun, self.lifecycleGeneration == generation else { self.lock.unlock(); return }
                 let sessionId = ObjectIdentifier(session)
                 self.lastActivity[sessionId] = Date()
                 self.activeSessions.append(session)
@@ -249,6 +250,7 @@ class WebSocketServer: ObservableObject {
             disconnected: { [weak self] session in
                 guard let self = self else { return }
                 self.lock.lock()
+                guard self.activeSessions.contains(where: { $0 === session }) else { self.lock.unlock(); return }
                 self.lastActivity.removeValue(forKey: ObjectIdentifier(session))
                 self.activeSessions.removeAll(where: { $0 === session })
                 let sessionCount = self.activeSessions.count
@@ -265,7 +267,7 @@ class WebSocketServer: ObservableObject {
                 if wasPrimary {
                     DispatchQueue.main.async {
                         self.lock.lock()
-                        let shouldDisconnect = self.shouldRun && self.primarySessionID == nil
+                        let shouldDisconnect = self.shouldRun && self.lifecycleGeneration == generation && self.primarySessionID == nil
                         self.lock.unlock()
                         guard shouldDisconnect, !AppState.shared.isSyncPaused else { return }
                         AppState.shared.disconnectDevice(manual: false)

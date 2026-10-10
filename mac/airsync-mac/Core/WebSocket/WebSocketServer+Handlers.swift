@@ -75,6 +75,19 @@ extension WebSocketServer {
             handleRemoteControl(message)
         case .browseData:
             handleBrowseData(message)
+        case .webDavAccess:
+            guard !AppState.shared.isSyncPaused,
+                  let device = AppState.shared.device, device.isRegularConnection,
+                  AppState.shared.isPlus, AppState.shared.isFileAccessEnabled,
+                  let data = message.data.value as? [String: Any] else { return }
+            if data["enabled"] as? Bool == true,
+               let token = data["token"] as? String,
+               let port = data["port"] as? Int, (1...65535).contains(port) {
+                WebDAVManager.shared.mount(ipAddress: device.ipAddress, port: port, volumeName: device.name)
+                WebDAVManager.shared.setAccess(token: token, port: port)
+            } else {
+                WebDAVManager.shared.setAccess(token: nil)
+            }
         case .userDisconnected:
             handleUserDisconnected()
         case .volumeControl, .macVolume, .toggleAppNotif, .browseLs, .wakeUpRequest, .macMediaControlResponse, .macPowerControlResponse, .macInfo, .callControl:
@@ -150,6 +163,9 @@ extension WebSocketServer {
             let adbPorts = dict["adbPorts"] as? [String] ?? []
             let deviceId = dict["id"] as? String ?? ""
 
+            // File-browsing credentials belong only to this authenticated session,
+            // including when the same phone reconnects on a replacement socket.
+            WebDAVManager.shared.unmount()
             AppState.shared.device = Device(
                 name: name,
                 ipAddress: ip,
@@ -907,10 +923,10 @@ extension WebSocketServer {
     private func handleNotificationUpdate(_ message: Message) {
         if let dict = message.data.value as? [String: Any],
            let nid = dict["id"] as? String {
-            if let action = dict["action"] as? String, action.lowercased() == "dismiss" || dict["dismissed"] as? Bool == true {
+            if (dict["action"] as? String)?.lowercased() == "dismiss" || dict["dismissed"] as? Bool == true {
                 DispatchQueue.main.async {
                     if AppState.shared.notifications.contains(where: { $0.nid == nid }) {
-                        AppState.shared.removeNotificationById(nid)
+                        AppState.shared.removeNotificationById(nid, notifyPhone: false)
                     }
                     UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [nid])
                 }

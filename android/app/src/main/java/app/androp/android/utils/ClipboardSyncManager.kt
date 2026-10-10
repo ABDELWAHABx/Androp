@@ -55,7 +55,7 @@ object ClipboardSyncManager {
                 // background clipboard reads; the listener is detached on pause.
                 attachListener(app)
                 delay(250)
-                if (!BackgroundWorkController.isPaused && isEnabled && AirSyncApp.isAppForeground()) ClipboardUtil.getClipboardText(app)?.let(::automaticSend)
+                if (!BackgroundWorkController.isPaused && isEnabled && AirSyncApp.isAppForeground()) ClipboardUtil.getClipboardText(app, automatic = true)?.let(::automaticSend)
             }
         }
     }
@@ -68,7 +68,7 @@ object ClipboardSyncManager {
                 resumed.add(activity)
                 if (isEnabled && !BackgroundWorkController.isPaused) {
                     attachListener(app)
-                    scope.launch { delay(250); if (resumed.isNotEmpty() && isEnabled) ClipboardUtil.getClipboardText(app)?.let(::automaticSend) }
+                    scope.launch { delay(250); if (resumed.isNotEmpty() && isEnabled && !BackgroundWorkController.isPaused) ClipboardUtil.getClipboardText(app, automatic = true)?.let(::automaticSend) }
                 }
             }
             override fun onActivityPaused(activity: Activity) { resumed.remove(activity); if (resumed.isEmpty()) detachListener() }
@@ -83,7 +83,12 @@ object ClipboardSyncManager {
     private fun attachListener(context: Context) {
         if (clipboardListener != null || BackgroundWorkController.isPaused) return
         listenerContext = context.applicationContext
-        clipboardListener = ClipboardUtil.registerClipboardListener(context) { automaticSend(it) }
+        clipboardListener = try {
+            ClipboardUtil.registerClipboardListener(context) { automaticSend(it) }
+        } catch (_: RuntimeException) {
+            listenerContext = null
+            null // Clipboard service/permission failures must not crash activity resume.
+        }
     }
     private fun detachListener() {
         clipboardListener?.let { listener -> listenerContext?.let { ClipboardUtil.unregisterClipboardListener(it, listener) } }
@@ -105,6 +110,7 @@ object ClipboardSyncManager {
         isEnabled = false
         outbox.entries().forEach { rememberResult(it.id, false) }
         outbox.clear()
+        lastReceivedText = null
         _deliveryState.value = DeliveryState()
     }
 
@@ -164,7 +170,9 @@ object ClipboardSyncManager {
     }
 
     private fun stopEmptyRetry() {
-        if (outbox.size() == 0) { retryJob?.cancel(); retryJob = null }
+        retryJob?.cancel()
+        retryJob = null
+        if (outbox.size() > 0) scheduleRetry()
     }
 
     private fun rememberResult(id: String, ok: Boolean) {
@@ -186,8 +194,8 @@ object ClipboardSyncManager {
                     val entry = outbox.due(now)
                     if (entry != null) {
                         val data = JSONObject().put("text", entry.text).put("id", entry.id).put("videoHandoff", entry.videoHandoff)
-                        val queued = WebSocketUtil.sendMessage(JSONObject().put("type", "clipboardUpdate").put("data", data).toString())
                         outbox.attempted(entry.id, now, if (app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) 60_000 else 4_000)
+                        val queued = WebSocketUtil.sendMessage(JSONObject().put("type", "clipboardUpdate").put("data", data).toString())
                         _deliveryState.value = DeliveryState(entry.id, "waiting", if (queued) null else "Transport busy")
                     } else {
                         val deadline = outbox.nextDeadline() ?: break
@@ -206,7 +214,11 @@ object ClipboardSyncManager {
             val ok = data.optBoolean("ok", false)
             val entry = outbox.acknowledge(id, ok) ?: return@launch
             rememberResult(id, ok)
-            stopEmptyRetry()
+            // The head may have been waiting on its retry deadline. Wake the next
+            // queued item immediately instead of making it wait another 4–60 seconds.
+            retryJob?.cancel()
+            retryJob = null
+            if (outbox.size() > 0) scheduleRetry()
             _deliveryState.value = DeliveryState(id, if (ok) "delivered" else "failed", if (ok) null else "Phone or Mac could not store clipboard")
             if (ok) { onClipboardSent?.invoke(entry.text); SyncDashboardController.clipboard(sent = true) }
         }

@@ -26,6 +26,21 @@ struct NowPlayingInfoRegression {
         assert(parse(["playing": false]).playbackRate == 0)
         assert(parse(["playing": true]).playbackRate == 1)
         assert(parse(["playing": true, "playbackRate": 1.5]).playbackRate == 1.5)
+        for invalid in [Double.nan, Double.infinity, -Double.infinity] {
+            let info = parse(["elapsedTime": invalid, "duration": invalid, "playbackRate": invalid, "playing": true])
+            assert(info.elapsedTime == 0 && info.duration == 0 && info.playbackRate == 1)
+        }
+        var artwork = parse(["artworkData": Data([1, 2, 3]).base64EncodedString()])
+        assert(artwork.artworkData == Data([1, 2, 3]))
+        artwork.updateFromPayload(["artworkData": "invalid!"])
+        assert(artwork.artworkData == nil)
+        assert(parse(["artworkData": String(repeating: "A", count: 7 * 1024 * 1024 + 1)]).artworkData == nil)
+        assert(parse(["elapsedTime": Double.greatestFiniteMagnitude, "duration": Double.greatestFiniteMagnitude]).duration == NowPlayingInfo.maximumTimelineSeconds)
+        for invalid in [Double.nan, Double.infinity, -Double.infinity, -1, Double.greatestFiniteMagnitude] {
+            assert(NowPlayingInfo.seekMilliseconds(invalid) == nil)
+        }
+        assert(NowPlayingInfo.seekMilliseconds(1.25) == 1250)
+        assert(NowPlayingInfo.seekMilliseconds(0) == 0)
         print("NowPlayingInfo regression checks passed")
     }
 }

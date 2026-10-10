@@ -125,7 +125,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
             actions: [acceptAction, declineAction],
             intentIdentifiers: []
         )
-        center.setNotificationCategories([incomingCategory])
+        NotificationCategoryRegistry.shared.register(incomingCategory)
     }
     
     // MARK: - Outbound Discovery

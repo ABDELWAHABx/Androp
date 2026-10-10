@@ -112,70 +112,68 @@ extension WebSocketServer {
     func startNetworkMonitoring() {
         guard !AppState.shared.isSyncPaused else { return }
         networkPathMonitor?.cancel()
+        lock.lock()
+        let generation = lifecycleGeneration
+        networkRecovery = NetworkRecoveryPolicy()
+        lock.unlock()
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            guard path.status == .satisfied else { return }
-            DispatchQueue.main.async { self?.checkNetworkChange() }
+        monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+            let available = path.status == .satisfied
+            DispatchQueue.main.async {
+                guard let self = self, let monitor = monitor,
+                      self.networkPathMonitor === monitor,
+                      self.isCurrentLifecycle(generation) else { return }
+                self.checkNetworkChange(pathAvailable: available)
+            }
         }
-        monitor.start(queue: networkMonitorQueue)
         networkPathMonitor = monitor
+        monitor.start(queue: networkMonitorQueue)
     }
 
     func stopNetworkMonitoring() {
         networkPathMonitor?.cancel()
         networkPathMonitor = nil
-        DispatchQueue.main.async {
-            self.lock.lock()
-            self.networkMonitorTimer?.invalidate()
-            self.networkMonitorTimer = nil
-            self.lastKnownAdapters = []
-            self.lock.unlock()
-        }
+        lock.lock()
+        networkMonitorTimer?.invalidate()
+        networkMonitorTimer = nil
+        lastKnownAdapters = []
+        networkRecovery = NetworkRecoveryPolicy()
+        lock.unlock()
     }
 
-    /// Monitors network adapter state changes.
-    /// Triggers a WebSocket server restart if the active IP address changes to maintain connectivity.
-    func checkNetworkChange() {
+    /// Observe loss as well as recovery: Wi-Fi often returns with the SAME address.
+    /// Ignoring the loss leaves stale sessions and prevents the listener recovering.
+    func checkNetworkChange(pathAvailable: Bool? = nil) {
         guard !AppState.shared.isSyncPaused else { return }
+        AppState.shared.revalidateNetworkAdapter()
         let adapters = getAvailableNetworkAdapters()
         let chosenIP = getLocalIPAddress(adapterName: AppState.shared.selectedNetworkAdapterName)
+        lock.lock()
+        guard shouldRun else { lock.unlock(); return }
+        let action = networkRecovery.update(
+            available: pathAvailable ?? !adapters.isEmpty,
+            endpoint: chosenIP,
+            previousEndpoint: lastKnownIP
+        )
+        lastKnownAdapters = adapters
+        lastKnownIP = chosenIP
+        let port = localPort ?? Defaults.serverPort
+        lock.unlock()
 
-        self.lock.lock()
-        let lastAddresses = lastKnownAdapters.map { $0.address }
-        let currentAddresses = adapters.map { $0.address }
-        let lastIP = lastKnownIP
-        self.lock.unlock()
-
-        if currentAddresses != lastAddresses {
-            self.lock.lock()
-            lastKnownAdapters = adapters
-            self.lock.unlock()
-
-            AppState.shared.revalidateNetworkAdapter()
-
-            for adapter in adapters {
-                let activeMark = (adapter.address == chosenIP) ? " [ACTIVE]" : ""
-                print("[websocket] (network) \(adapter.name) -> \(adapter.address)\(activeMark)")
+        localIPAddress = chosenIP
+        AppState.shared.shouldRefreshQR = true
+        if case .started = AppState.shared.webSocketStatus {
+            AppState.shared.webSocketStatus = .started(port: port, ip: chosenIP)
+        }
+        if action == .lost {
+            // Keep the listener/monitor alive to hear the recovery event. Do not
+            // persist a manual disconnect or disturb a BLE-only connection.
+            if AppState.shared.device?.isRegularConnection == true {
+                AppState.shared.disconnectDevice(manual: false)
             }
-
-            if let lastIP = lastIP, lastIP != chosenIP {
-                print("[websocket] (network) IP changed from \(lastIP) to \(chosenIP ?? "N/A"), restarting WebSocket in 5 seconds")
-                
-                DispatchQueue.main.async {
-                    self.lock.lock()
-                    self.lastKnownIP = chosenIP
-                    self.lock.unlock()
-                    AppState.shared.shouldRefreshQR = true
-                }
-                
-                restartServer()
-            } else if lastIP == nil {
-                DispatchQueue.main.async {
-                    self.lock.lock()
-                    self.lastKnownIP = chosenIP
-                    self.lock.unlock()
-                }
-            }
+        } else if action == .restart {
+            print("[websocket] Network recovered or endpoint changed; refreshing listener")
+            restartServer()
         }
     }
 

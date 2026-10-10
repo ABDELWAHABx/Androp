@@ -15,6 +15,7 @@ final class LowBatteryAlertManager: ObservableObject {
     private var observers = Set<AnyCancellable>()
     private weak var appState: AppState?
     private var pendingGeneration: UUID?
+    private var permissionGeneration = UUID()
     private var retryAfter = Date.distantPast
     private let notificationID = "androp.phone.low-battery"
     private var alertedDevices = UserDefaults.standard.stringArray(forKey: "phoneLowBatteryAlertedDevices") ?? []
@@ -36,21 +37,27 @@ final class LowBatteryAlertManager: ObservableObject {
     var permissionGranted: Bool { authorization == .authorized || authorization == .provisional }
 
     func setEnabled(_ value: Bool) {
+        let generation = UUID()
+        permissionGeneration = generation
         retryAfter = .distantPast
         enabled = value
         UserDefaults.standard.set(value, forKey: "phoneLowBatteryAlertsEnabled")
         if !value { clearPending(); return }
         // This method is called only by the user's settings toggle.
         UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
-            if settings.authorizationStatus == .notDetermined {
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, requestError in
-                    DispatchQueue.main.async {
-                        self?.error = requestError?.localizedDescription
-                        self?.refreshAuthorization()
+            DispatchQueue.main.async {
+                guard let self, self.enabled, self.permissionGeneration == generation else { return }
+                if settings.authorizationStatus == .notDetermined {
+                    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] _, requestError in
+                        DispatchQueue.main.async {
+                            guard let self, self.enabled, self.permissionGeneration == generation else { return }
+                            self.error = requestError?.localizedDescription
+                            self.refreshAuthorization()
+                        }
                     }
+                } else {
+                    self.refreshAuthorization()
                 }
-            } else {
-                DispatchQueue.main.async { self?.refreshAuthorization() }
             }
         }
     }
@@ -89,9 +96,12 @@ final class LowBatteryAlertManager: ObservableObject {
     }
 
     private func clearPending() {
+        guard let generation = pendingGeneration else { return }
         pendingGeneration = nil
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [notificationID])
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [requestID(generation)])
     }
+
+    private func requestID(_ generation: UUID) -> String { notificationID + "." + generation.uuidString }
 
     private func evaluate() {
         guard let state = appState, enabled, !state.isSyncPaused,
@@ -101,7 +111,7 @@ final class LowBatteryAlertManager: ObservableObject {
         guard battery.isReported != false else { clearPending(); return }
         let wasAlerted = alertedDevices.contains(device.deviceId)
         guard let latch = PhoneBatteryAlertPolicy.nextLatch(level: battery.level, charging: battery.isCharging,
-                                                          threshold: threshold, alerted: wasAlerted) else { return }
+                                                          threshold: threshold, alerted: wasAlerted) else { clearPending(); return }
         if !latch && wasAlerted {
             alertedDevices.removeAll { $0 == device.deviceId }
             persistLatch()
@@ -116,9 +126,16 @@ final class LowBatteryAlertManager: ObservableObject {
         content.title = "\(device.name) needs charging"
         content.body = "Phone battery is at \(battery.level)%. Connect it to a charger."
         if soundEnabled { content.sound = .default }
-        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: notificationID, content: content, trigger: nil)) { [weak self] failure in
+        let identifier = requestID(generation)
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) { [weak self] failure in
             DispatchQueue.main.async {
-                guard let self, self.pendingGeneration == generation else { return }
+                guard let self, self.pendingGeneration == generation else {
+                    // Cancellation may race the notification daemon accepting add().
+                    // A unique ID prevents this cleanup from removing a newer alert.
+                    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
+                    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+                    return
+                }
                 self.pendingGeneration = nil
                 self.error = failure?.localizedDescription
                 self.retryAfter = failure == nil ? .distantPast : Date().addingTimeInterval(60)

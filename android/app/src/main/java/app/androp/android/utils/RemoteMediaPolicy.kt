@@ -25,4 +25,14 @@ object RemoteMediaPolicy {
         } else 0L
         return boundPosition(base + advance.coerceAtMost(Long.MAX_VALUE - base), durationMs)
     }
+
+    /** Local monotonic session timestamps have no remote clock-skew limit. */
+    fun projectLocalPosition(positionMs: Long, sinceUpdateMs: Long, isPlaying: Boolean,
+                             rate: Double, durationMs: Long): Long {
+        val base = boundPosition(positionMs, durationMs)
+        val advance = if (isPlaying) {
+            (sinceUpdateMs.coerceAtLeast(0L).toDouble() * playbackSpeed(true, rate)).toLong()
+        } else 0L
+        return boundPosition(base + advance.coerceAtMost(Long.MAX_VALUE - base), durationMs)
+    }
 }

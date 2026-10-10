@@ -25,6 +25,8 @@ import androidx.media.VolumeProviderCompat
 import app.androp.android.utils.BackgroundWorkController
 import app.androp.android.utils.MacDeviceStatusManager
 import app.androp.android.utils.RemoteMediaPolicy
+import app.androp.android.utils.RemotePlaybackPublicationPolicy
+import app.androp.android.utils.RemotePlaybackSnapshot
 import org.json.JSONObject
 import app.androp.android.MainActivity
 import app.androp.android.R
@@ -215,7 +217,7 @@ class MacMediaPlayerService : Service() {
                         if (sendMacMediaControl("seekTo", position)) {
                             val playing = this@MacMediaPlayerService.mediaSession?.controller?.playbackState?.state == PlaybackStateCompat.STATE_PLAYING
                             val speed = this@MacMediaPlayerService.mediaSession?.controller?.playbackState?.playbackSpeed?.toDouble() ?: 1.0
-                            updatePlaybackState(playing, position, playbackRate = speed)
+                            updatePlaybackState(playing, position, playbackRate = speed, force = true)
                         }
                     }
 
@@ -359,7 +361,7 @@ class MacMediaPlayerService : Service() {
         try {
             updateMediaMetadata(title, artist, duration)
             updatePlaybackState(isPlaying, elapsedTime, timestamp, playbackRate)
-            mediaSession?.isActive = true
+            if (mediaSession?.isActive != true) mediaSession?.isActive = true
 
             publishNotification(title, artist, isPlaying)
 
@@ -395,7 +397,8 @@ class MacMediaPlayerService : Service() {
         isPlaying: Boolean,
         elapsedTime: Long = -1L,
         timestamp: String? = null,
-        playbackRate: Double = 1.0
+        playbackRate: Double = 1.0,
+        force: Boolean = false
     ) {
         val state =
             if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
@@ -409,7 +412,7 @@ class MacMediaPlayerService : Service() {
 
         val previousState = mediaSession?.controller?.playbackState
         var position = if (elapsedTime >= 0) elapsedTime else {
-            RemoteMediaPolicy.projectPosition(previousState?.position ?: 0L,
+            RemoteMediaPolicy.projectLocalPosition(previousState?.position ?: 0L,
                 android.os.SystemClock.elapsedRealtime() - (previousState?.lastPositionUpdateTime ?: 0L),
                 previousState?.state == PlaybackStateCompat.STATE_PLAYING,
                 previousState?.playbackSpeed?.toDouble() ?: 1.0, duration)
@@ -421,10 +424,16 @@ class MacMediaPlayerService : Service() {
             position = RemoteMediaPolicy.projectPosition(position, sinceReport, true, playbackRate, duration)
         }
 
-        mediaSession?.setPlaybackState(
+        val now = android.os.SystemClock.elapsedRealtime()
+        val boundedPosition = RemoteMediaPolicy.boundPosition(position, duration)
+        val speed = RemoteMediaPolicy.playbackSpeed(isPlaying, playbackRate)
+        val previous = previousState?.let { RemotePlaybackSnapshot(
+            it.state == PlaybackStateCompat.STATE_PLAYING, it.position, it.playbackSpeed,
+            it.actions, it.lastPositionUpdateTime) }
+        val next = RemotePlaybackSnapshot(isPlaying, boundedPosition, speed, actions, now)
+        if (force || RemotePlaybackPublicationPolicy.shouldPublish(previous, next, duration)) mediaSession?.setPlaybackState(
             PlaybackStateCompat.Builder()
-                .setState(state, RemoteMediaPolicy.boundPosition(position, duration),
-                    RemoteMediaPolicy.playbackSpeed(isPlaying, playbackRate))
+                .setState(state, boundedPosition, speed, now)
                 .setActions(actions)
                 .build()
         )
@@ -486,7 +495,7 @@ class MacMediaPlayerService : Service() {
                 }
             }
             mediaSession?.setPlaybackToRemote(remoteVolume!!)
-        } else remoteVolume?.setCurrentVolume(level)
+        } else if (remoteVolume?.currentVolume != level) remoteVolume?.setCurrentVolume(level)
     }
 
     private fun sendRemoteVolume(action: String, value: Int? = null): Boolean {
@@ -601,10 +610,10 @@ class MacMediaPlayerService : Service() {
                 val isPlaying =
                     it.controller.playbackState?.state == PlaybackStateCompat.STATE_PLAYING
                 val duration = metadata.getLong(MediaMetadataCompat.METADATA_KEY_DURATION)
-                val position = it.controller.playbackState?.position ?: 0L
                 val speed = it.controller.playbackState?.playbackSpeed?.toDouble() ?: 1.0
 
-                startMacMediaSession(title, artist, isPlaying, position, duration, null, speed)
+                // Artwork arriving late must not rewind playback to the last position anchor.
+                startMacMediaSession(title, artist, isPlaying, -1L, duration, null, speed)
             }
         }
     }

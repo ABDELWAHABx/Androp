@@ -17,6 +17,14 @@ struct NotificationsSettingsView: View {
     @State private var notificationsGranted = false
     @State private var notificationsChecked = false
     @State private var selectedSettingsApp: AndroidApp? = nil
+    @State private var appSearch = ""
+
+    private var visibleApps: [AndroidApp] {
+        let search = appSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        return appState.androidApps.values.filter {
+            search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) || $0.packageName.localizedCaseInsensitiveContains(search)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
 
     var body: some View {
         ScrollView {
@@ -112,9 +120,20 @@ struct NotificationsSettingsView: View {
                             .foregroundColor(.secondary)
                             .padding(.vertical, 8)
                     } else {
-                        let sortedApps = appState.androidApps.values.sorted(by: { $0.name.lowercased() < $1.name.lowercased() })
+                        TextField("Search notification apps", text: $appSearch)
+                            .textFieldStyle(.roundedBorder)
+                        let sortedApps = visibleApps
+                        HStack {
+                            Button("Select all shown") { setVisibleAppsEnabled(true) }
+                                .disabled(!sortedApps.contains { !$0.listening } || appState.isSyncPaused)
+                            Button("Deselect all shown") { setVisibleAppsEnabled(false) }
+                                .disabled(!sortedApps.contains { $0.listening } || appState.isSyncPaused)
+                            Spacer()
+                            Text("\(sortedApps.filter(\.listening).count) of \(sortedApps.count) shown selected")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         if sortedApps.isEmpty {
-                            Text(L("settings.notifications.apps.none"))
+                            Text(appSearch.isEmpty ? L("settings.notifications.apps.none") : "No matching apps")
                                 .foregroundColor(.secondary)
                                 .padding(.vertical, 8)
                         } else {
@@ -148,10 +167,11 @@ struct NotificationsSettingsView: View {
                                             .foregroundColor(app.listening ? .primary : .secondary.opacity(0.5))
                                     }
                                     .buttonStyle(.plain)
+                                    .accessibilityLabel("Notification settings for \(app.name)")
                                     .disabled(!app.listening)
                                     .padding(.trailing, 8)
                                     
-                                    Toggle("", isOn: Binding(
+                                    Toggle("Sync notifications from \(app.name)", isOn: Binding(
                                         get: { app.listening },
                                         set: { newValue in
                                             WebSocketServer.shared.toggleNotification(for: app.packageName, to: newValue)
@@ -159,6 +179,7 @@ struct NotificationsSettingsView: View {
                                     ))
                                     .toggleStyle(.switch)
                                     .labelsHidden()
+                                    .disabled(appState.isSyncPaused)
                                 }
                                 
                                 if app.packageName != sortedApps.last?.packageName {
@@ -176,6 +197,10 @@ struct NotificationsSettingsView: View {
         .sheet(item: $selectedSettingsApp) { app in
             AppNotificationSettingsView(app: app)
         }
+    }
+
+    private func setVisibleAppsEnabled(_ enabled: Bool) {
+        WebSocketServer.shared.toggleNotifications(for: visibleApps.map(\.packageName), to: enabled)
     }
 
     @ViewBuilder

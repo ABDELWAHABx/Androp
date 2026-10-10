@@ -6,246 +6,150 @@ import android.os.Bundle
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import app.androp.android.service.MediaNotificationListener
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 object NotificationDismissalUtil {
     private const val TAG = "NotificationDismissalUtil"
-
-    // Persisted sbn.key -> generated ID mappings. IDs embed postTime, which
-    // changes when a notification is updated, while sbn.key stays stable —
-    // so this is what keeps client-held IDs valid across process restarts.
     private const val ID_MAP_PREFS = "notification_id_mappings"
-
-    // Store active notifications with their IDs for dismissal or actions
-    private val activeNotifications = ConcurrentHashMap<String, StatusBarNotification>()
-
-    // Reverse map from system notification key to our generated ID
     private val keyToId = ConcurrentHashMap<String, String>()
-
-    // IDs suppressed from Android->Mac dismissal sync (because dismissal originated from Mac)
     private val suppressedIds = ConcurrentHashMap.newKeySet<String>()
-
-    // Test notification IDs for mock dismissal support
     private val testNotificationIds = ConcurrentHashMap.newKeySet<String>()
 
-    /**
-     * Generate a unique notification ID
-     */
-    fun generateNotificationId(packageName: String, title: String, timestamp: Long): String {
-        return "${packageName}_${title.hashCode()}_$timestamp"
+    // Legacy format is retained for synthetic test notifications only.
+    fun generateNotificationId(packageName: String, title: String, timestamp: Long): String =
+        "${packageName}_${title.hashCode()}_$timestamp"
+
+    /** One opaque ID per notification lifetime, preserved across updates and process restarts. */
+    @Synchronized
+    fun registerNotification(notification: StatusBarNotification): String {
+        val id = getIdBySystemKey(notification.key) ?: getPersistedIdBySystemKey(notification.key)
+            ?: "notification_${UUID.randomUUID()}"
+        storeNotification(id, notification)
+        return id
     }
 
-    /**
-     * Store a notification for dismissal
-     */
+    @Synchronized
     fun storeNotification(id: String, notification: StatusBarNotification) {
-        activeNotifications[id] = notification
-        // Keep reverse lookup so we can map sbn.key -> id on removal
-        try {
-            keyToId[notification.key] = id
+        val previous = keyToId.put(notification.key, id)
+        if (previous != id && getPersistedIdBySystemKey(notification.key) != id) {
             idMapPrefs()?.edit()?.putString(notification.key, id)?.apply()
-        } catch (_: Exception) {
-        }
-        Log.d(TAG, "Stored notification with ID: $id")
-
-        // Clean up old notifications
-        if (activeNotifications.size > 200) {
-            val oldestKeys = activeNotifications.keys.take(activeNotifications.size - 200)
-            oldestKeys.forEach { oldId ->
-                activeNotifications.remove(oldId)?.let { sbn ->
-                    keyToId.remove(sbn.key)
-                    idMapPrefs()?.edit()?.remove(sbn.key)?.apply()
-                }
-            }
         }
     }
 
-    /**
-     * Store a test notification ID for mock dismissal
-     */
     fun storeTestNotificationId(id: String) {
+        if (testNotificationIds.size >= 200) testNotificationIds.clear()
         testNotificationIds.add(id)
-        Log.d(TAG, "Stored test notification ID: $id")
     }
 
-    /**
-     * Dismiss a notification by its ID
-     */
-    fun dismissNotification(notificationId: String): Boolean {
-        return try {
-            val notification = activeNotifications[notificationId]
-            if (notification != null) {
-                val service = getNotificationListenerService()
-                if (service != null) {
-                    // Mark suppressed to avoid echo back to Mac when onNotificationRemoved triggers
-                    markSuppressed(notificationId)
+    /** Always use the current system notification and PendingIntents, never a cached snapshot. */
+    private fun resolveNotification(notificationId: String): StatusBarNotification? {
+        val service = MediaNotificationListener.getInstance() ?: return null
+        val current = service.activeNotifications?.toList().orEmpty()
+        val mappings = idMapPrefs()?.all.orEmpty().mapNotNull { (key, value) ->
+            (value as? String)?.let { key to it }
+        }.toMap() + keyToId
+        val key = NotificationActionPolicy.resolveKey(notificationId, current.map { it.key }.toSet(), mappings)
+            ?: return null
+        return current.singleOrNull { it.key == key }
+    }
+
+    fun dismissNotification(notificationId: String): Boolean = try {
+        if (BackgroundWorkController.isPaused) false
+        else if (testNotificationIds.remove(notificationId)) true
+        else {
+            val service = MediaNotificationListener.getInstance()
+            val notification = resolveNotification(notificationId)
+            if (service == null || notification == null || !notification.isClearable) false
+            else {
+                markSuppressed(notificationId)
+                try {
                     service.cancelNotification(notification.key)
-                    // Cleanup maps after cancel is requested (onNotificationRemoved may also do this)
-                    activeNotifications.remove(notificationId)
-                    keyToId.remove(notification.key)
-                    idMapPrefs()?.edit()?.remove(notification.key)?.apply()
-                    Log.d(TAG, "Successfully dismissed notification: $notificationId")
+                    // Retain the reverse mapping until the removal callback consumes suppression.
                     true
-                } else {
-                    Log.w(TAG, "Notification listener service not available")
-                    false
+                } catch (e: Exception) {
+                    consumeSuppressed(notificationId)
+                    throw e
                 }
-            } else if (testNotificationIds.contains(notificationId)) {
-                // Handle test notification dismissal as a success (mock)
-                testNotificationIds.remove(notificationId)
-                Log.d(TAG, "Mock dismissed test notification: $notificationId")
-                true
-            } else {
-                Log.w(TAG, "Notification with ID $notificationId not found")
-                false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error dismissing notification $notificationId: ${e.message}")
-            false
         }
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not dismiss notification", e)
+        false
     }
 
-    /**
-     * Perform an action on the notification by title. If replyText is provided and the action supports inline reply, send it.
-     */
-    fun performNotificationAction(
-        notificationId: String,
-        actionName: String,
-        replyText: String? = null
-    ): Boolean {
+    fun actionDescriptors(actions: Array<out android.app.Notification.Action>): List<NotificationActionPolicy.Action> =
+        actions.map { NotificationActionPolicy.Action(it.title?.toString().orEmpty(),
+            it.remoteInputs?.any { input -> input.allowFreeFormInput } == true) }
+
+    fun performNotificationAction(notificationId: String, actionName: String, replyText: String? = null): Boolean {
+        if (BackgroundWorkController.isPaused) return false
         return try {
-            val service = getNotificationListenerService()
-            if (service == null) {
-                Log.w(TAG, "Notification listener service not available")
-                return false
-            }
-            val sbn = activeNotifications[notificationId]
-            if (sbn == null) {
-                Log.w(TAG, "Notification with ID $notificationId not found for action $actionName")
-                return false
-            }
-
-            val actions = sbn.notification.actions
-            if (actions == null || actions.isEmpty()) {
-                Log.w(TAG, "No actions available on notification $notificationId")
-                return false
-            }
-
-            val target = actions.firstOrNull {
-                it.title?.toString()?.equals(actionName, ignoreCase = true) == true
-            }
-            if (target == null) {
-                Log.w(TAG, "Action '$actionName' not found on notification $notificationId")
-                return false
-            }
-
-            val pendingIntent = target.actionIntent
+            val service = MediaNotificationListener.getInstance() ?: return false
+            val sbn = resolveNotification(notificationId) ?: return false
+            val actions = sbn.notification.actions ?: return false
+            val index = NotificationActionPolicy.selectAction(actionDescriptors(actions), actionName, replyText)
+                ?: return false
+            val target = actions[index]
+            val pendingIntent = target.actionIntent ?: return false
             if (!replyText.isNullOrEmpty()) {
-                // Inline reply path
-                val remoteInputs = target.remoteInputs
-                if (remoteInputs.isNullOrEmpty()) {
-                    Log.w(TAG, "Action '$actionName' does not support reply on $notificationId")
-                    return false
-                }
+                val remoteInputs = target.remoteInputs?.filter { it.allowFreeFormInput }?.toTypedArray()
+                    ?.takeIf { it.isNotEmpty() } ?: return false
                 val intent = Intent()
                 val results = Bundle()
-                remoteInputs.forEach { ri ->
-                    results.putCharSequence(ri.resultKey, replyText)
-                }
-                // Attach results
+                remoteInputs.forEach { results.putCharSequence(it.resultKey, replyText) }
                 RemoteInput.addResultsToIntent(remoteInputs, intent, results)
-                return try {
-                    pendingIntent.send(service, 0, intent)
-                    Log.d(TAG, "Sent inline reply for action '$actionName' on $notificationId")
-                    true
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error sending inline reply: ${e.message}")
-                    false
-                }
+                RemoteInput.setResultsSource(intent, RemoteInput.SOURCE_FREE_FORM_INPUT)
+                pendingIntent.send(service, 0, intent)
             } else {
-                // Simple button action
-                return try {
-                    pendingIntent.send()
-                    Log.d(TAG, "Invoked action '$actionName' on $notificationId")
-                    true
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error invoking action '$actionName': ${e.message}")
-                    false
-                }
+                pendingIntent.send()
             }
+            true
         } catch (e: Exception) {
-            Log.e(TAG, "Error performing action: ${e.message}")
+            Log.w(TAG, "Could not perform notification action", e)
             false
         }
     }
 
-    /**
-     * Lookup generated ID by a system notification key.
-     */
-    fun getIdBySystemKey(systemKey: String): String? = try {
-        keyToId[systemKey]
-    } catch (_: Exception) {
-        null
-    }
+    fun getIdBySystemKey(systemKey: String): String? = keyToId[systemKey]
 
-    /**
-     * Lookup a generated ID persisted from a previous process, by system key.
-     */
     fun getPersistedIdBySystemKey(systemKey: String): String? = try {
         idMapPrefs()?.getString(systemKey, null)
-    } catch (_: Exception) {
-        null
-    }
+    } catch (_: Exception) { null }
 
-    /**
-     * Drop persisted mappings whose notifications are no longer active.
-     * Called after re-registering on listener connect.
-     */
+    @Synchronized
     fun prunePersistedMappings(activeKeys: Set<String>) {
+        keyToId.keys.removeAll { it !in activeKeys }
         try {
             val prefs = idMapPrefs() ?: return
             val editor = prefs.edit()
             prefs.all.keys.filter { it !in activeKeys }.forEach { editor.remove(it) }
             editor.apply()
-        } catch (_: Exception) {
-        }
+            val liveIds = keyToId.values.toSet()
+            suppressedIds.retainAll(liveIds)
+        } catch (e: Exception) { Log.w(TAG, "Could not prune notification mappings", e) }
     }
 
     private fun idMapPrefs(): android.content.SharedPreferences? =
-        getNotificationListenerService()?.applicationContext
+        MediaNotificationListener.getInstance()?.applicationContext
             ?.getSharedPreferences(ID_MAP_PREFS, android.content.Context.MODE_PRIVATE)
 
-    /**
-     * Lookup generated ID by StatusBarNotification
-     */
-    fun getIdForSbn(sbn: StatusBarNotification?): String? {
-        if (sbn == null) return null
-        return getIdBySystemKey(sbn.key)
+    fun getIdForSbn(sbn: StatusBarNotification?): String? = sbn?.key?.let {
+        getIdBySystemKey(it) ?: getPersistedIdBySystemKey(it)
     }
 
-    /** Mark an ID as suppressed for outgoing dismissal sync. */
-    fun markSuppressed(notificationId: String) {
-        suppressedIds.add(notificationId)
-    }
+    fun markSuppressed(notificationId: String) { suppressedIds.add(notificationId) }
+    fun consumeSuppressed(notificationId: String): Boolean = suppressedIds.remove(notificationId)
 
-    /** Returns true if the ID was suppressed and clears the suppression flag. */
-    fun consumeSuppressed(notificationId: String): Boolean {
-        return suppressedIds.remove(notificationId)
-    }
-
-    /** Remove from caches when it's gone. */
+    @Synchronized
     fun removeFromCaches(id: String) {
-        activeNotifications.remove(id)?.let { sbn ->
-            keyToId.remove(sbn.key)
-            idMapPrefs()?.edit()?.remove(sbn.key)?.apply()
-        }
+        val keys = keyToId.entries.filter { it.value == id }.map { it.key }.toMutableSet()
+        val prefs = idMapPrefs()
+        prefs?.all?.filterValues { it == id }?.keys?.let(keys::addAll)
+        val editor = prefs?.edit()
+        keys.forEach { keyToId.remove(it); editor?.remove(it) }
+        editor?.apply()
+        suppressedIds.remove(id)
         testNotificationIds.remove(id)
-    }
-
-    /**
-     * Get the notification listener service instance
-     */
-    private fun getNotificationListenerService(): MediaNotificationListener? {
-        return MediaNotificationListener.getInstance()
     }
 }

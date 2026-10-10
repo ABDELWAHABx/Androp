@@ -11,16 +11,20 @@ object ClipboardUtil {
     /**
      * Get the current text from clipboard
      */
-    fun getClipboardText(context: Context): String? {
+    fun getClipboardText(context: Context, automatic: Boolean = false): String? {
         return try {
             val clipboardManager =
                 context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clipData = clipboardManager.primaryClip
+            // Android/password managers mark secrets this way. Explicit user sends
+            // are still allowed; automatic sync must not copy a password elsewhere.
+            if (automatic && clipData?.description?.extras?.getBoolean("android.content.extra.IS_SENSITIVE", false) == true) return null
 
             if (clipData != null && clipData.itemCount > 0) {
                 val item = clipData.getItemAt(0)
-                // Use coerceToText to handle non-text items if needed, or stick to text
-                item.text?.toString() ?: item.coerceToText(context)?.toString()
+                // Automatic observation must not open a content provider or read an
+                // image/file URI on the UI thread. File sharing has its own path.
+                item.text?.toString() ?: if (automatic) null else item.coerceToText(context)?.toString()
             } else {
                 null
             }
@@ -61,7 +65,7 @@ object ClipboardUtil {
 
         val listener = ClipboardManager.OnPrimaryClipChangedListener {
             try {
-                val clipText = getClipboardText(context)
+                val clipText = getClipboardText(context, automatic = true)
                 if (!clipText.isNullOrEmpty()) {
 
                     onClipboardChanged(clipText)

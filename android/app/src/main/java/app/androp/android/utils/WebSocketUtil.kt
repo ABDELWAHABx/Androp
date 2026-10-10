@@ -49,6 +49,7 @@ object WebSocketUtil {
     private fun updateConnectedStatus(status: Boolean) {
         isConnected.set(status)
         _connectionStateFlow.value = status
+        if (!status) WebDavServer.revokeAccess()
         notifyConnectionStatusListeners(status)
         // A permanently held LOW_LATENCY Wi-Fi lock prevents the radio from sleeping.
         // WebSocket traffic and OS connection management do not require it.
@@ -66,6 +67,9 @@ object WebSocketUtil {
     // Auto-reconnect machinery
     private var autoReconnectJob: Job? = null
     private var autoReconnectActive = AtomicBoolean(false)
+    // Synchronous guard: DataStore persistence suspends, but queued callbacks must
+    // respect Stop immediately while its persisted user-intent flag is being written.
+    private val manualReconnectSuppressed = AtomicBoolean(false)
     private var autoReconnectStartTime: Long = 0L
     private var autoReconnectAttempts: Int = 0
 
@@ -127,12 +131,16 @@ object WebSocketUtil {
         // Cache application context for future cleanup even if callers don't pass context on disconnect
         appContext = context.applicationContext
 
-        if (BackgroundWorkController.isPaused || isConnected.get() || !isConnecting.compareAndSet(false, true)) {
-            Log.d(TAG, "Already connected or connecting")
-            return
+        val epoch = synchronized(connectionLock) {
+            if (BackgroundWorkController.isPaused || isConnected.get() || isConnecting.get()) {
+                Log.d(TAG, "Already connected or connecting")
+                return
+            }
+            if (manualAttempt) manualReconnectSuppressed.set(false)
+            else if (manualReconnectSuppressed.get()) return
+            isConnecting.set(true)
+            connectionEpoch.advance()
         }
-
-        val epoch = connectionEpoch.advance()
         WebSocketFileTransfer.cancelAll()
 
         // If user initiates a manual attempt, stop any auto-reconnect loop
@@ -147,9 +155,13 @@ object WebSocketUtil {
                 if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
                 return@launch
             }
-            // Handle multiple IPs if provided (comma-separated)
-            val ipList =
-                ipAddress.split(",").map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+            if (!manualAttempt && (manualReconnectSuppressed.get() || ds.getUserManuallyDisconnected().first() || !ds.getAutoReconnectEnabled().first())) {
+                if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
+                return@launch
+            }
+            // Validate before launching socket work. A malformed persisted endpoint
+            // must not throw from a child coroutine and leave Connecting stuck.
+            val ipList = ConnectionEndpoints.hosts(ipAddress, port)
 
             if (ipList.isEmpty()) {
                 Log.e(TAG, "No valid IP addresses provided")
@@ -159,8 +171,8 @@ object WebSocketUtil {
             }
 
             // Validate at least one local network IP
-            val anyLocal = ipList.any { isLocalNetwork(context, it) }
-            if (!anyLocal) {
+            val localIps = ipList.filter { isLocalNetwork(context, it) }
+            if (localIps.isEmpty()) {
                 Log.e(TAG, "None of the provided IP addresses are in the local network: $ipAddress")
                 isConnecting.set(false)
                 onConnectionStatus?.invoke(false)
@@ -229,6 +241,7 @@ object WebSocketUtil {
                         isConnecting.set(false)
                         onConnectionStatusChanged?.invoke(false)
                         notifyConnectionStatusListeners(false)
+                        tryStartAutoReconnect(context)
                         try {
                             AirSyncWidgetProvider.updateAllWidgets(context)
                         } catch (_: Exception) {
@@ -237,7 +250,7 @@ object WebSocketUtil {
                 }
 
                 // Try each IP in parallel
-                ipList.forEach { ip ->
+                localIps.forEach { ip ->
                     // Handle IPv6 addresses, wrapping them in brackets for URI parsing.
                     // Also handle link-local scope zones (e.g. fe80::18cd:e714:19a7:2c21%wlan0 -> [fe80::18cd:e714:19a7:2c21])
                     val formattedIp = if (ip.contains(":")) {
@@ -256,8 +269,8 @@ object WebSocketUtil {
                     val url = "ws://$formattedIp:$port/socket"
                     Log.d(TAG, "Attempting connection to $url")
 
-                    scope.launch {
-                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || isConnected.get() || connectionStarted.get()) return@launch
+                    run {
+                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || isConnected.get() || connectionStarted.get()) return@run
 
                         val request = Request.Builder()
                             .url(url)
@@ -372,8 +385,9 @@ object WebSocketUtil {
                                                          app.androp.android.data.local.DataStoreManager.getInstance(
                                                              context
                                                          )
-                                                     ds.setUserManuallyDisconnected(false)
+                                                     if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || manualReconnectSuppressed.get()) return@launch
                                                      val lastDevice = ds.getLastConnectedDevice().first()
+                                                     if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || manualReconnectSuppressed.get()) return@launch
                                                      app.androp.android.service.AirSyncService.start(
                                                          context,
                                                          lastDevice?.name
@@ -474,7 +488,7 @@ object WebSocketUtil {
                                 synchronized(connectionLock) {
                                     pendingSockets.remove(webSocket)
                                     if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused) return
-                                    val totalToTry = ipList.size
+                                    val totalToTry = localIps.size
                                     val failedCount = failedAttempts.incrementAndGet()
                                     val wasActive = webSocket == WebSocketUtil.webSocket
                                     val isFinalManualAttempt =
@@ -529,11 +543,11 @@ object WebSocketUtil {
                                                         context
                                                     )
                                                 val manual = ds.getUserManuallyDisconnected().first()
-                                                if (!manual) {
+                                                if (!manual && connectionEpoch.isCurrent(epoch)) {
                                                     tryStartAutoReconnect(context)
                                                 }
                                             } catch (_: Exception) {
-                                                tryStartAutoReconnect(context)
+                                                // Unknown persisted user intent must not restart work.
                                             }
                                         }
 
@@ -557,6 +571,10 @@ object WebSocketUtil {
             } catch (e: Exception) {
                 if (!connectionEpoch.isCurrent(epoch)) return@launch
                 Log.e(TAG, "Failed to create WebSocket: ${e.message}")
+                connectionEpoch.advance()
+                pendingSockets.forEach { it.cancel() }
+                pendingSockets.clear()
+                connectionAttemptJob?.cancel()
                 isConnecting.set(false)
                 handshakeCompleted.set(false)
                 onConnectionStatusChanged?.invoke(false)
@@ -771,13 +789,14 @@ object WebSocketUtil {
     fun disconnect(context: Context? = null, manual: Boolean = false) {
         WebSocketFileTransfer.cancelAll()
         synchronized(connectionLock) {
+            if (manual) manualReconnectSuppressed.set(true)
             Log.d(TAG, "Disconnecting WebSocket (manual=$manual)")
 
             if (manual) {
                 sendMessage("{\"type\":\"userDisconnected\",\"data\":{}}")
             }
 
-            connectionEpoch.advance()
+            val disconnectEpoch = connectionEpoch.advance()
             scope.coroutineContext.cancelChildren()
             connectionAttemptJob?.cancel()
             connectionAttemptJob = null
@@ -799,6 +818,9 @@ object WebSocketUtil {
                         try {
                             val ds = app.androp.android.data.local.DataStoreManager.getInstance(c)
                             ds.setUserManuallyDisconnected(true)
+                            // DataStore is now authoritative, including a later explicit
+                            // Mac/BLE connect that clears the persisted user choice.
+                            if (connectionEpoch.isCurrent(disconnectEpoch)) manualReconnectSuppressed.set(false)
                         } catch (_: Exception) {
                         }
                     }
@@ -945,7 +967,8 @@ object WebSocketUtil {
     fun isAutoReconnecting(): Boolean = autoReconnectActive.get()
 
     fun stopAutoReconnect(context: Context) {
-        cancelAutoReconnect()
+        // Stop also cancels an in-flight connection, and survives later network events.
+        disconnect(context, manual = true)
     }
 
     /**
@@ -953,7 +976,7 @@ object WebSocketUtil {
      * Uses a dual strategy: proactive exponential backoff AND discovery-triggered.
      */
     private fun tryStartAutoReconnect(context: Context) {
-        if (BackgroundWorkController.isPaused || !autoReconnectActive.compareAndSet(false, true)) return
+        if (BackgroundWorkController.isPaused || manualReconnectSuppressed.get() || !autoReconnectActive.compareAndSet(false, true)) return
         autoReconnectStartTime = System.currentTimeMillis()
         if (!app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) {
             notifyConnectionStatusListeners(false)
@@ -977,7 +1000,7 @@ object WebSocketUtil {
                         val manual = ds.getUserManuallyDisconnected().first()
                         val autoEnabled = ds.getAutoReconnectEnabled().first()
 
-                        if (manual || !autoEnabled || BackgroundWorkController.isPaused || ds.isAppPaused().first()) {
+                        if (manual || manualReconnectSuppressed.get() || !autoEnabled || BackgroundWorkController.isPaused || ds.isAppPaused().first()) {
                             Log.d(
                                 TAG,
                                 "Auto-reconnect cancelled: manual=$manual, enabled=$autoEnabled"
@@ -1039,7 +1062,7 @@ object WebSocketUtil {
 
                 // 2. Discovery Monitoring (Listen for presence packets in case IP changed)
                 DiscoveryOrchestrator.discoveredDevices.collect { discoveredList ->
-                    if (!autoReconnectActive.get() || BackgroundWorkController.isPaused || isConnected() || isConnecting.get()) return@collect
+                    if (!autoReconnectActive.get() || manualReconnectSuppressed.get() || BackgroundWorkController.isPaused || isConnected() || isConnecting.get()) return@collect
                     if (ds.isAppPaused().first() || ds.getUserManuallyDisconnected().first() || !ds.getAutoReconnectEnabled().first()) return@collect
 
                     val last = ds.getLastConnectedDevice().first() ?: return@collect

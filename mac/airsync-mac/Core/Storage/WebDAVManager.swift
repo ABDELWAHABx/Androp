@@ -13,6 +13,9 @@ final class WebDAVManager {
     private var mountRequested = false
     private var mounted = false
     private var activeProcess: Process?
+    private var accessToken: String?
+    private var accessPort = 9081
+    private var requestedEndpoint: (ipAddress: String, volumeName: String)?
 
     var isMounted: Bool {
         lock.lock()
@@ -22,16 +25,41 @@ final class WebDAVManager {
 
     private init() {}
 
+    /// Credentials arrive only over the authenticated device connection and stay in memory.
+    /// Revocation keeps a pending user mount request so a late server-start response can retry.
+    func setAccess(token: String?, port: Int = 9081) {
+        let validToken = token.flatMap { value in
+            value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil ? value : nil
+        }
+        guard port > 0 && port <= 65535 else { return }
+        lock.lock()
+        if accessToken == validToken && accessPort == port { lock.unlock(); return }
+        accessToken = validToken
+        accessPort = port
+        generation &+= 1
+        mountRequested = false
+        mounted = false
+        let endpoint = requestedEndpoint
+        let process = activeProcess
+        lock.unlock()
+        if let process, process.isRunning { process.terminate() }
+        queue.async { self.unmountSilently(); self.notifyChange() }
+        if validToken != nil, let endpoint {
+            mount(ipAddress: endpoint.ipAddress, port: port, volumeName: endpoint.volumeName)
+        }
+    }
+
     func mount(ipAddress: String, port: Int = 9081, volumeName: String = "Android") {
         guard port > 0 && port <= 65535 else { return }
+        lock.lock()
+        requestedEndpoint = (ipAddress, volumeName)
+        guard let capability = accessToken, !mountRequested else { lock.unlock(); return }
         var components = URLComponents()
         components.scheme = "http"
         components.host = ipAddress
-        components.port = port
-        components.path = "/"
-        guard let url = components.url else { return }
-        lock.lock()
-        guard !mountRequested else { lock.unlock(); return }
+        components.port = accessPort
+        components.path = "/.androp/\(capability)/"
+        guard let url = components.url else { lock.unlock(); return }
         mountRequested = true
         generation &+= 1
         let token = generation
@@ -65,6 +93,8 @@ final class WebDAVManager {
         generation &+= 1
         mountRequested = false
         mounted = false
+        accessToken = nil
+        requestedEndpoint = nil
         let process = activeProcess
         lock.unlock()
         if let process, process.isRunning { process.terminate() }
@@ -84,6 +114,8 @@ final class WebDAVManager {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { return false }
         lock.lock()
         activeProcess = process

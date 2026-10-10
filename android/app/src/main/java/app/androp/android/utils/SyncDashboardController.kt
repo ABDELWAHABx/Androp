@@ -21,6 +21,8 @@ import app.androp.android.service.NotificationActionReceiver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,7 +41,8 @@ object SyncDashboardController {
     private val lock = Any()
     private var initialized = false
     private var channelCreated = false
-    private var lastPublished: SyncDashboardState? = null
+    private val publication = DashboardPublicationPolicy()
+    private var pendingPublication: Job? = null
     private val foregroundOwners = mutableMapOf<String, java.lang.ref.WeakReference<Service>>()
 
     fun initialize(context: Context) {
@@ -91,7 +94,7 @@ object SyncDashboardController {
     fun refreshConnection() { update { connectivity(it) } }
     fun refreshNotification() {
         scope.launch {
-            synchronized(lock) { lastPublished = null }
+            synchronized(lock) { publication.invalidate() }
             app.androp.android.AirSyncApp.getContext()?.let { publish(it, state.value) }
         }
     }
@@ -113,9 +116,11 @@ object SyncDashboardController {
             ownerStatuses = if (status == null) it.ownerStatuses else it.ownerStatuses + (owner to status)) }
         if (alreadyForeground) return true
         return try {
-            val notification = build(service, state.value)
+            val snapshot = state.value
+            val notification = build(service, snapshot)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) service.startForeground(NOTIFICATION_ID, notification, foregroundType)
             else service.startForeground(NOTIFICATION_ID, notification)
+            synchronized(lock) { publication.didPublish(snapshot, android.os.SystemClock.elapsedRealtime()) }
             true
         } catch (error: RuntimeException) {
             // startForeground is a separate framework call from startForegroundService:
@@ -281,17 +286,35 @@ object SyncDashboardController {
     }
 
     private fun publish(context: Context, snapshot: SyncDashboardState) {
-        synchronized(lock) { if (lastPublished == snapshot) return }
+        val now = android.os.SystemClock.elapsedRealtime()
+        val wait = synchronized(lock) { publication.delayMillis(snapshot, now) }
+        if (wait == null) {
+            pendingPublication?.cancel()
+            pendingPublication = null
+            return
+        }
+        if (wait > 0L) {
+            // One trailing update reads the latest state. Bursts cannot create a timer per file,
+            // and material changes (Pause, consent, completion, connection/actions) bypass it.
+            if (pendingPublication?.isActive != true) pendingPublication = scope.launch {
+                delay(wait)
+                pendingPublication = null
+                publish(context, state.value)
+            }
+            return
+        }
+        pendingPublication?.cancel()
+        pendingPublication = null
         val manager = context.getSystemService(NotificationManager::class.java)
         if (!snapshot.shouldShow) {
             manager.cancel(NOTIFICATION_ID)
-            synchronized(lock) { lastPublished = snapshot }
+            synchronized(lock) { publication.didPublish(snapshot, now) }
             return
         }
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         try {
             manager.notify(NOTIFICATION_ID, build(context, snapshot))
-            synchronized(lock) { lastPublished = snapshot }
+            synchronized(lock) { publication.didPublish(snapshot, now) }
         } catch (error: RuntimeException) {
             android.util.Log.w("SyncDashboard", "Could not publish dashboard notification", error)
         }

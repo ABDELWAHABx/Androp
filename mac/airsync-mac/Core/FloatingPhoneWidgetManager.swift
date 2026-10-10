@@ -7,6 +7,17 @@ final class FloatingPhoneWidgetManager: NSObject, ObservableObject, NSWindowDele
     static let shared = FloatingPhoneWidgetManager()
     @Published private(set) var enabled = UserDefaults.standard.bool(forKey: "floatingPhoneWidgetEnabled")
     private var panel: NSPanel?
+    private var screenObserver: AnyCancellable?
+
+    private override init() {
+        super.init()
+        screenObserver = NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.enabled else { return }
+                self.keepWidgetOnScreen()
+            }
+    }
 
     func restoreIfEnabled() { if enabled { show() } }
 
@@ -33,7 +44,17 @@ final class FloatingPhoneWidgetManager: NSObject, ObservableObject, NSWindowDele
             if !window.setFrameUsingName("androp.phone.widget") { window.center() }
             panel = window
         }
+        keepWidgetOnScreen()
         panel?.orderFrontRegardless()
+    }
+
+    private func keepWidgetOnScreen() {
+        guard let panel else { return }
+        let screens = NSScreen.screens
+        let preferred = NSScreen.main ?? screens.first
+        let orderedScreens = [preferred].compactMap { $0 } + screens.filter { $0 !== preferred }
+        let frame = FloatingWidgetPlacement.frame(panel.frame, visibleScreens: orderedScreens.map(\.visibleFrame))
+        if frame != panel.frame { panel.setFrame(frame, display: true) }
     }
 
     func windowWillClose(_ notification: Foundation.Notification) { setEnabled(false) }
