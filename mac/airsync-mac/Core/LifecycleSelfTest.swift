@@ -116,14 +116,14 @@ enum LifecycleSelfTest {
         if let port = NearbyConnectionManager.shared.readyQuickSharePort {
             guard (1...65535).contains(port), manager.isEnabled, manager.isRunning,
                   AppState.shared.quickShareEnabled, !AppState.shared.isSyncPaused,
-                  UserDefaults.standard.bool(forKey: "quickShareEnabled") else {
+                  persistedQuickShareEnabled == true else {
                 finish(success: false, message: "Quick Share enable setting did not start the real listener")
                 return
             }
             AppState.shared.quickShareEnabled = false
             guard !manager.isEnabled, !manager.isRunning,
                   NearbyConnectionManager.shared.readyQuickSharePort == nil,
-                  !UserDefaults.standard.bool(forKey: "quickShareEnabled") else {
+                  persistedQuickShareEnabled == false else {
                 finish(success: false, message: "Quick Share disable setting retained a listener or stale port")
                 return
             }
@@ -136,6 +136,13 @@ enum LifecycleSelfTest {
                 awaitQuickShareToggle(deadline: deadline)
             }
         }
+    }
+
+    /// Launch flags isolate initial state and intentionally outrank saved defaults.
+    /// Inspect the actual application domain to verify Settings persistence.
+    @MainActor private static var persistedQuickShareEnabled: Bool? {
+        guard let domain = Bundle.main.bundleIdentifier else { return nil }
+        return UserDefaults.standard.persistentDomain(forName: domain)?["quickShareEnabled"] as? Bool
     }
 
     @MainActor static func cleanUp() {

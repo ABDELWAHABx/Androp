@@ -3,6 +3,7 @@ set -euo pipefail
 test_root=$(cd "$(dirname "$0")/.." && pwd)
 test_dir=$(mktemp -d)
 trap 'rm -rf "$test_dir"' EXIT
+bash "$test_root/Tests/run-preference-persistence-tests.sh"
 bash "$test_root/Tests/run-mac-power-policy-tests.sh"
 bash "$test_root/Tests/run-ble-lifecycle-tests.sh"
 bash "$test_root/Tests/run-ble-control-tests.sh"

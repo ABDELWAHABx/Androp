@@ -8,21 +8,15 @@ test_source=${1:?Usage: run-app-lifecycle-tests.sh /path/to/androp.app}
 test_dir=$(mktemp -d "${TMPDIR:-/tmp}/androp-lifecycle.XXXXXX")
 trap 'rm -rf "$test_dir"' EXIT
 ditto "$test_source" "$test_dir/androp.app"
-mkdir -p "$test_dir/home/Library/Preferences"
-python3 - "$test_dir/androp.app/Contents/Info.plist" "$test_dir/home/Library/Preferences" <<'PY'
-import pathlib, plistlib, sys, uuid
+mkdir -p "$test_dir/home"
+python3 - "$test_dir/androp.app/Contents/Info.plist" <<'PY'
+import plistlib, sys, uuid
 path = sys.argv[1]
 with open(path, 'rb') as stream:
     info = plistlib.load(stream)
 info['CFBundleIdentifier'] = 'app.androp.mac.lifecycle-test.' + str(uuid.uuid4())
 with open(path, 'wb') as stream:
     plistlib.dump(info, stream)
-# A launch argument lives in NSArgumentDomain and permanently shadows writes
-# to UserDefaults.standard. Seed the unique app's persistent domain instead,
-# before it or cfprefsd can read it, so the lifecycle check can toggle the value.
-preferences = pathlib.Path(sys.argv[2]) / (info['CFBundleIdentifier'] + '.plist')
-with preferences.open('wb') as stream:
-    plistlib.dump({'quickShareEnabled': False}, stream, fmt=plistlib.FMT_BINARY)
 PY
 codesign --force --deep --sign - --timestamp=none "$test_dir/androp.app"
 python3 - "$test_dir" <<'PY'
@@ -36,7 +30,7 @@ env = dict(os.environ, HOME=root + '/home', CFFIXED_USER_HOME=root + '/home',
 args = [root + '/androp.app/Contents/MacOS/androp', '--self-test-lifecycle',
         '-isSyncPaused', 'NO', '-appConnectionMode', 'network', '-isBLEEnabled', 'NO',
         '-keepAwakeEnabled', 'NO', '-experimentalClosedLidEnabled', 'NO',
-        '-sendNowPlayingStatus', 'NO',
+        '-quickShareEnabled', 'NO', '-sendNowPlayingStatus', 'NO',
         '-devicePort', port, '-showInMenubar', 'NO', '-autoStartAtLogin', 'NO']
 child = subprocess.Popen(args, env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
