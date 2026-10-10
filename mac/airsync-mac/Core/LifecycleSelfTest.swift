@@ -33,6 +33,12 @@ enum LifecycleSelfTest {
         let state = AppState.shared
         let bluetooth = BLECentralManager.shared
         let phoneID = "lifecycle-test-phone"
+        bluetooth.isManuallyDisconnected = false
+        state.disconnectDevice(manual: false)
+        guard !bluetooth.isManuallyDisconnected else {
+            finish(success: false, message: "Network loss suppressed Bluetooth recovery")
+            return
+        }
         UserDefaults.standard.set(phoneID, forKey: "lastBLEPairedDeviceID")
         state.device = Device(name: "Test phone", ipAddress: "127.0.0.1", port: 0,
                               version: "1", adbPorts: [], deviceId: phoneID)

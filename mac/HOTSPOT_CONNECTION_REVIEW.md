@@ -1,6 +1,6 @@
 # Automatic Mac hotspot joining
 
-Preview 4 adds **Connect** to the Phone hotspot controls in both the main window and androp menu bar. It works with the Preview 3 Android app; no Android update is required for this addition.
+Preview 4 adds **Connect** to the Phone hotspot controls in both the main window and androp menu bar. The saved-password joining action also understands Preview 3 Android, but install both Preview 4 apps for persistent BLE alongside Wi-Fi and the latest connection recovery.
 
 ## Setup and behavior
 
@@ -36,3 +36,9 @@ Apple's documented [Instant Hotspot](https://support.apple.com/en-gb/109321) use
 - [Apple DTS guidance](https://developer.apple.com/forums/thread/748161) explains the Location Services authorization requirement for modern macOS scans.
 
 Production-manager regressions cover confirmed on/off versus failed observations, queued-request rejection, duplicate confirmations, pause cancellation and reentrant activation. Policy regressions cover SSID byte limits, invalid clock/retry limits and cancellation waking a retry wait. Native builds and packaged-app lifecycle checks are recorded in the repository verification files. Actual Keychain authorization, Samsung activation, Wi-Fi association, and cellular routing still need testing on the user's Mac and phone.
+
+## File-transfer handoff
+
+Selecting or dropping files while on BLE now retains them in a review sheet with hotspot controls. After the same authenticated phone reconnects over Wi-Fi, Send becomes available. Device identity and pairing-token continuity are checked before sending and before every file in a batch. Files are never sent over BLE, and a nearby phone with a matching display name cannot inherit the selection.
+
+This flow uses the existing phone hotspot or a shared Wi-Fi network. It does not automatically create a temporary transfer network. Android's public [local-only hotspot API](https://developer.android.com/develop/connectivity/wifi/localonlyhotspot) could support a future router-free, non-cellular transfer path using normal Nearby Wi-Fi permission. That requires authenticated temporary credential exchange, IP discovery and cleanup on both peers; the current Nearby protocol implementation does not negotiate that upgrade.

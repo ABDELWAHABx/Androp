@@ -3,6 +3,7 @@ import Combine
 import CoreWLAN
 import CoreLocation
 import Security
+import Darwin
 
 /// Uses only the user-selected SSID's existing Keychain credential. No password
 /// is persisted by androp, logged, passed to a subprocess, or sent to the phone.
@@ -13,6 +14,39 @@ nonisolated enum HotspotWiFiWorker {
         let profiles = CWWiFiClient.shared().interface()?.configuration()?.networkProfiles.array ?? []
         return Array(Set(profiles.compactMap { ($0 as? CWNetworkProfile)?.ssid }
             .filter { HotspotWiFiPolicy.validSSID($0) })).sorted()
+    }
+
+    /// Read only the interface associated with the selected hotspot. Wait
+    /// briefly for DHCP; never send an unrelated VPN/Ethernet address to Android.
+    static func joinedIPv4(ssid: String, attempt: HotspotWiFiAttempt) -> String? {
+        // Association can return before the DHCP lease is ready.
+        attempt.waitForRetry()
+        for index in 0..<6 {
+            guard !attempt.isCancelled, let wifi = CWWiFiClient.shared().interface(),
+                  wifi.ssid() == ssid, let interfaceName = wifi.interfaceName else { return nil }
+            if let address = localIPv4(interface: interfaceName) { return address }
+            if index < 5 { attempt.waitForRetry() }
+        }
+        return nil
+    }
+
+    private static func localIPv4(interface: String) -> String? {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        defer { freeifaddrs(first) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let entry = cursor {
+            defer { cursor = entry.pointee.ifa_next }
+            guard let address = entry.pointee.ifa_addr,
+                  Int32(address.pointee.sa_family) == AF_INET,
+                  String(cString: entry.pointee.ifa_name) == interface else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(address, socklen_t(address.pointee.sa_len), &host,
+                              socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let value = String(cString: host)
+            if HotspotWiFiPolicy.validLocalIPv4(value) { return value }
+        }
+        return nil
     }
 
     static func join(ssid: String, attempt: HotspotWiFiAttempt) -> String {
@@ -207,7 +241,24 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         let name = requestedSSID
         HotspotWiFiWorker.queue.async {
             let result = HotspotWiFiWorker.join(ssid: name, attempt: token)
-            DispatchQueue.main.async { [weak self] in self?.finish(token, result) }
+            let address = HotspotWiFiWorker.joinedIPv4(ssid: name, attempt: token)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.attempt === token else { return }
+                if let address, !token.isCancelled, !AppState.shared.isSyncPaused,
+                   !UserDefaults.standard.isManuallyDisconnected,
+                   let peer = self.bluetoothPeer,
+                   PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: peer) {
+                    let port = AppState.shared.myDevice?.port ?? Int(Defaults.serverPort)
+                    if (1...65535).contains(port),
+                       let data = try? JSONSerialization.data(withJSONObject: [
+                        "type": "connectNetwork", "data": ["ip": address, "port": port]]),
+                       let payload = String(data: data, encoding: .utf8) {
+                        _ = BLECentralManager.shared.writeChunked(
+                            characteristicUUID: BLEConstants.charMediaControl, payload: payload)
+                    }
+                }
+                self.finish(token, result)
+            }
         }
     }
 

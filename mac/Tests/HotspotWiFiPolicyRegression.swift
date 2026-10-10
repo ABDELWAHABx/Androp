@@ -25,6 +25,12 @@ struct HotspotWiFiPolicyRegression {
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: true, paused: false, manuallyDisconnected: false))
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: true, manuallyDisconnected: false))
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: false, manuallyDisconnected: true))
-        print("Hotspot Wi-Fi policy: 18 checks passed")
+        for value in ["192.168.43.2", "172.16.0.2", "172.31.255.2", "10.0.0.2"] {
+            precondition(HotspotWiFiPolicy.validLocalIPv4(value))
+        }
+        for value in ["127.0.0.1", "8.8.8.8", "224.0.0.1", "172.32.0.1", "192.168.1.256", "192.168.01.1", "phone.local", "192.168.1.2:80", "::1", "169.254.1.1"] {
+            precondition(!HotspotWiFiPolicy.validLocalIPv4(value))
+        }
+        print("Hotspot Wi-Fi policy: 32 checks passed")
     }
 }

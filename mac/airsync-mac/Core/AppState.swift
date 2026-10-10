@@ -1350,8 +1350,13 @@ class AppState: ObservableObject {
             }
             self.currentDeviceWallpaperBase64 = nil
             
-            // Disconnect BLE
-            BLECentralManager.shared.disconnect()
+            // A network failure is not an explicit Bluetooth disconnect.
+            // Preserve in-flight authentication/discovery as well as live BLE.
+            if manual || isSyncPaused {
+                BLECentralManager.shared.disconnect()
+            } else {
+                BLECentralManager.shared.ensureAutomaticConnection()
+            }
             
             // Clean up Quick Share state
             if QuickShareManager.shared.transferState != .idle {

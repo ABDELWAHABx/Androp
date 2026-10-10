@@ -21,6 +21,15 @@ Both peers must run the updated androp build. Pair over Wi-Fi once to establish 
 | Screen mirroring | Network or existing USB mirroring setup | Uses the separate mirroring transport; its USB support does not provide file sync or the app's remote trackpad connection. |
 | Continuous mouse/trackpad streaming | Network | Excluded from BLE to avoid saturating its control queue. Requires the app's network connection, including when USB mirroring is already active. |
 
+## Persistent Bluetooth beside Wi-Fi
+
+Preview 4 keeps authenticated Bluetooth connected when Wi-Fi connects. Losing only the network path preserves the phone identity and Bluetooth controls. The dashboard reports both links. Each command still selects one transport; ordinary messages prefer an available network socket, while hotspot activation explicitly prefers the authenticated BLE peer. Files and continuous pointer input stay on the network.
+
+Mac discovery uses 10-second windows followed by 5–60 seconds of rest; transient connection failures back off to 60 seconds. An established link has no discovery timer. Android uses low-power advertising and radio/settings/foreground lifecycle events rather than a reconnect polling loop. Pause, disabling Bluetooth sync and manual disconnect stop automatic connection work. Reconnection can take up to the current rest interval plus discovery/authentication time; Bluetooth availability does not guarantee an instant connection.
+
+The Mac remembers the authenticated peripheral against the pairing-token fingerprint. If the phone's Bluetooth identity changes after a reset, select it explicitly in the device list or pair again. This reduces automatic token disclosure to unrelated advertisers after first contact; the existing initial token exchange is not mutual cryptographic authentication and this change does not add BLE payload encryption.
+
+
 ## Fixed in this pass
 
 - Removed duplicate Mac media/volume sends: toggles previously executed twice on BLE and could immediately undo themselves.
