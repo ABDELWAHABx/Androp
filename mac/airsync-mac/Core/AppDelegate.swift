@@ -20,6 +20,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var resumeAfterSleep = false
 
     func applicationWillTerminate(_ notification: Foundation.Notification) {
+        if LifecycleSelfTest.isRequested {
+            LifecycleSelfTest.cleanUp()
+            return
+        }
         MacPowerManager.shared.stop()
         workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         workspaceObservers.removeAll()
@@ -31,6 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Foundation.Notification) {
+        if LifecycleSelfTest.isRequested {
+            LifecycleSelfTest.run()
+            return
+        }
         CrashManager.shared.install()
         CrashManager.shared.checkAndNotify(mode: AppState.shared.crashReportingMode)
 

@@ -11,6 +11,9 @@ struct DeviceStatus: Codable {
     struct Battery: Codable {
         var level: Int
         var isCharging: Bool
+        // nil preserves compatibility with Android's existing JSON battery
+        // schema. Only locally synthesized placeholders explicitly use false.
+        var isReported: Bool? = nil
     }
 
     struct Music: Codable {

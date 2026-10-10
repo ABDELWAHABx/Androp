@@ -14,6 +14,7 @@ class DiscoveryManager: ObservableObject {
     private var mdnsDevices: [String: DiscoveredDevice] = [:]
     private var cancellables = Set<AnyCancellable>()
     private var isRunning = false
+    var isServiceRunning: Bool { isRunning }
     private var networkMonitor: NWPathMonitor?
     private var reachabilityTimer: Timer?
     private var reachabilityConnections: [String: NWConnection] = [:]

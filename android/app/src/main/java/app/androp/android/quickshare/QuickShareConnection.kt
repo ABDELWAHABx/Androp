@@ -34,6 +34,7 @@ open class QuickShareConnection(
     private var ukey2Context: Ukey2Context? = null
     private var decryptSequence = 0
     private var encryptSequence = 0
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun setUkey2Context(context: Ukey2Context) {
         this.ukey2Context = context
@@ -43,6 +44,7 @@ open class QuickShareConnection(
      * Reads a big-endian length-prefixed frame.
      */
     fun readFrame(): ByteArray {
+        if (closed.get()) throw java.io.IOException("Quick Share connection is closed")
         val length = dataInputStream.readInt() // readInt is big-endian
         if (length < 0 || length > 10 * 1024 * 1024) {
             throw IllegalStateException("Invalid frame length: $length")
@@ -57,6 +59,7 @@ open class QuickShareConnection(
      */
     @Synchronized
     fun writeFrame(frame: ByteArray) {
+        if (closed.get()) throw java.io.IOException("Quick Share connection is closed")
         dataOutputStream.writeInt(frame.size)
         dataOutputStream.write(frame)
         dataOutputStream.flush()
@@ -158,6 +161,7 @@ open class QuickShareConnection(
     }
 
     fun close() {
+        if (!closed.compareAndSet(false, true)) return
         // Closing an input/socket must always release both sides, even after a failed send.
         runCatching { dataInputStream.close() }
         runCatching { dataOutputStream.close() }

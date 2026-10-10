@@ -37,8 +37,8 @@ class AirSyncService : Service() {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var connectedDeviceName: String? = null
-    private var isScanning = false
-    private var isSyncing = false
+    @Volatile private var isScanning = false
+    @Volatile private var isSyncing = false
     @Volatile private var isStopping = false
     private var stateJob: Job? = null
     private var startupJob: Job? = null
@@ -55,16 +55,17 @@ class AirSyncService : Service() {
         serviceInstance = this
         Log.d(TAG, "AirSyncService created")
         createNotificationChannel()
+        // Android can reject promotion after a background-start exemption expires.
+        // Do not install listeners or launch discovery for a service that cannot run.
+        if (!promoteToForeground()) return
         MacDeviceStatusManager.startMonitoring(this)
         registerNetworkCallback()
-
-        promoteToForeground()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "AirSyncService started with action: ${intent?.action}")
 
-        if (intent?.action == ACTION_STOP_SYNC) {
+        if (isStopping || intent?.action == ACTION_STOP_SYNC) {
             stopSync()
             return START_NOT_STICKY
         }
@@ -147,7 +148,7 @@ class AirSyncService : Service() {
                 isEnabled && device?.isPlus == true && WebSocketUtil.isConnected()
             }.collect { shouldStart ->
                 Log.d(TAG, "WebDAV requirement state updated: shouldStart = $shouldStart")
-                if (shouldStart) {
+                if (shouldStart && !isStopping && !app.androp.android.utils.BackgroundWorkController.isPaused) {
                     startWebDavServer()
                 } else {
                     stopWebDavServer()
@@ -156,9 +157,11 @@ class AirSyncService : Service() {
         }
     }
 
-    private fun promoteToForeground() {
-        SyncDashboardController.acquire(this, SyncDashboardController.OWNER_SYNC,
+    private fun promoteToForeground(): Boolean {
+        val promoted = SyncDashboardController.acquire(this, SyncDashboardController.OWNER_SYNC,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        if (!promoted) isStopping = true
+        return promoted
     }
 
     private fun handleAppForeground() {
@@ -202,10 +205,12 @@ class AirSyncService : Service() {
     }
 
     private fun stopSync() {
+        if (isStopping) { stopSelf(); return }
         Log.d(TAG, "Stopping androp foreground service")
         isStopping = true
         isScanning = false
         isSyncing = false
+        startupJob?.cancel()
         stateJob?.cancel()
         stateJob = null
         webDavJob?.cancel()
@@ -300,8 +305,9 @@ class AirSyncService : Service() {
 
         const val EXTRA_DEVICE_NAME = "device_name"
 
-        private var serviceInstance: AirSyncService? = null
+        @Volatile private var serviceInstance: AirSyncService? = null
         private val actionScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        private val shutdownScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
 
         fun isRunning(): Boolean = serviceInstance != null
 
@@ -369,8 +375,12 @@ class AirSyncService : Service() {
 
         fun stop(context: Context) {
             // Starting a service merely to stop it revives discovery and can violate background limits.
-            serviceInstance?.stopSync()
-            context.stopService(Intent(context, AirSyncService::class.java))
+            // ServiceManager can call from IO; serialize teardown with Main-bound startup jobs.
+            val application = context.applicationContext
+            shutdownScope.launch {
+                serviceInstance?.stopSync()
+                application.stopService(Intent(application, AirSyncService::class.java))
+            }
         }
     }
 }

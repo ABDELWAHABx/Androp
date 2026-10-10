@@ -144,11 +144,6 @@ public class OutboundNearbyConnection:NearbyConnection{
 		}
 	}
 	
-	override func protocolError() {
-		super.protocolError()
-		delegate?.outboundConnection(connection: self, failedWithError: lastError!)
-	}
-	
 	private func sendConnectionRequest() throws {
 		var frame=Location_Nearby_Connections_OfflineFrame()
 		frame.version = .v1
@@ -187,7 +182,7 @@ public class OutboundNearbyConnection:NearbyConnection{
 		
 		var clientInit=Securegcm_Ukey2ClientInit()
 		clientInit.version=1
-		clientInit.random=Data.randomData(length: 32)
+		clientInit.random=try Data.randomData(length: 32)
 		clientInit.nextProtocol="AES_256_CBC-HMAC_SHA256"
 		var sha=SHA512()
 		sha.update(data: ukeyClientFinishMsgData!)
@@ -255,8 +250,8 @@ public class OutboundNearbyConnection:NearbyConnection{
 		pairedEncryption.v1=Sharing_Nearby_V1Frame()
 		pairedEncryption.v1.type = .pairedKeyEncryption
 		pairedEncryption.v1.pairedKeyEncryption=Sharing_Nearby_PairedKeyEncryptionFrame()
-		pairedEncryption.v1.pairedKeyEncryption.secretIDHash=Data.randomData(length: 6)
-		pairedEncryption.v1.pairedKeyEncryption.signedData=Data.randomData(length: 72)
+		pairedEncryption.v1.pairedKeyEncryption.secretIDHash=try Data.randomData(length: 6)
+		pairedEncryption.v1.pairedKeyEncryption.signedData=try Data.randomData(length: 72)
 		if let qrKey=qrCodePrivateKey{
 			let signature=qrKey.sign(msg: authKey!.data())
 			var serializedSignature=Data(signature.r)
@@ -299,7 +294,11 @@ public class OutboundNearbyConnection:NearbyConnection{
 				var meta=Sharing_Nearby_FileMetadata()
 				meta.name=OutboundNearbyConnection.sanitizeFileName(name: url.lastPathComponent)
 				let attrs=try FileManager.default.attributesOfItem(atPath: url.path)
-				meta.size=(attrs[FileAttributeKey.size] as! NSNumber).int64Value
+				guard attrs[.type] as? FileAttributeType == .typeRegular,
+					let size = attrs[.size] as? NSNumber, size.int64Value >= 0 else {
+					throw NearbyError.inputOutput
+				}
+				meta.size = size.int64Value
 				let typeID=try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier
 				meta.mimeType="application/octet-stream"
 				if let typeID=typeID{
@@ -328,7 +327,9 @@ public class OutboundNearbyConnection:NearbyConnection{
 				meta.payloadID=Int64.random(in: Int64.min...Int64.max)
 				queue.append(OutgoingFileTransfer(url: url, payloadID: meta.payloadID, handle: try FileHandle(forReadingFrom: url), totalBytes: meta.size, currentOffset: 0))
 				introduction.v1.introduction.fileMetadata.append(meta)
-				totalBytesToSend+=meta.size
+				let (total, overflow) = totalBytesToSend.addingReportingOverflow(meta.size)
+				guard !overflow else { throw NearbyError.protocolError("Transfer size is too large") }
+				totalBytesToSend = total
 			}
 		}
 		#if DEBUG

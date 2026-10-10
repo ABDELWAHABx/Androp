@@ -75,6 +75,7 @@ class QuickShareService : Service() {
     private val binder = LocalBinder()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var discoveryJob: kotlinx.coroutines.Job? = null
+    private var foregroundReady = false
 
 
     inner class LocalBinder : Binder() {
@@ -86,8 +87,9 @@ class QuickShareService : Service() {
         instance = this
         createNotificationChannel()
 
-        SyncDashboardController.acquire(this, SyncDashboardController.OWNER_RECEIVE,
+        foregroundReady = SyncDashboardController.acquire(this, SyncDashboardController.OWNER_RECEIVE,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, "Quick Share is active")
+        if (!foregroundReady) return
 
         server = QuickShareServer(this) { connection ->
             val id = java.util.UUID.randomUUID().toString()
@@ -151,6 +153,7 @@ class QuickShareService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!foregroundReady) { stopSelf(); return START_NOT_STICKY }
         if (app.androp.android.utils.BackgroundWorkController.isPaused) {
             stopSelf()
             return START_NOT_STICKY
@@ -217,8 +220,9 @@ class QuickShareService : Service() {
         if (app.androp.android.utils.BackgroundWorkController.isPaused) { stopSelf(); return }
         discoveryJob?.cancel()
 
-        SyncDashboardController.acquire(this, SyncDashboardController.OWNER_RECEIVE,
+        foregroundReady = SyncDashboardController.acquire(this, SyncDashboardController.OWNER_RECEIVE,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, "Searching for files...")
+        if (!foregroundReady) return
 
         server.start()
         val port = server.port
@@ -275,8 +279,8 @@ class QuickShareService : Service() {
         if (instance === this) instance = null
         serviceScope.cancel()
         discoveryJob?.cancel()
-        advertiser.stopAdvertising()
-        server.stop()
+        if (::advertiser.isInitialized) advertiser.stopAdvertising()
+        if (::server.isInitialized) server.stop()
         activeConnections.values.toList().forEach { it.closeConnection() }
         activeConnections.clear()
         SyncDashboardController.release(this, SyncDashboardController.OWNER_RECEIVE)

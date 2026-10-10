@@ -620,7 +620,12 @@ extension WebSocketServer {
                 if let state = state {
                     let powerID = "ws-incoming:\(id)"
                     defer { MacPowerManager.shared.setTransferActive(id: powerID, active: false) }
-                    state.fileHandle?.closeFile()
+                    do {
+                        try state.fileHandle?.close()
+                    } catch {
+                        self.cancelFileTransfer(id: id)
+                        return
+                    }
                     
                     var totalBytes: UInt64 = 0
                     do {
@@ -658,7 +663,13 @@ extension WebSocketServer {
                                 let active = self.incomingFiles[id] != nil
                                 self.lock.unlock()
                                 guard active else { return }
-                                let data = handle.readData(ofLength: 1024 * 1024)
+                                let data: Data
+                                do {
+                                    data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+                                } catch {
+                                    self.cancelFileTransfer(id: id)
+                                    return
+                                }
                                 if data.isEmpty { break }
                                 hasher.update(data: data)
                                 let now = ProcessInfo.processInfo.systemUptime

@@ -29,6 +29,7 @@ final class MacPowerManager: ObservableObject {
     private var notificationPort: IONotificationPortRef?
     private var rootDomain: io_service_t = 0
     private var notification: io_object_t = 0
+    private var lidNotificationGeneration: UInt64 = 0
     private let ioQueue = DispatchQueue(label: "app.androp.power", qos: .utility)
 
     var statusFields: [String: Any] {
@@ -205,6 +206,7 @@ final class MacPowerManager: ObservableObject {
 
     func stop() {
         started = false
+        lidNotificationGeneration &+= 1
         observers.removeAll()
         suspend()
         let port = notificationPort
@@ -328,6 +330,8 @@ final class MacPowerManager: ObservableObject {
     }
 
     private func startLidNotifications() {
+        lidNotificationGeneration &+= 1
+        let generation = lidNotificationGeneration
         ioQueue.async {
             let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
             guard service != 0 else { return }
@@ -341,13 +345,13 @@ final class MacPowerManager: ObservableObject {
                 // publishStatus suppresses unchanged snapshots; no polling is needed.
                 let value = MacPowerManager.readLid(service)
                 DispatchQueue.main.async {
-                    guard MacPowerManager.shared.started else { return }
+                    guard MacPowerManager.shared.started, MacPowerManager.shared.rootDomain == service else { return }
                     MacPowerManager.shared.lidClosed = value
                     MacPowerManager.shared.publishStatus()
                 }
             }, nil, &object)
             DispatchQueue.main.async {
-                guard self.started else {
+                guard self.started, self.lidNotificationGeneration == generation else {
                     self.ioQueue.async {
                         if object != 0 { IOObjectRelease(object) }
                         IONotificationPortDestroy(port)

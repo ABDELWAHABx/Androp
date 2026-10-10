@@ -42,6 +42,10 @@ final class NowPlayingPublisher {
     /// Call once at app startup. Registers remote commands only.
     /// Silent audio is started/stopped separately based on the showInControlCenter setting.
     func start() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.start() }
+            return
+        }
         registerRemoteCommands()
     }
 
@@ -98,13 +102,19 @@ final class NowPlayingPublisher {
         stopSilentAudio()
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         MPNowPlayingInfoCenter.default().playbackState = .stopped
+        setTransportCommandsEnabled(false)
         MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = false
     }
 
     // MARK: - Silent Audio
 
     func startSilentAudio() {
-        guard !isSilentAudioRunning else { return }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.startSilentAudio() }
+            return
+        }
+        guard UserDefaults.standard.showInControlCenter, !AppState.shared.isSyncPaused,
+              currentInfo?.isPlaying == true, !isSilentAudioRunning else { return }
         isSilentAudioRunning = true
 
         let engine = AVAudioEngine()
@@ -113,7 +123,10 @@ final class NowPlayingPublisher {
         engine.connect(player, to: engine.mainMixerNode, format: nil)
 
         // Generate one second of silence
-        let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)!
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2) else {
+            isSilentAudioRunning = false
+            return
+        }
         let frameCount = AVAudioFrameCount(format.sampleRate)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
             isSilentAudioRunning = false
@@ -143,6 +156,10 @@ final class NowPlayingPublisher {
     }
 
     func stopSilentAudio() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.stopSilentAudio() }
+            return
+        }
         guard isSilentAudioRunning else { return }
         playerNode?.stop()
         audioEngine?.stop()
@@ -157,6 +174,7 @@ final class NowPlayingPublisher {
 
     private func publishToNowPlayingInfoCenter(info: NowPlayingInfo) {
         let center = MPNowPlayingInfoCenter.default()
+        setTransportCommandsEnabled(true)
 
         var mpInfo: [String: Any] = [
             MPMediaItemPropertyTitle: info.title ?? "",
@@ -198,7 +216,8 @@ final class NowPlayingPublisher {
                 processCommand(name: name, action: action, optimisticUpdate: optimisticUpdate)
             }
         }
-        guard currentInfo?.hasMediaSession == true else { return .noSuchContent }
+        guard !AppState.shared.isSyncPaused, AppState.shared.device != nil,
+              currentInfo?.hasMediaSession == true else { return .noSuchContent }
         let now = Date()
         let timeSinceCommand = now.timeIntervalSince(lastCommandSentAt)
         let timeSinceState = now.timeIntervalSince(lastStateUpdateAt)
@@ -239,11 +258,7 @@ final class NowPlayingPublisher {
         }
 
         commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
-            let isPlaying = self?.currentInfo?.isPlaying == true
-            let explicitAction = isPlaying ? "pause" : "play"
-            return self?.processCommand(name: "TogglePlayPause", action: explicitAction) { publisher in
-                publisher.publishPlaybackStateUpdate(playing: !isPlaying)
-            } ?? .commandFailed
+            return self?.processToggle() ?? .commandFailed
         }
 
         commandCenter.nextTrackCommand.addTarget { [weak self] _ in
@@ -260,7 +275,27 @@ final class NowPlayingPublisher {
         }
         commandCenter.changePlaybackPositionCommand.isEnabled = false
 
+        setTransportCommandsEnabled(false)
         print("[NowPlayingPublisher] Remote commands registered")
+    }
+
+    private func setTransportCommandsEnabled(_ enabled: Bool) {
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.isEnabled = enabled
+        center.pauseCommand.isEnabled = enabled
+        center.togglePlayPauseCommand.isEnabled = enabled
+        center.nextTrackCommand.isEnabled = enabled
+        center.previousTrackCommand.isEnabled = enabled
+    }
+
+    private func processToggle() -> MPRemoteCommandHandlerStatus {
+        guard Thread.isMainThread else {
+            return DispatchQueue.main.sync { self.processToggle() }
+        }
+        let isPlaying = currentInfo?.isPlaying == true
+        return processCommand(name: "TogglePlayPause", action: isPlaying ? "pause" : "play") {
+            $0.publishPlaybackStateUpdate(playing: !isPlaying)
+        }
     }
 
     private func processSeek(to positionSeconds: Double) -> MPRemoteCommandHandlerStatus {

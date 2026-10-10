@@ -11,11 +11,12 @@ import Darwin
 class ScrcpyServerManager: NSObject {
     static let shared = ScrcpyServerManager()
     
-    private let serverLocalPath = Bundle.main.path(forResource: "scrcpy-server", ofType: nil) ?? "/Users/sameerasandakelum/GIT/airsync-mac/scrcpy-server"
+    private let serverLocalPath = Bundle.main.path(forResource: "scrcpy-server", ofType: nil)
     private let serverRemotePath = "/data/local/tmp/scrcpy-server"
     private let serverPort: Int = 1234
     
     private var adbProcess: Process?
+    private var activeSerial: String?
     private let sessionLock = NSRecursiveLock()
     private var sessionGeneration: UInt64 = 0
 
@@ -30,6 +31,9 @@ class ScrcpyServerManager: NSObject {
         let generation = sessionGeneration
         sessionLock.unlock()
         guard isCurrentSession(generation) else { return }
+        sessionLock.lock()
+        activeSerial = serial
+        sessionLock.unlock()
         let adbPath = ADBConnector.findExecutable(named: "adb", fallbackPaths: ADBConnector.possibleADBPaths) ?? "/opt/homebrew/bin/adb"
         
         // Step 0: Cleanup previous instances and port forwards
@@ -39,15 +43,27 @@ class ScrcpyServerManager: NSObject {
         let cleanupPort = Process()
         cleanupPort.executableURL = URL(fileURLWithPath: adbPath)
         cleanupPort.arguments = ["-s", serial, "forward", "--remove", "tcp:\(serverPort)"]
-        try? cleanupPort.run()
-        cleanupPort.waitUntilExit()
+        do {
+            try cleanupPort.run()
+            cleanupPort.waitUntilExit()
+        } catch {
+            print("[ScrcpyServerManager] Cleanup could not launch ADB: \(error)")
+            completion(false)
+            return
+        }
         
         // Kill existing server process on device
         let killProcess = Process()
         killProcess.executableURL = URL(fileURLWithPath: adbPath)
         killProcess.arguments = ["-s", serial, "shell", "pkill -f com.genymobile.scrcpy.Server || true"]
-        try? killProcess.run()
-        killProcess.waitUntilExit()
+        do {
+            try killProcess.run()
+            killProcess.waitUntilExit()
+        } catch {
+            print("[ScrcpyServerManager] Device cleanup failed: \(error)")
+            completion(false)
+            return
+        }
         
         // Step 1: Push the server
         pushServer(serial: serial) { success in
@@ -76,6 +92,11 @@ class ScrcpyServerManager: NSObject {
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: adbPath)
+        guard let serverLocalPath, FileManager.default.isReadableFile(atPath: serverLocalPath) else {
+            print("[ScrcpyServerManager] Bundled scrcpy server is missing")
+            completion(false)
+            return
+        }
         process.arguments = ["-s", serial, "push", serverLocalPath, serverRemotePath]
         
         do {
@@ -149,7 +170,10 @@ class ScrcpyServerManager: NSObject {
         process.standardError = pipe
         
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
+            guard let data = try? handle.read(upToCount: 64 * 1024), !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             if let output = String(data: data, encoding: .utf8) {
                 let lines = output.components(separatedBy: .newlines)
                 for line in lines {
@@ -161,10 +185,7 @@ class ScrcpyServerManager: NSObject {
                     if trimmed.contains("INFO: Video size:") || trimmed.contains("INFO: New display:") {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                             guard self?.isCurrentSession(generation) == true else { return }
-                            self?.launchTimer?.invalidate()
-                            self?.launchTimer = nil
-                            self?.launchCompletion?(true)
-                            self?.launchCompletion = nil
+                            self?.finishLaunch(success: true, generation: generation)
                         }
                     }
                     
@@ -175,8 +196,7 @@ class ScrcpyServerManager: NSObject {
                         if trimmed.contains("Permission denied") || trimmed.contains("could not start") {
                             DispatchQueue.main.async {
                                 guard self?.isCurrentSession(generation) == true else { return }
-                                self?.launchCompletion?(false)
-                                self?.launchCompletion = nil
+                                self?.finishLaunch(success: false, generation: generation)
                             }
                         }
                     }
@@ -202,10 +222,9 @@ class ScrcpyServerManager: NSObject {
                 self.launchTimer?.invalidate()
                 self.launchTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
                     guard self?.isCurrentSession(generation) == true else { return }
-                    if let completion = self?.launchCompletion {
+                    if self?.launchCompletion != nil {
                         print("[ScrcpyServerManager] Readiness log timeout - proceeding anyway")
-                        completion(true)
-                        self?.launchCompletion = nil
+                        self?.finishLaunch(success: true, generation: generation)
                     }
                 }
             }
@@ -216,10 +235,24 @@ class ScrcpyServerManager: NSObject {
         }
     }
     
+    private func finishLaunch(success: Bool, generation: UInt64) {
+        sessionLock.lock()
+        guard isCurrentSession(generation) else { sessionLock.unlock(); return }
+        let completion = launchCompletion
+        launchCompletion = nil
+        launchTimer?.invalidate()
+        launchTimer = nil
+        sessionLock.unlock()
+        // Clear before calling external code: completion may stop/start another session.
+        completion?(success)
+    }
+
     func stopServer() {
         sessionLock.lock()
         sessionGeneration &+= 1
         let currentProcess = adbProcess
+        let serial = activeSerial
+        activeSerial = nil
         adbProcess = nil
         launchTimer?.invalidate()
         launchTimer = nil
@@ -234,11 +267,13 @@ class ScrcpyServerManager: NSObject {
             }
             if process.isRunning { process.terminate() }
         }
-        // Remove port forward
+        // Pausing an idle app must not launch ADB just to clean up a nonexistent session.
+        guard let serial else { return }
+        // Remove only this device's port forward
         let adbPath = ADBConnector.findExecutable(named: "adb", fallbackPaths: ADBConnector.possibleADBPaths) ?? "/opt/homebrew/bin/adb"
         let process = Process()
         process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["forward", "--remove", "tcp:\(serverPort)"]
+        process.arguments = ["-s", serial, "forward", "--remove", "tcp:\(serverPort)"]
         
         do {
             try process.run()
@@ -314,8 +349,10 @@ class ScrcpyServerManager: NSObject {
     }
     
     func stopMirroringSession(streamClient: ScrcpyStreamClient) {
+        streamClient.onPacketReceived = nil
         streamClient.disconnect()
         ScrcpyControlClient.shared.disconnect()
+        ScrcpyVideoDecoder.shared.reset()
         self.stopServer()
     }
 }

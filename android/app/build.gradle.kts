@@ -14,8 +14,8 @@ android {
     defaultConfig {
         applicationId = "app.androp.android"
         minSdk = 30
-        versionCode = 32
-        versionName = "4.0.1"
+        versionCode = 33
+        versionName = "4.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

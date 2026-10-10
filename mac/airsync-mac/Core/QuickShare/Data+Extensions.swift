@@ -7,6 +7,7 @@
 
 import Foundation
 import CoreFoundation
+import Security
 
 extension Data{
 	func urlSafeBase64EncodedString() -> String {
@@ -28,11 +29,14 @@ extension Data{
 		return subdata(in: count-numBytes..<count)
 	}
 	
-	static func randomData(length: Int) -> Data{
+	static func randomData(length: Int) throws -> Data{
+		guard length >= 0 else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(errSecParam)) }
+		guard length > 0 else { return Data() }
 		var data=Data(count: length)
-		data.withUnsafeMutableBytes {
-			guard 0 == SecRandomCopyBytes(kSecRandomDefault, length, $0.baseAddress!) else { fatalError() }
+		let status = data.withUnsafeMutableBytes {
+			SecRandomCopyBytes(kSecRandomDefault, length, $0.baseAddress!)
 		}
+		guard status == errSecSuccess else { throw NSError(domain: NSOSStatusErrorDomain, code: Int(status)) }
 		return data
 	}
 	

@@ -57,10 +57,11 @@ public class NearbyConnection{
 	nonisolated deinit {}
 	
 	func start(){
+		guard !connectionClosed else { return }
 		print("[nearby] Starting connection to \(connection.endpoint)")
 		connection.stateUpdateHandler={ [weak self] state in
 			Task { @MainActor in
-				guard let self=self else { return }
+				guard let self=self, !self.connectionClosed else { return }
 				if case .ready = state {
 					self.connectionReady()
 					self.receiveFrameAsync()
@@ -83,7 +84,8 @@ public class NearbyConnection{
 	}
 	
 	internal func protocolError(){
-		disconnect()
+		if lastError == nil { lastError = NearbyError.protocolError("Unexpected transfer frame") }
+		cancelImmediately()
 	}
 	
 	internal func processReceivedFrame(frameData:Data) async {
@@ -133,7 +135,8 @@ public class NearbyConnection{
 					self.handleConnectionClosure()
 					return
 				}
-				assertionFailure()
+				self.lastError = NearbyError.protocolError("Incomplete frame length")
+				self.protocolError()
 			}
 		}
 	}
@@ -204,7 +207,7 @@ public class NearbyConnection{
 		d2dMsg.message=try frame.serializedData()
 		
 		let serializedMsg=[UInt8](try d2dMsg.serializedData())
-		let iv=Data.randomData(length: 16)
+		let iv=try Data.randomData(length: 16)
 		var encryptedData=Data(count: serializedMsg.count+16)
 		var encryptedLength:size_t=0
         var encryptionStatus = CCCryptorStatus(kCCSuccess)
@@ -390,6 +393,10 @@ public class NearbyConnection{
 	
 	internal func finalizeKeyExchange(peerKey:Securemessage_GenericPublicKey) throws{
 		guard peerKey.hasEcP256PublicKey else { throw NearbyError.requiredFieldMissing("peerKey.ecP256PublicKey") }
+		guard let privateKey, let clientInit = ukeyClientInitMsgData,
+			let serverInit = ukeyServerInitMsgData else {
+			throw NearbyError.protocolError("Incomplete key exchange")
+		}
 		
 		let domain=Domain.instance(curve: .EC256r1)
 		var clientX=peerKey.ecP256PublicKey.x
@@ -402,14 +409,14 @@ public class NearbyConnection{
 		}
 		let key=try ECPublicKey(domain: domain, w: Point(BInt(magnitude: [UInt8](clientX)), BInt(magnitude: [UInt8](clientY))))
 		
-		let dhs=(try privateKey?.domain.multiplyPoint(key.w, privateKey!.s).x.asMagnitudeBytes())!
+		let dhs = try privateKey.domain.multiplyPoint(key.w, privateKey.s).x.asMagnitudeBytes()
 		var sha=SHA256()
 		sha.update(data: dhs)
 		let derivedSecretKey=Data(sha.finalize())
 		
 		var ukeyInfo=Data()
-		ukeyInfo.append(ukeyClientInitMsgData!)
-		ukeyInfo.append(ukeyServerInitMsgData!)
+		ukeyInfo.append(clientInit)
+		ukeyInfo.append(serverInit)
 		let authString=NearbyConnection.hkdf(inputKeyMaterial: SymmetricKey(data: derivedSecretKey), salt: "UKEY2 v1 auth".data(using: .utf8)!, info: ukeyInfo, outputByteCount: 32)
 		let nextSecret=NearbyConnection.hkdf(inputKeyMaterial: SymmetricKey(data: derivedSecretKey), salt: "UKEY2 v1 next".data(using: .utf8)!, info: ukeyInfo, outputByteCount: 32)
 		
@@ -484,8 +491,12 @@ public class NearbyConnection{
 		alert.type=type
 		var msg=Securegcm_Ukey2Message()
 		msg.messageType = .alert
-		msg.messageData = try! alert.serializedData()
-		sendFrameAsync(try! msg.serializedData())
+		do {
+			msg.messageData = try alert.serializedData()
+			sendFrameAsync(try msg.serializedData())
+		} catch {
+			lastError = error
+		}
 		disconnect()
 	}
 	

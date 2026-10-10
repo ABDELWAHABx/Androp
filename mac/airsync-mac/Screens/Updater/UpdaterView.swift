@@ -9,7 +9,7 @@ import SwiftUI
 
 extension Bundle {
     var buildNumber: String {
-        return infoDictionary?["CFBundleVersion"] as! String
+        infoDictionary?["CFBundleVersion"] as? String ?? "Unknown"
     }
 
     var appVersion: String {

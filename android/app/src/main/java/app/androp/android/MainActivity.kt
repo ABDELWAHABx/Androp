@@ -43,7 +43,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.lifecycle.lifecycleScope
 import app.androp.android.utils.AppNavigation
-import java.net.URLDecoder
+import app.androp.android.utils.PairingLink
 
 object AdbDiscoveryHolder {
     private var discovery: AdbMdnsDiscovery? = null
@@ -212,33 +212,16 @@ class MainActivity : ComponentActivity() {
 
         updateNavigationRequest(intent)
 
-        val data: android.net.Uri? = intent?.data?.takeIf { it.scheme == "androp" }
-        val ip = data?.host
-        val port = data?.port?.takeIf { it != -1 }?.toString()
-
-        // Parse QR code parameters
-        var pcName: String? = null
-        var isPlus = false
-        var symmetricKey: String? = null
-
-        data?.let { uri ->
-            val urlString = uri.toString()
-            val queryPart = urlString.substringAfter('?', "")
-            if (queryPart.isNotEmpty()) {
-                val params = queryPart.split('?')
-                val paramMap = params.associate {
-                    val parts = it.split('=', limit = 2)
-                    val key = parts.getOrNull(0) ?: ""
-                    val value = parts.getOrNull(1) ?: ""
-                    key to value
-                }
-                pcName = paramMap["name"]?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull() }
-                isPlus = paramMap["plus"]?.toBooleanStrictOrNull() ?: false
-                symmetricKey = paramMap["key"]
-            }
+        val pairing = PairingLink.parse(intent?.data?.toString())
+        if (intent?.data?.scheme == "androp" && pairing == null) {
+            Toast.makeText(this, "Invalid pairing link", Toast.LENGTH_SHORT).show()
         }
-
-        val isFromQrScan = data != null
+        val ip = pairing?.host
+        val port = pairing?.port?.toString()
+        val pcName = pairing?.name
+        val isPlus = pairing?.plus ?: false
+        val symmetricKey = pairing?.key
+        val isFromQrScan = pairing != null
 
         setContent {
             val viewModel: app.androp.android.presentation.viewmodel.AirSyncViewModel =
@@ -291,33 +274,11 @@ class MainActivity : ComponentActivity() {
 
     private fun handleQRCodeResult(qrCode: String) {
         try {
+            if (PairingLink.parse(qrCode) == null) {
+                Toast.makeText(this, "Invalid QR code format", Toast.LENGTH_SHORT).show()
+                return
+            }
             val uri = android.net.Uri.parse(qrCode)
-
-            // Validate QR code format: must be androp scheme with host and port
-            if (uri.scheme != "androp") {
-                Log.w("MainActivity", "Invalid QR code scheme: ${uri.scheme}")
-                Toast.makeText(
-                    this,
-                    "Invalid QR code format",
-                    Toast.LENGTH_SHORT
-                ).show()
-                finish()
-                return
-            }
-
-            val host = uri.host
-            val port = uri.port
-
-            if (host.isNullOrEmpty() || port == -1) {
-                Log.w("MainActivity", "Invalid QR code: missing host or port")
-                Toast.makeText(
-                    this,
-                    "Invalid QR code format",
-                    Toast.LENGTH_SHORT
-                ).show()
-                finish()
-                return
-            }
 
             // Valid QR code, proceed with connection
             val mainIntent = Intent(this, MainActivity::class.java).apply {
@@ -333,7 +294,7 @@ class MainActivity : ComponentActivity() {
                 "Invalid QR code format",
                 Toast.LENGTH_SHORT
             ).show()
-            finish()
+            // Keep the dashboard usable after an invalid scan.
         }
     }
 

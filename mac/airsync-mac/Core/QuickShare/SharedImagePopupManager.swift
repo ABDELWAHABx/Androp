@@ -215,7 +215,7 @@ public class SharedImagePopupManager: NSObject, ObservableObject {
     }
 
     public func show(fileURL: URL) {
-        let limit = AppState.shared.sharedImagePopupsLimit
+        let limit = max(1, min(10, AppState.shared.sharedImagePopupsLimit))
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
             while self.activeImages.count >= limit {
@@ -247,6 +247,7 @@ public class SharedImagePopupManager: NSObject, ObservableObject {
                 defer: false
             )
             panel.isOpaque = false
+            panel.isReleasedWhenClosed = false
             panel.backgroundColor = .clear
             panel.hasShadow = false
             panel.level = .floating

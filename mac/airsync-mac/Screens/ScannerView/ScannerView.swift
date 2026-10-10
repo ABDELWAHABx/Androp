@@ -196,7 +196,9 @@ func generateQRText(ip: String?, port: UInt16?, name: String?, key: String) -> S
         return nil
     }
 
-    let encodedName = name?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "My Mac"
+    var allowed = CharacterSet.urlQueryAllowed
+    allowed.remove(charactersIn: "?&#=+%")
+    let encodedName = (name ?? "My Mac").addingPercentEncoding(withAllowedCharacters: allowed) ?? "My%20Mac"
     return "androp://\(ip):\(port)?name=\(encodedName)?plus=\(AppState.shared.isPlus)?key=\(key)"
 }
 

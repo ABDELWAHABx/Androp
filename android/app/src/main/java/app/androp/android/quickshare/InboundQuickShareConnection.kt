@@ -50,6 +50,8 @@ class InboundQuickShareConnection(
     }
 
     private val executor = Executors.newSingleThreadExecutor()
+    private val lifecycleLock = Any()
+    private var started = false
     @Volatile
     private var isRunning = true
     private val finished = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -79,7 +81,9 @@ class InboundQuickShareConnection(
     )
 
     // The server installs callbacks before starting the handshake.
-    fun start() {
+    fun start() = synchronized(lifecycleLock) {
+        if (!isRunning || started) return@synchronized
+        started = true
         executor.execute {
             try {
                 runHandshake()
@@ -478,7 +482,9 @@ class InboundQuickShareConnection(
             info.outputStream = null
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && info.uri != null) {
                 val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
-                context.contentResolver.update(info.uri!!, values, null, null)
+                check(context.contentResolver.update(info.uri!!, values, null, null) > 0) {
+                    "Unable to publish the received file"
+                }
             }
             info.completed = true
             onFileProgress?.invoke(info.name, 100, info.bytesTransferred, info.size, id.toString())
@@ -490,12 +496,14 @@ class InboundQuickShareConnection(
     }
 
     fun closeConnection() {
-        if (!finished.compareAndSet(false, true)) return
-        isRunning = false
+        synchronized(lifecycleLock) {
+            if (!finished.compareAndSet(false, true)) return
+            isRunning = false
+            executor.shutdownNow()
+        }
         // Close the socket first so a blocked read/write releases before cleanup waits on its lock.
         runCatching { socket.close() }
         super.close()
-        executor.shutdownNow()
         synchronized(filesLock) {
             transferredFiles.forEach { (id, info) ->
                 runCatching { info.outputStream?.close() }

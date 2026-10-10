@@ -21,7 +21,7 @@ release_dist="$release_root/dist"
 release_work=$(mktemp -d "${TMPDIR:-/tmp}/androp-release.XXXXXX")
 trap 'rm -rf "$release_work"' EXIT
 mkdir -p "$release_dist"
-release_name="androp-${release_tag}-${release_architecture}"
+release_name="${release_tag}-${release_architecture}"
 release_stage="$release_work/$release_name"
 release_derived="$release_work/DerivedData"
 mkdir -p "$release_stage"
@@ -37,7 +37,7 @@ for command, minimum in [(['xcodebuild','-version'], (26,)), (['xcrun','swiftc',
         raise SystemExit('Xcode 26+ / Swift 6.2+ is required.')
 PY
 # This pure policy harness does not enable assertions or private driver behavior.
-bash "$release_root/Tests/run-mac-power-policy-tests.sh"
+bash "$release_root/Tests/run-mac-regressions.sh"
 
 # Ad-hoc signing avoids a certificate/provisioning secret. Plugin/macro validation
 # is bypassed only for the repository's resolved dependencies on this private CI.
@@ -68,6 +68,11 @@ codesign --force --sign - --timestamp=none --preserve-metadata=entitlements,flag
 codesign --verify --deep --strict --verbose=2 "$release_app"
 codesign --verify --strict "$release_helper"
 codesign --verify --strict "$release_widget"
+
+# Exercise idle Pause/Resume using the actual compiled app in a disposable,
+# uniquely identified copy. The strict test gate skips consent and radio setup;
+# experimental keep-awake is disabled and the installed app is not modified.
+bash "$release_root/Tests/run-app-lifecycle-tests.sh" "$release_app"
 
 python3 - "$release_app" "$release_architecture" <<'PY'
 import plistlib, subprocess, sys

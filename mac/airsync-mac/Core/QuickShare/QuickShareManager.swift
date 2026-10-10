@@ -92,6 +92,9 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         isRunning = false
         stopDiscovery()
         NearbyConnectionManager.shared.stopVisibility()
+        let notifications = activeIncomingTransfers.keys.map { "transfer_" + $0 }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: notifications)
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: notifications)
         activeIncomingTransfers.removeAll()
         print("[quickshare] Service stopped")
     }
@@ -174,10 +177,12 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
             transferState = .idle
             AppState.shared.showingQuickShareTransfer = false
         case .receiving(let id):
+            activeIncomingTransfers.removeValue(forKey: id)
             NearbyConnectionManager.shared.cancelIncomingTransfer(id: id)
             transferState = .idle
             AppState.shared.showingQuickShareTransfer = false
         case let .incomingAwaitingConsent(meta, _):
+            activeIncomingTransfers.removeValue(forKey: meta.id)
             NearbyConnectionManager.shared.cancelIncomingTransfer(id: meta.id)
             transferState = .idle
             AppState.shared.showingQuickShareTransfer = false
@@ -401,7 +406,8 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     }
     
     public func incomingTransfer(id: String, didFinishWith error: Error?) {
-        if let error = error {
+        let wasActive = activeIncomingTransfers.removeValue(forKey: id) != nil
+        if wasActive && !suspended && !AppState.shared.isSyncPaused, let error = error {
             let content = UNMutableNotificationContent()
             content.title = Localizer.shared.text("transfer_failed")
             content.body = error.localizedDescription
@@ -416,10 +422,10 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["transfer_" + id])
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["transfer_" + id])
-        activeIncomingTransfers.removeValue(forKey: id)
     }
  
     public func transferDidComplete(id: String, urls: [URL]) {
+        guard !suspended && !AppState.shared.isSyncPaused, activeIncomingTransfers[id] != nil else { return }
         print("[quickshare] Transfer \(id) completed on disk with urls: \(urls)")
         self.transferState = .finished
         self.transferProgress = 1.0
@@ -479,6 +485,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     }
     
     public func incomingTransferProgress(id: String, progress: Double) {
+        guard !suspended && !AppState.shared.isSyncPaused, activeIncomingTransfers[id] != nil else { return }
         self.transferProgress = progress
         if case .receiving(let activeID) = transferState, activeID == id {
             // Already in receiving state

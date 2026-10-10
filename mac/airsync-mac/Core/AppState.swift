@@ -37,6 +37,9 @@ class AppState: ObservableObject {
     }
 
     private var notificationSyncTimer: Timer?
+    var hasActiveConnectionMonitoring: Bool {
+        notificationSyncTimer != nil || clipboardCancellable != nil || bleWakeUpWorkItem != nil
+    }
     @Published private(set) var isSyncPaused = UserDefaults.standard.bool(forKey: "isSyncPaused")
 
     private var clipboardCancellable: AnyCancellable?
@@ -234,7 +237,7 @@ class AppState: ObservableObject {
         
         // Ensure dock icon visibility is applied on launch
         updateDockIconVisibility()
-        updateAutoStart()
+        if !LifecycleSelfTest.isRequested { updateAutoStart() }
 
         // Reset mirroring state on launch to prevent auto-opening if it was open during last session
         self.isNativeMirroring = false
@@ -242,6 +245,14 @@ class AppState: ObservableObject {
 
         // Cleanup stale WebDAV mounts from previous sessions
         WebDAVManager.shared.unmount()
+        if !LifecycleSelfTest.isRequested {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                LowBatteryAlertManager.shared.start(appState: self)
+                FloatingPhoneWidgetManager.shared.restoreIfEnabled()
+                WidgetDataManager.shared.start(appState: self)
+            }
+        }
     }
 
     @Published var minAndroidVersion = Bundle.main.infoDictionary?["AndroidVersion"] as? String ?? "2.0.0"
@@ -249,6 +260,9 @@ class AppState: ObservableObject {
     @Published var device: Device? = nil {
         didSet {
             if oldValue?.deviceId != device?.deviceId {
+                // Battery/media status belongs to the previous peer until a
+                // fresh report arrives from the new authenticated connection.
+                status = nil
                 clipboardRetryWorkItem?.cancel()
                 clipboardRetryWorkItem = nil
                 if !clipboardOutbox.isEmpty { clipboardDeliveryStatus = "Clipboard delivery cancelled: device changed" }
@@ -2007,6 +2021,9 @@ class AppState: ObservableObject {
 
     private func handleBLEStatusChange(_ status: BLECentralManager.BLEConnectionStatus) {
         if status == .authenticated {
+            // Combine delivery is queued: a previous authentication must not
+            // recreate a virtual device after pause or transport teardown.
+            guard !isSyncPaused, BLECentralManager.shared.isAuthenticated else { return }
             if self.device == nil {
                 updateVirtualDeviceForBLE()
             }
@@ -2019,12 +2036,19 @@ class AppState: ObservableObject {
             }
             // Resume scanning after BLE disconnect (unless a regular connection is already active)
             let hasRegularConnection = self.device?.isRegularConnection ?? false
-            if isBLEEnabled && !hasRegularConnection && !BLECentralManager.shared.isManuallyDisconnected {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                    if self.isBLEEnabled && !(self.device?.isRegularConnection ?? false) && !BLECentralManager.shared.isAuthenticated {
-                        BLECentralManager.shared.startScanning()
-                    }
+            if !isSyncPaused && isBLEEnabled && isBLEAutoConnectEnabled && !hasRegularConnection
+                && !BLECentralManager.shared.isManuallyDisconnected && !UserDefaults.standard.isManuallyDisconnected {
+                bleWakeUpWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, !self.isSyncPaused, self.isBLEEnabled, self.isBLEAutoConnectEnabled,
+                          !(self.device?.isRegularConnection ?? false), !BLECentralManager.shared.isAuthenticated,
+                          !BLECentralManager.shared.isManuallyDisconnected,
+                          !UserDefaults.standard.isManuallyDisconnected else { return }
+                    self.bleWakeUpWorkItem = nil
+                    BLECentralManager.shared.startScanning()
                 }
+                bleWakeUpWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
             }
         }
     }
@@ -2195,6 +2219,7 @@ class AppState: ObservableObject {
     }
 
     private func updateWidgetData() {
+        guard !LifecycleSelfTest.isRequested else { return }
         let deviceName = device?.name ?? "Your Phone"
         WidgetDataManager.shared.updateWidgetData(
             deviceStatus: status,
@@ -2203,7 +2228,9 @@ class AppState: ObservableObject {
             isLocalNetwork: isConnectedOverLocalNetwork,
             isBLEConnected: BLECentralManager.shared.isAuthenticated,
             isADBConnected: adbConnected,
-            adbMode: adbConnectionMode?.rawValue ?? "wireless"
+            adbMode: adbConnectionMode?.rawValue ?? "wireless",
+            isPaused: isSyncPaused,
+            isConnected: device != nil
         )
     }
 }

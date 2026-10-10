@@ -21,7 +21,7 @@ struct MetalVideoView: NSViewRepresentable {
         // Pass stream client to view for coordinate mapping
         mtkView.streamClient = streamClient
         
-        context.coordinator.setupMetal(device: mtkView.device!)
+        if let device = mtkView.device { context.coordinator.setupMetal(device: device) }
         
         return mtkView
     }
@@ -203,9 +203,15 @@ struct MetalVideoView: NSViewRepresentable {
         }
         
         override func scrollWheel(with event: NSEvent) {
-            guard let client = streamClient, client.videoWidth > 0, client.videoHeight > 0 else { return }
+            guard let client = streamClient,
+                  client.videoWidth > 0, client.videoHeight > 0,
+                  client.videoWidth <= ScrcpyPacketParser.maximumDimension,
+                  client.videoHeight <= ScrcpyPacketParser.maximumDimension,
+                  frame.width.isFinite, frame.height.isFinite,
+                  frame.width > 0, frame.height > 0 else { return }
             
             let point = convert(event.locationInWindow, from: nil)
+            guard point.x.isFinite, point.y.isFinite else { return }
             
             // Coordinate mapping: NSView (flipped Y) to Android (0,0 is top-left)
             let x = Int32(max(0, min(1.0, point.x / frame.width)) * Double(client.videoWidth))
@@ -230,9 +236,15 @@ struct MetalVideoView: NSViewRepresentable {
         }
         
         private func sendTouchEvent(action: UInt8, event: NSEvent) {
-            guard let client = streamClient, client.videoWidth > 0, client.videoHeight > 0 else { return }
+            guard let client = streamClient,
+                  client.videoWidth > 0, client.videoHeight > 0,
+                  client.videoWidth <= ScrcpyPacketParser.maximumDimension,
+                  client.videoHeight <= ScrcpyPacketParser.maximumDimension,
+                  frame.width.isFinite, frame.height.isFinite,
+                  frame.width > 0, frame.height > 0 else { return }
             
             let point = convert(event.locationInWindow, from: nil)
+            guard point.x.isFinite, point.y.isFinite else { return }
             
             // Coordinate mapping: NSView (flipped Y) to Android (0,0 is top-left)
             let x = UInt32(max(0, min(1.0, point.x / frame.width)) * Double(client.videoWidth))
@@ -321,8 +333,9 @@ struct MetalVideoView: NSViewRepresentable {
             CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, buffer, nil, .r8Unorm, width, height, 0, &textureY)
             CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, buffer, nil, .rg8Unorm, width/2, height/2, 1, &textureUV)
             
-            guard let yTex = CVMetalTextureGetTexture(textureY!),
-                  let uvTex = CVMetalTextureGetTexture(textureUV!) else { return }
+            guard let textureY, let textureUV,
+                  let yTex = CVMetalTextureGetTexture(textureY),
+                  let uvTex = CVMetalTextureGetTexture(textureUV) else { return }
             
             guard let commandBuffer = commandQueue.makeCommandBuffer(),
                   let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
@@ -333,6 +346,11 @@ struct MetalVideoView: NSViewRepresentable {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
             
+            // CoreVideo owns the planes backing these textures. Keep wrappers and
+            // the pixel buffer alive until the GPU has actually finished reading.
+            commandBuffer.addCompletedHandler { _ in
+                withExtendedLifetime((buffer, textureY, textureUV)) {}
+            }
             commandBuffer.present(drawable)
             commandBuffer.commit()
         }

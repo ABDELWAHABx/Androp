@@ -14,15 +14,40 @@ class ScrcpyVideoDecoder: NSObject {
     
     private var formatDescription: CMVideoFormatDescription?
     private var decompressionSession: VTDecompressionSession?
+    private let sessionLock = NSRecursiveLock()
+    private let callbackLock = NSLock()
+    private var frameHandler: ((CVPixelBuffer) -> Void)?
     
     // Callback for decoded frames
-    var onDecodedFrame: ((CVPixelBuffer) -> Void)?
+    var onDecodedFrame: ((CVPixelBuffer) -> Void)? {
+        get { callbackLock.lock(); defer { callbackLock.unlock() }; return frameHandler }
+        set { callbackLock.lock(); frameHandler = newValue; callbackLock.unlock() }
+    }
+
+    func reset() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        invalidateSession()
+        formatDescription = nil
+    }
+
+    private func invalidateSession() {
+        if let session = decompressionSession {
+            VTDecompressionSessionFinishDelayedFrames(session)
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
+            VTDecompressionSessionInvalidate(session)
+        }
+        decompressionSession = nil
+    }
     
     func decodePacket(data: Data, isConfig: Bool, pts: UInt64) {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        guard !data.isEmpty, data.count <= ScrcpyPacketParser.maximumPacketSize else { return }
         // Detect VPS (32), SPS (33), or PPS (34) in H.265 Annex-B
         // Start codes are 00 00 00 01
         if data.count > 4 {
-            let naluType = (data[4] & 0x7E) >> 1
+            let naluType = (data[data.startIndex + 4] & 0x7E) >> 1
             if naluType == 32 || naluType == 33 || naluType == 34 {
                 setupDecoder(with: data)
                 return
@@ -37,29 +62,35 @@ class ScrcpyVideoDecoder: NSObject {
         guard let session = decompressionSession else { return }
         
         // Android is Annex-B (00 00 00 01), VideoToolbox is AVCC (length-prefixed)
-        let avccData = annexBToAVCC(data)
+        guard let avccData = ScrcpyPacketParser.avcc(data), !avccData.isEmpty else { return }
         
         var blockBuffer: CMBlockBuffer?
-        let status = avccData.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> OSStatus in
-            return CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: UnsafeMutableRawPointer(mutating: bytes.baseAddress),
-                blockLength: avccData.count,
-                blockAllocator: kCFAllocatorNull,
-                customBlockSource: nil,
-                offsetToData: 0,
-                dataLength: avccData.count,
-                flags: 0,
-                blockBufferOut: &blockBuffer
-            )
-        }
-        
+        // VideoToolbox decodes asynchronously. A block buffer that points into a
+        // temporary Swift Data becomes dangling as soon as this function returns.
+        // Allocate CoreMedia-owned storage and copy bytes while Data is pinned.
+        let status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: avccData.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: avccData.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
         guard status == noErr, let buffer = blockBuffer else { return }
-        
+        let copyStatus = avccData.withUnsafeBytes { bytes -> OSStatus in
+            guard let address = bytes.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(with: address, blockBuffer: buffer,
+                                                 offsetIntoDestination: 0, dataLength: avccData.count)
+        }
+        guard copyStatus == noErr else { return }
+
         var sampleBuffer: CMSampleBuffer?
         let sampleSize = [avccData.count]
         
-        CMSampleBufferCreateReady(
+        let sampleStatus = CMSampleBufferCreateReady(
             allocator: kCFAllocatorDefault,
             dataBuffer: buffer,
             formatDescription: formatDescription,
@@ -71,7 +102,7 @@ class ScrcpyVideoDecoder: NSObject {
             sampleBufferOut: &sampleBuffer
         )
         
-        guard let sample = sampleBuffer else { return }
+        guard sampleStatus == noErr, let sample = sampleBuffer else { return }
         
         var flagsOut: VTDecodeInfoFlags = []
         VTDecompressionSessionDecodeFrame(
@@ -84,45 +115,16 @@ class ScrcpyVideoDecoder: NSObject {
     }
     
     private func setupDecoder(with configData: Data) {
-        // H.265 Configuration Data contains VPS, SPS, PPS
-        // We need to parse these to create the format description
-        // In Annex-B, they are separated by 00 00 00 01
-        
-        let naluStart = Data([0x00, 0x00, 0x00, 0x01])
-        var nalus: [Data] = []
-        
-        var currentIdx = 0
-        while currentIdx < configData.count {
-            // Find next start code
-            if let range = configData.range(of: naluStart, options: [], in: currentIdx..<configData.count) {
-                let segmentEnd = range.lowerBound
-                if segmentEnd > currentIdx {
-                    nalus.append(configData.subdata(in: currentIdx..<segmentEnd))
-                }
-                currentIdx = range.upperBound
-            } else {
-                nalus.append(configData.subdata(in: currentIdx..<configData.count))
-                break
-            }
+        // Only VPS/SPS/PPS belong in a HEVC format description. Limit the count
+        // before the nested pointer-pinning helper to avoid malformed-data recursion.
+        let units = ScrcpyPacketParser.nalUnits(configData)
+        let validNalus = units.filter { unit in
+            guard let first = unit.first, unit.count >= 2 else { return false }
+            return [UInt8(32), 33, 34].contains((first & 0x7E) >> 1)
         }
-        
-        let validNalus = nalus.filter { !$0.isEmpty }
-        
-        // We must ensure the pointers stay valid during the call
-        var parameterSetPointers: [UnsafePointer<UInt8>] = []
-        var parameterSetSizes: [Int] = []
-        
-        let parameterSets = validNalus.map { [UInt8]($0) }
-        for i in 0..<parameterSets.count {
-            parameterSets[i].withUnsafeBufferPointer { buffer in
-                if let baseAddress = buffer.baseAddress {
-                    parameterSetPointers.append(baseAddress)
-                    parameterSetSizes.append(buffer.count)
-                }
-            }
-        }
-        
-        
+        guard validNalus.count == 3,
+              Set(validNalus.compactMap { $0.first.map { ($0 & 0x7E) >> 1 } }).count == 3 else { return }
+        var newDescription: CMVideoFormatDescription?
         let status = validNalus.withUnsafeParameterSets { pointers, sizes, count in
             return CMVideoFormatDescriptionCreateFromHEVCParameterSets(
                 allocator: kCFAllocatorDefault,
@@ -131,19 +133,21 @@ class ScrcpyVideoDecoder: NSObject {
                 parameterSetSizes: sizes,
                 nalUnitHeaderLength: 4,
                 extensions: nil,
-                formatDescriptionOut: &formatDescription
+                formatDescriptionOut: &newDescription
             )
         }
         
-        guard status == noErr, let desc = formatDescription else {
+        guard status == noErr, let desc = newDescription else {
             print("[ScrcpyVideoDecoder] Failed to create format description: \(status)")
             return
         }
         
+        formatDescription = desc
         createSession(with: desc)
     }
     
     private func createSession(with desc: CMVideoFormatDescription) {
+        invalidateSession()
         let destinationImageBufferAttributes: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey as String: true
@@ -151,8 +155,8 @@ class ScrcpyVideoDecoder: NSObject {
         
         var outputCallback = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: { (decompressionOutputRefCon, sourceFrameRefCon, status, infoFlags, imageBuffer, presentationTimeStamp, presentationDuration) in
-                guard status == noErr, let buffer = imageBuffer else { return }
-                let decoder = Unmanaged<ScrcpyVideoDecoder>.fromOpaque(decompressionOutputRefCon!).takeUnretainedValue()
+                guard status == noErr, let buffer = imageBuffer, let refcon = decompressionOutputRefCon else { return }
+                let decoder = Unmanaged<ScrcpyVideoDecoder>.fromOpaque(refcon).takeUnretainedValue()
                 decoder.onDecodedFrame?(buffer)
             },
             decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
@@ -174,47 +178,7 @@ class ScrcpyVideoDecoder: NSObject {
         }
     }
     
-    private func annexBToAVCC(_ data: Data) -> Data {
-        
-        var result = Data()
-        var i = 0
-        while i < data.count {
-            if i + 4 <= data.count && data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1 {
-                let start = i + 4
-                var end = data.count
-                
-                // Search for next start code
-                if let nextRange = data.range(of: Data([0x00, 0x00, 0x00, 0x01]), options: [], in: start..<data.count) {
-                    end = nextRange.lowerBound
-                }
-                
-                let length = UInt32(end - start).bigEndian
-                withUnsafeBytes(of: length) { result.append(contentsOf: $0) }
-                result.append(data.subdata(in: start..<end))
-                i = end
-            } else if i + 3 <= data.count && data[i] == 0 && data[i+1] == 0 && data[i+2] == 1 {
-                // 3-byte start code
-                let start = i + 3
-                var end = data.count
-                if let nextRange = data.range(of: Data([0x00, 0x00, 0x00, 0x01]), options: [], in: start..<data.count) {
-                    end = nextRange.lowerBound
-                }
-                let length = UInt32(end - start).bigEndian
-                withUnsafeBytes(of: length) { result.append(contentsOf: $0) }
-                result.append(data.subdata(in: start..<end))
-                i = end
-            } else {
-                if result.isEmpty {
-                   let length = UInt32(data.count).bigEndian
-                   withUnsafeBytes(of: length) { result.append(contentsOf: $0) }
-                   result.append(data)
-                   break
-                }
-                i += 1
-            }
-        }
-        return result
-    }
+
 }
 
 extension Array where Element == Data {

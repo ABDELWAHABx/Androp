@@ -56,15 +56,36 @@ class BLECentralManager: NSObject, ObservableObject {
     private var scanTimer: Timer?
     private var connectionTimer: Timer?
     private var wifiStabilityTimer: Timer?
+    private var scanRestartWorkItem: DispatchWorkItem?
+    private var scanRestartGeneration = 0
+    private var isTearingDown = false
+    private(set) var sessionGeneration = 0
     
     override init() {
         super.init()
+        // The isolated production-app lifecycle check must not request radio
+        // permissions or create a Bluetooth connection on the CI runner.
+        guard !LifecycleSelfTest.isRequested else { return }
         centralManager = CBCentralManager(delegate: self, queue: nil)
         DispatchQueue.main.async { [weak self] in
             self?.setupWifiStabilityObserver()
         }
     }
     
+    #if BLE_LIFECYCLE_TESTS
+    // The regression harness exercises this exact manager without creating a
+    // Bluetooth radio or initializing the rest of the application.
+    init(testingWithoutRadio: Bool) {
+        super.init()
+        precondition(testingWithoutRadio)
+    }
+
+    var hasPendingScanRestartForTesting: Bool { scanRestartWorkItem != nil }
+    func scheduleScanRestartForTesting(after delay: TimeInterval) {
+        scheduleAutomaticScanRestart(after: delay)
+    }
+    #endif
+
     private func setupWifiStabilityObserver() {
         AppState.shared.$device
             .receive(on: DispatchQueue.main)
@@ -101,7 +122,11 @@ class BLECentralManager: NSObject, ObservableObject {
     }
     
     func startScanning() {
-        guard centralManager.state == .poweredOn, AppState.shared.isBLEEnabled, !AppState.shared.isSyncPaused,
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.startScanning() }
+            return
+        }
+        guard !isTearingDown, centralManager?.state == .poweredOn, AppState.shared.isBLEEnabled, !AppState.shared.isSyncPaused,
               discoveredPeripheral == nil, connectingDeviceUUID == nil else { return }
         
         let isRegularConnection = AppState.shared.device?.ipAddress != nil && AppState.shared.device?.ipAddress != "BLE" && AppState.shared.device?.ipAddress != "Bluetooth LE"
@@ -110,6 +135,7 @@ class BLECentralManager: NSObject, ObservableObject {
             return
         }
         
+        cancelPendingScanRestart()
         print("[BLE] Starting scan...")
         connectionStatus = .scanning
         
@@ -124,7 +150,12 @@ class BLECentralManager: NSObject, ObservableObject {
             MainActor.assumeIsolated {
                 guard let self = self else { return }
                 // Skip restart cycle when already connected — nothing to rediscover
-                guard self.connectionStatus == .scanning else { return }
+                guard self.connectionStatus == .scanning, self.discoveredPeripheral == nil,
+                      self.centralManager?.state == .poweredOn, AppState.shared.isBLEEnabled,
+                      !AppState.shared.isSyncPaused, !self.isTearingDown else {
+                    self.stopScanning()
+                    return
+                }
 
                 // Prune stale devices older than 25 seconds
                 let now = Date()
@@ -140,33 +171,78 @@ class BLECentralManager: NSObject, ObservableObject {
     }
     
     func stopScanning() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.stopScanning() }
+            return
+        }
+        cancelPendingScanRestart()
         scanTimer?.invalidate()
         scanTimer = nil
-        centralManager.stopScan()
-        if connectionStatus == .scanning {
-            disconnect()
-        }
+        centralManager?.stopScan()
+        // Stopping discovery must never call disconnect: disconnect itself
+        // stops discovery. That cycle exhausted the stack when paused while
+        // scanning, even with no paired or connected phone.
+        if connectionStatus == .scanning { connectionStatus = .disconnected }
     }
-    
+
     func disconnect(restartScanning: Bool = false) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.disconnect(restartScanning: restartScanning) }
+            return
+        }
+        guard !isTearingDown else { return }
+        isManuallyDisconnected = !restartScanning
+        tearDownConnection(cancelPeripheral: true)
+        if restartScanning { startScanning() }
+    }
+
+    private func tearDownConnection(cancelPeripheral: Bool) {
+        guard !isTearingDown else { return }
+        isTearingDown = true
+        sessionGeneration &+= 1
+        defer { isTearingDown = false }
         stopScanning()
         connectionTimer?.invalidate()
         connectionTimer = nil
         wifiStabilityTimer?.invalidate()
         wifiStabilityTimer = nil
-        isManuallyDisconnected = true
-        if let peripheral = discoveredPeripheral {
-            peripheral.delegate = nil
-            centralManager.cancelPeripheralConnection(peripheral)
-        }
-        clearTransportState()
+        let previousPeripheral = discoveredPeripheral
+        // Forget the old session before cancellation or published changes can
+        // invoke callbacks. Late callbacks must not resurrect or clear a new one.
         discoveredPeripheral = nil
-        connectionStatus = .disconnected
         connectingDeviceUUID = nil
+        clearTransportState()
+        connectionStatus = .disconnected
         connectedDeviceName = nil
         discoveredPeripherals.removeAll()
+        previousPeripheral?.delegate = nil
+        if cancelPeripheral, let peripheral = previousPeripheral,
+           centralManager?.state == .poweredOn {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
         if AppState.shared.device?.isBLE == true { AppState.shared.device = nil }
-        if restartScanning { startScanning() }
+    }
+
+    private func cancelPendingScanRestart() {
+        scanRestartGeneration &+= 1
+        scanRestartWorkItem?.cancel()
+        scanRestartWorkItem = nil
+    }
+
+    private func scheduleAutomaticScanRestart(after delay: TimeInterval) {
+        cancelPendingScanRestart()
+        guard AppState.shared.isBLEEnabled, AppState.shared.isBLEAutoConnectEnabled,
+              !AppState.shared.isSyncPaused, !isManuallyDisconnected, !isTearingDown else { return }
+        let generation = scanRestartGeneration
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self, self.scanRestartGeneration == generation else { return }
+            self.scanRestartWorkItem = nil
+            guard AppState.shared.isBLEEnabled, AppState.shared.isBLEAutoConnectEnabled,
+                  !AppState.shared.isSyncPaused, !self.isManuallyDisconnected else { return }
+            self.startScanning()
+        }
+        scanRestartWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     private func clearTransportState() {
@@ -258,7 +334,13 @@ class BLECentralManager: NSObject, ObservableObject {
     }
     
     func connectManually(toUuid uuidStr: String) {
-        guard AppState.shared.isBLEEnabled, !AppState.shared.isSyncPaused else { return }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.connectManually(toUuid: uuidStr) }
+            return
+        }
+        guard !isTearingDown, centralManager?.state == .poweredOn,
+              AppState.shared.isBLEEnabled, !AppState.shared.isSyncPaused,
+              discoveredPeripheral == nil, connectingDeviceUUID == nil else { return }
         let token = UserDefaults.standard.string(forKey: "bleAuthToken") ?? ""
         if token.isEmpty {
             print("[BLE] Cannot connect manually: Devices have never been paired via QR/Wi-Fi before.")
@@ -275,29 +357,19 @@ class BLECentralManager: NSObject, ObservableObject {
         print("[BLE] Manual connection requested for \(peripheral.name ?? "Unknown")")
         
         isManuallyDisconnected = false
+        stopScanning()
         discoveredPeripheral = peripheral
-        centralManager.stopScan()
-        scanTimer?.invalidate()
-        scanTimer = nil
-        
         connectingDeviceUUID = uuidStr
         centralManager.connect(peripheral, options: [
             CBConnectPeripheralOptionNotifyOnDisconnectionKey: true
         ])
         
         connectionTimer?.invalidate()
-        connectionTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
+        connectionTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self, weak peripheral] _ in
+            guard let self = self, let peripheral = peripheral,
+                  self.discoveredPeripheral === peripheral else { return }
             print("[BLE] Manual connection timed out, cancelling...")
-            if let p = self.discoveredPeripheral {
-                p.delegate = nil
-                self.centralManager.cancelPeripheralConnection(p)
-            }
-            self.discoveredPeripheral = nil
-            self.connectingDeviceUUID = nil
-            self.connectionStatus = .disconnected
-            self.clearTransportState()
-            self.connectionTimer = nil
+            self.tearDownConnection(cancelPeripheral: true)
         }
     }
     
@@ -313,7 +385,9 @@ extension BLECentralManager: CBCentralManagerDelegate {
             }
         } else {
             print("[BLE] Bluetooth state changed: \(central.state.rawValue)")
-            connectionStatus = .disconnected
+            // Radio-off previously only changed the label: stale peripherals,
+            // pending writes and timers survived and prevented reconnection.
+            tearDownConnection(cancelPeripheral: false)
         }
     }
     
@@ -345,10 +419,9 @@ extension BLECentralManager: CBCentralManagerDelegate {
                 return
             }
             
+            stopScanning()
             discoveredPeripheral = peripheral
-            centralManager.stopScan()
-            scanTimer?.invalidate()
-            scanTimer = nil
+            connectingDeviceUUID = uuidStr
             
             print("[BLE] Attempting auto-connect to \(name)...")
             centralManager.connect(peripheral, options: [
@@ -357,43 +430,33 @@ extension BLECentralManager: CBCentralManagerDelegate {
             
             // CoreBluetooth connect() has no timeout — it can hang forever with stale pairing data.
             connectionTimer?.invalidate()
-            connectionTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
-                guard let self = self else { return }
+            connectionTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self, weak peripheral] _ in
+                guard let self = self, let peripheral = peripheral,
+                      self.discoveredPeripheral === peripheral else { return }
                 print("[BLE] Connection timed out, cancelling and retrying...")
-                if let p = self.discoveredPeripheral {
-                    p.delegate = nil
-                    self.centralManager.cancelPeripheralConnection(p)
-                }
-                self.discoveredPeripheral = nil
-                self.connectionStatus = .disconnected
-                self.clearTransportState()
-                self.connectingDeviceUUID = nil
-                self.connectionTimer = nil
-                
-                if AppState.shared.isBLEAutoConnectEnabled && !self.isManuallyDisconnected {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        self.startScanning()
-                    }
-                }
+                self.tearDownConnection(cancelPeripheral: true)
+                self.scheduleAutomaticScanRestart(after: 2.0)
             }
         }
     }
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused, AppState.shared.isBLEEnabled else {
-            central.cancelPeripheralConnection(peripheral)
+        let isWiFiConnected = AppState.shared.device != nil && AppState.shared.device?.isBLE == false
+        guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused,
+              AppState.shared.isBLEEnabled, !isWiFiConnected else {
+            if peripheral === discoveredPeripheral { tearDownConnection(cancelPeripheral: true) }
+            else { central.cancelPeripheralConnection(peripheral) }
             return
         }
         connectionTimer?.invalidate()
-        connectionTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
-            self?.disconnect()
+        connectionTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self, weak peripheral] _ in
+            guard let self = self, let peripheral = peripheral,
+                  self.discoveredPeripheral === peripheral else { return }
+            self.disconnect()
         }
         connectingDeviceUUID = nil
         clearTransportState()
-        discoveredServices.removeAll()
-        requestedServices.removeAll()
-        characteristics.removeAll()
-        hasAttemptedAuth = false
+        sessionGeneration &+= 1
         let name = peripheral.name ?? "Unknown Device"
         let maxWrite = peripheral.maximumWriteValueLength(for: .withoutResponse)
         print("[BLE] Connected to \(name), Max Write Length: \(maxWrite)")
@@ -405,61 +468,23 @@ extension BLECentralManager: CBCentralManagerDelegate {
     
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard peripheral === discoveredPeripheral else { return }
-        peripheral.delegate = nil
-        clearTransportState()
-        connectionTimer?.invalidate()
-        connectionTimer = nil
-        connectingDeviceUUID = nil
         print("[BLE] Failed to connect: \(error?.localizedDescription ?? "Unknown error")")
-        connectionStatus = .disconnected
-        discoveredPeripheral = nil
-        characteristics.removeAll()
-        discoveredServices.removeAll()
-        hasAttemptedAuth = false
-        
-        // Retry scanning after a delay
-        if AppState.shared.isBLEAutoConnectEnabled && !isManuallyDisconnected {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                self.startScanning()
-            }
-        }
+        tearDownConnection(cancelPeripheral: false)
+        scheduleAutomaticScanRestart(after: 3.0)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard peripheral === discoveredPeripheral else { return }
-        peripheral.delegate = nil
-        clearTransportState()
-        connectionTimer?.invalidate()
-        connectionTimer = nil
-        
         print("[BLE] Disconnected: \(error?.localizedDescription ?? "clean")")
-        connectionStatus = .disconnected
-        connectingDeviceUUID = nil
-        discoveredPeripheral = nil
-        connectedDeviceName = nil
-        characteristics.removeAll()
-        chunkBuffers.removeAll()
-        discoveredServices.removeAll()
-        requestedServices.removeAll()
-        hasAttemptedAuth = false
-        
-        DispatchQueue.main.async {
-            if AppState.shared.device?.ipAddress == "Bluetooth LE" || AppState.shared.device?.ipAddress == "BLE" {
-                AppState.shared.device = nil
-            }
-        }
-        
-        if AppState.shared.isBLEAutoConnectEnabled && !isManuallyDisconnected {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                self.startScanning()
-            }
-        }
+        tearDownConnection(cancelPeripheral: false)
+        scheduleAutomaticScanRestart(after: 3.0)
     }
 }
 
 extension BLECentralManager: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        guard peripheral === discoveredPeripheral else { return }
+        guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused,
+              AppState.shared.isBLEEnabled else { return }
         if let error = error {
             print("[BLE] Error discovering services: \(error.localizedDescription)")
             return
@@ -475,7 +500,8 @@ extension BLECentralManager: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        guard peripheral === discoveredPeripheral else { return }
+        guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused,
+              AppState.shared.isBLEEnabled else { return }
         if let error = error {
             print("[BLE] Error discovering characteristics for \(service.uuid): \(error.localizedDescription)")
             return
@@ -539,8 +565,11 @@ extension BLECentralManager: CBPeripheralDelegate {
                 connectedDeviceName = devName
                 
                 let bleDeviceId = discoveredPeripheral?.identifier.uuidString ?? ""
-                DispatchQueue.main.async {
-                    guard self.isAuthenticated, !AppState.shared.isSyncPaused else { return }
+                let generation = sessionGeneration
+                DispatchQueue.main.async { [weak self, weak peripheral] in
+                    guard let self = self, let peripheral = peripheral,
+                          self.discoveredPeripheral === peripheral, self.sessionGeneration == generation,
+                          self.isAuthenticated, !AppState.shared.isSyncPaused else { return }
                     if AppState.shared.device == nil || AppState.shared.device?.isBLE == true {
                         AppState.shared.device = Device(
                             name: devName,
@@ -553,11 +582,21 @@ extension BLECentralManager: CBPeripheralDelegate {
                     }
                 }
                 
+                // Initial discovery can read the standard battery before auth.
+                // Request it again now so the authenticated session receives an
+                // actual percentage instead of waiting for the next battery change.
+                if let battery = characteristics[BLEConstants.charBatteryLevel], battery.properties.contains(.read) {
+                    peripheral.readValue(for: battery)
+                }
+
                 // Immediately notify Android of Mac status
                 WebSocketServer.shared.sendMacStatusOverBLE()
                 
                 // Also trigger a status update (which includes current media info)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self, weak peripheral] in
+                    guard let self = self, let peripheral = peripheral,
+                          self.discoveredPeripheral === peripheral, self.sessionGeneration == generation, self.isAuthenticated,
+                          !AppState.shared.isSyncPaused, AppState.shared.isBLEEnabled else { return }
                     MacInfoSyncManager.shared.forceRefresh()
                 }
             } else {
@@ -565,13 +604,21 @@ extension BLECentralManager: CBPeripheralDelegate {
                 disconnect()
             }
         case BLEConstants.charBatteryLevel:
-            let level = Int(data.first ?? 0)
+            guard let level = BLEConstants.batteryLevel(from: data) else {
+                print("[BLE] Ignoring malformed Android battery packet")
+                return
+            }
             print("[BLE] Received Android Battery: \(level)%")
-            DispatchQueue.main.async {
+            let generation = sessionGeneration
+            DispatchQueue.main.async { [weak self, weak peripheral] in
+                guard let self = self, let peripheral = peripheral,
+                      self.discoveredPeripheral === peripheral, self.sessionGeneration == generation, self.isAuthenticated,
+                      !AppState.shared.isSyncPaused else { return }
                 if AppState.shared.status == nil {
                     AppState.shared.status = DeviceStatus(battery: DeviceStatus.Battery(level: level, isCharging: false), isPaired: true, music: nil)
                 } else {
                     AppState.shared.status?.battery.level = level
+                    AppState.shared.status?.battery.isReported = true
                 }
             }
         case BLEConstants.charNotificationData, BLEConstants.charMediaState, BLEConstants.charClipboardDataNotify, BLEConstants.charDeviceName, BLEConstants.charNotificationDismissNotify, BLEConstants.charMacControl:
@@ -593,7 +640,8 @@ extension BLECentralManager: CBPeripheralDelegate {
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        guard peripheral === discoveredPeripheral else { return }
+        guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused,
+              AppState.shared.isBLEEnabled else { return }
         if let error = error {
             print("[BLE] Error updating notification state for characteristic \(characteristic.uuid): \(error.localizedDescription)")
         } else {

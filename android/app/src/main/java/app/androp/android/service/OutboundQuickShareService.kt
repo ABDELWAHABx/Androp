@@ -57,6 +57,7 @@ class OutboundQuickShareService : Service() {
     private var connection: OutboundQuickShareConnection? = null
     private val connecting = java.util.concurrent.atomic.AtomicBoolean(false)
     private var activeStart = false
+    private var foregroundReady = false
     @Volatile
     private var pendingSocket: Socket? = null
     private var outgoingCacheFiles: List<File> = emptyList()
@@ -65,11 +66,12 @@ class OutboundQuickShareService : Service() {
         super.onCreate()
         createNotificationChannel()
         dataStoreManager = DataStoreManager.getInstance(this)
-        SyncDashboardController.acquire(this, SyncDashboardController.OWNER_SEND,
+        foregroundReady = SyncDashboardController.acquire(this, SyncDashboardController.OWNER_SEND,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE, "Preparing to send...")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!foregroundReady) { stopSelf(); return START_NOT_STICKY }
         val uris: List<Uri> = intent?.getParcelableArrayListExtra(EXTRA_URIS) ?: emptyList()
         if (uris.isEmpty()) {
             Log.w(TAG, "No files to send, stopping")
@@ -298,9 +300,11 @@ class OutboundQuickShareService : Service() {
         connection?.closeConnection()
         // Clean up the cache copies QuickShareSendActivity made (see copyUrisToCache) now that
         // this transfer attempt is done, successful or not.
-        val cacheRoot = File(cacheDir, "quickshare_outgoing").canonicalFile
-        outgoingCacheFiles.forEach { file ->
-            if (file.canonicalFile.parentFile == cacheRoot) runCatching { file.delete() }
+        runCatching {
+            val cacheRoot = File(cacheDir, "quickshare_outgoing").canonicalFile
+            outgoingCacheFiles.forEach { file ->
+                runCatching { if (file.canonicalFile.parentFile == cacheRoot) file.delete() }
+            }
         }
         SyncDashboardController.release(this, SyncDashboardController.OWNER_SEND)
         super.onDestroy()

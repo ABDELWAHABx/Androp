@@ -8,6 +8,7 @@
 import WidgetKit
 import SwiftUI
 import AppKit
+import ImageIO
 
 struct PhoneInfoEntry: TimelineEntry {
     let date: Date
@@ -24,6 +25,9 @@ struct PhoneInfoEntry: TimelineEntry {
     let musicTitle: String
     let musicArtist: String
     let musicAlbumArtData: Data?
+    var batteryKnown: Bool = true
+    var statusMessage: String = ""
+    var lastUpdated: Date? = nil
 }
 
 struct PhoneInfoWidgetEntryView: View {
@@ -67,7 +71,9 @@ struct PhoneInfoWidgetEntryView: View {
                     .lineLimit(1)
                     .foregroundColor(.primary)
 
-                BatteryIconView(level: entry.batteryLevel, isCharging: entry.isCharging)
+                if entry.batteryKnown {
+                    BatteryIconView(level: entry.batteryLevel, isCharging: entry.isCharging)
+                }
             }
             .widgetAccentable()
         }
@@ -128,6 +134,8 @@ struct PhoneInfoWidgetEntryView: View {
                      endPoint: .bottom
                  )
                  .ignoresSafeArea()
+            } else {
+                LinearGradient(colors: [.indigo, .blue.opacity(0.8)], startPoint: .topLeading, endPoint: .bottomTrailing)
             }
 
             VStack(spacing: 0) {
@@ -178,7 +186,9 @@ struct PhoneInfoWidgetEntryView: View {
                 Image(systemName: "bluetooth")
                     .font(.system(size: 10))
             }
-            BatteryIconView(level: entry.batteryLevel, isCharging: entry.isCharging)
+            if entry.batteryKnown {
+                BatteryIconView(level: entry.batteryLevel, isCharging: entry.isCharging)
+            }
         }
         .foregroundColor(.white)
         .padding(.horizontal, 10)
@@ -251,7 +261,9 @@ struct PhoneInfoWidgetEntryView: View {
                 Image(systemName: "bluetooth")
                     .font(.system(size: 10))
             }
-            BatteryIconView(level: entry.batteryLevel, isCharging: entry.isCharging)
+            if entry.batteryKnown {
+                BatteryIconView(level: entry.batteryLevel, isCharging: entry.isCharging)
+            }
         }
         .foregroundColor(.secondary)
         .widgetAccentable()
@@ -328,6 +340,9 @@ struct PhoneInfoWidgetEntryView: View {
                 .lineLimit(1)
                 .foregroundColor(.primary)
                 .widgetAccentable()
+            Text(entry.statusMessage.isEmpty ? "Phone offline" : entry.statusMessage)
+                .font(.caption2).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).lineLimit(3)
         }
         .padding(12)
         .padding(contentMargins)
@@ -350,51 +365,67 @@ struct PhoneInfoWidget: Widget {
 }
 
 struct PhoneInfoProvider: TimelineProvider {
-    private var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: APP_GROUP_IDENTIFIER)
+    private func getSharedData() -> PhoneInfoEntry {
+        guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: APP_GROUP_IDENTIFIER) else {
+            var empty = placeholderEntry()
+            empty.statusMessage = "Use the floating widget in androp settings, or configure App Group signing."
+            return empty
+        }
+        let file = group.appendingPathComponent("phone-widget-snapshot.json")
+        guard let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 0, size <= 5_000_000,
+              let data = try? Data(contentsOf: file),
+              let shared = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            var empty = placeholderEntry()
+            empty.statusMessage = "Open androp to publish phone status."
+            return empty
+        }
+        func image(_ key: String, limit: Int) -> Data? {
+            guard let value = shared[key] as? String, !value.isEmpty, value.utf8.count <= limit else { return nil }
+            guard let data = Data(base64Encoded: value),
+                  let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                  width > 0, height > 0, width <= 4096, height <= 4096,
+                  width * height <= 8_000_000 else { return nil }
+            return data
+        }
+        let updated = (shared["updatedAt"] as? Double).map { Date(timeIntervalSince1970: $0) }
+        let paused = shared["isPaused"] as? Bool ?? false
+        let connected = !paused && (shared["isPaired"] as? Bool ?? false)
+        var entry = PhoneInfoEntry(
+            date: Date(),
+            deviceName: String((shared["deviceName"] as? String ?? "Your phone").prefix(200)),
+            batteryLevel: min(100, max(0, shared["batteryLevel"] as? Int ?? 0)),
+            isCharging: shared["isCharging"] as? Bool ?? false,
+            isPaired: connected,
+            wallpaperImageData: image("wallpaperBase64", limit: 3_000_000),
+            isLocalNetwork: connected && (shared["isLocalNetwork"] as? Bool ?? false),
+            isBLEConnected: connected && (shared["isBLEConnected"] as? Bool ?? false),
+            isADBConnected: connected && (shared["isADBConnected"] as? Bool ?? false),
+            adbMode: shared["adbMode"] as? String ?? "wireless",
+            isMusicPlaying: connected && (shared["isMusicPlaying"] as? Bool ?? false),
+            musicTitle: String((shared["musicTitle"] as? String ?? "").prefix(500)),
+            musicArtist: String((shared["musicArtist"] as? String ?? "").prefix(500)),
+            musicAlbumArtData: image("musicAlbumArt", limit: 1_000_000))
+        entry.batteryKnown = shared["batteryKnown"] as? Bool ?? false
+        entry.lastUpdated = updated
+        entry.statusMessage = paused ? "Paused" : "Phone offline"
+        // A cached snapshot is not evidence of a live connection after the app stops.
+        if connected, let updated, Date().timeIntervalSince(updated) > 15 * 60 {
+            entry.isPaired = false
+            entry.statusMessage = "Last known status · open androp to refresh"
+        }
+        return entry
     }
 
-    private func getSharedData() -> PhoneInfoEntry {
-        let shared = sharedDefaults
-        let deviceName = shared?.string(forKey: WIDGET_DATA_KEYS.deviceName) ?? "Unknown"
-        let batteryLevel = shared?.integer(forKey: WIDGET_DATA_KEYS.batteryLevel) ?? 0
-        let isCharging = shared?.bool(forKey: WIDGET_DATA_KEYS.isCharging) ?? false
-        let isPaired = shared?.bool(forKey: WIDGET_DATA_KEYS.isPaired) ?? false
-
-        var wallpaperData: Data? = nil
-        if let base64String = shared?.string(forKey: WIDGET_DATA_KEYS.wallpaperBase64) {
-            wallpaperData = Data(base64Encoded: base64String)
-        }
-
-        let isLocalNetwork = shared?.bool(forKey: WIDGET_DATA_KEYS.isLocalNetwork) ?? false
-        let isBLEConnected = shared?.bool(forKey: WIDGET_DATA_KEYS.isBLEConnected) ?? false
-        let isADBConnected = shared?.bool(forKey: WIDGET_DATA_KEYS.isADBConnected) ?? false
-        let adbMode = shared?.string(forKey: WIDGET_DATA_KEYS.adbMode) ?? "wireless"
-
-        let isMusicPlaying = shared?.bool(forKey: WIDGET_DATA_KEYS.isMusicPlaying) ?? false
-        let musicTitle = shared?.string(forKey: WIDGET_DATA_KEYS.musicTitle) ?? ""
-        let musicArtist = shared?.string(forKey: WIDGET_DATA_KEYS.musicArtist) ?? ""
-        var musicAlbumArtData: Data? = nil
-        if let albumArtBase64 = shared?.string(forKey: WIDGET_DATA_KEYS.musicAlbumArt), !albumArtBase64.isEmpty {
-            musicAlbumArtData = Data(base64Encoded: albumArtBase64)
-        }
-
-        return PhoneInfoEntry(
-            date: Date(),
-            deviceName: deviceName,
-            batteryLevel: batteryLevel,
-            isCharging: isCharging,
-            isPaired: isPaired,
-            wallpaperImageData: wallpaperData,
-            isLocalNetwork: isLocalNetwork,
-            isBLEConnected: isBLEConnected,
-            isADBConnected: isADBConnected,
-            adbMode: adbMode,
-            isMusicPlaying: isMusicPlaying,
-            musicTitle: musicTitle,
-            musicArtist: musicArtist,
-            musicAlbumArtData: musicAlbumArtData
-        )
+    private func placeholderEntry() -> PhoneInfoEntry {
+        PhoneInfoEntry(date: Date(), deviceName: "androp", batteryLevel: 0,
+                       isCharging: false, isPaired: false, wallpaperImageData: nil,
+                       isLocalNetwork: false, isBLEConnected: false, isADBConnected: false,
+                       adbMode: "wireless", isMusicPlaying: false, musicTitle: "",
+                       musicArtist: "", musicAlbumArtData: nil, batteryKnown: false)
     }
 
     func placeholder(in context: Context) -> PhoneInfoEntry {
@@ -422,7 +453,7 @@ struct PhoneInfoProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<PhoneInfoEntry>) -> ()) {
         let currentDate = Date()
-        let refreshDate = Calendar.current.date(byAdding: .second, value: 30, to: currentDate)!
+        let refreshDate = currentDate.addingTimeInterval(15 * 60)
 
         let entry = getSharedData()
         let timeline = Timeline(entries: [entry], policy: .after(refreshDate))

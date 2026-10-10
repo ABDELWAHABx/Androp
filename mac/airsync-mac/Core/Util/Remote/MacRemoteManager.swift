@@ -89,6 +89,7 @@ class MacRemoteManager: ObservableObject {
     // MARK: - Input Simulation
     
     func simulateMouseRelativeMove(dx: CGFloat, dy: CGFloat) {
+        guard dx.isFinite, dy.isFinite, abs(dx) <= 1_000_000, abs(dy) <= 1_000_000 else { return }
         let mouseLoc = NSEvent.mouseLocation
         
         // Convert Cocoa coordinates (bottom-left) to CoreGraphics (top-left)
@@ -121,11 +122,15 @@ class MacRemoteManager: ObservableObject {
 
     func simulateMouseScroll(dx: CGFloat, dy: Double) {
         // wheel1 is vertical, wheel2 is horizontal
-        let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(dy), wheel2: Int32(dx), wheel3: 0)
+        guard let vertical = MacRemoteInputPolicy.scrollDelta(dy),
+              let horizontal = MacRemoteInputPolicy.scrollDelta(Double(dx)) else { return }
+        let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                            wheel1: vertical, wheel2: horizontal, wheel3: 0)
         event?.post(tap: .cghidEventTap)
     }
 
     func simulateKeyCode(_ code: Int, modifiers: [String] = []) {
+        guard let code = MacRemoteInputPolicy.keyCode(code) else { return }
         let flags = parseModifiers(modifiers)
         let src: CGEventSource? = nil // Better compatibility for system shortcuts
         
@@ -219,7 +224,7 @@ class MacRemoteManager: ObservableObject {
     
     func getVolume() -> Int {
         let vol = getSystemVolume()
-        return Int(vol * 100)
+        return MacRemoteInputPolicy.volumePercent(vol)
     }
     
     func increaseVolume() {

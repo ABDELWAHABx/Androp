@@ -23,6 +23,7 @@ struct airsync_macApp: App {
     @StateObject private var macInfoSyncManager = MacInfoSyncManager.shared
 
     init() {
+        if LifecycleSelfTest.isRequested { return }
 
         // Initialize NowPlayingPublisher for MPNowPlayingInfoCenter integration
         NowPlayingPublisher.shared.start()
@@ -70,7 +71,9 @@ struct airsync_macApp: App {
 
     var body: some Scene {
         Window("androp", id: "main") {
-            if #available(macOS 15.0, *) {
+            if LifecycleSelfTest.isRequested {
+                Color.clear.frame(width: 1, height: 1)
+            } else if #available(macOS 15.0, *) {
                 HomeView()
                     .containerBackground(.ultraThinMaterial, for: .window)
                     .applyMainWindowSetup(appDelegate: appDelegate, appState: appState)
@@ -170,10 +173,12 @@ struct airsync_macApp: App {
                     }
                 }
                 
+                #if DEBUG
                 Button("Simulate Crash") {
                     fatalError("Simulated Crash for Testing KSCrash")
                 }
                 .keyboardShortcut("c", modifiers: [.option, .command])
+                #endif
             }
             // Mirror menu: launch full device mirror or specific apps via scrcpy
             CommandMenu("Mirror") {

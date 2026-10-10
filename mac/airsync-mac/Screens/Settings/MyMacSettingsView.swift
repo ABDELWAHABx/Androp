@@ -20,6 +20,8 @@ struct MyMacSettingsView: View {
                 .padding()
                 .glassBoxIfAvailable(radius: 18)
 
+                PhoneExtrasSettingsView()
+
                 SettingsHeaderView(title: "Power", icon: "moon.zzz")
                 VStack(alignment: .leading, spacing: 10) {
                     Toggle("Keep Mac awake during active sync", isOn: $appState.keepAwakeEnabled)

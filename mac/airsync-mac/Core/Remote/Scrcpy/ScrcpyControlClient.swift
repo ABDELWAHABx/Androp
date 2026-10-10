@@ -15,6 +15,7 @@ class ScrcpyControlClient {
     private let queue = DispatchQueue(label: "app.androp.mac.scrcpy.control")
     
     func connect(host: String = "127.0.0.1", port: UInt16 = 1234) {
+        disconnect()
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(integerLiteral: port))
         let connection = NWConnection(to: endpoint, using: .tcp)
         
@@ -117,6 +118,7 @@ class ScrcpyControlClient {
     }
     
     private func floatToI16fp(_ f: Float) -> Int16 {
+        guard f.isFinite else { return 0 }
         let clamped = max(-1.0, min(1.0, f))
         var i = Int32(clamped * 32768.0)
         if i >= 32767 {

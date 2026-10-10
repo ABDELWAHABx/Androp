@@ -7,7 +7,7 @@ class BLETransportBridge {
     static let shared = BLETransportBridge()
     
     func handleIncoming(uuid: CBUUID, payload: String) {
-        guard !AppState.shared.isSyncPaused else { return }
+        guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated else { return }
         let components = payload.components(separatedBy: BLEConstants.delimiter)
         
         switch uuid {
@@ -42,8 +42,10 @@ class BLETransportBridge {
         let action = components[1]
         let value = components.count >= 3 ? components[2] : nil
         
+        let generation = BLECentralManager.shared.sessionGeneration
         DispatchQueue.main.async {
-            guard !AppState.shared.isSyncPaused else { return }
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
             switch type {
             case "media":
                 WebSocketServer.shared.handleMediaControl(action: action)
@@ -77,7 +79,12 @@ class BLETransportBridge {
              "media_play_pause", "media_next", "media_prev", "vol_up", "vol_down", "vol_mute": break
         default: return
         }
-        DispatchQueue.main.async { MacPowerManager.shared.noteRemoteActivity() }
+        let generation = BLECentralManager.shared.sessionGeneration
+        DispatchQueue.main.async {
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
+            MacPowerManager.shared.noteRemoteActivity()
+        }
         print("[ble] Received remote control: \(action)\(value.map { ", value: \($0)" } ?? "")")
         switch action {
         case "arrow_up": MacRemoteManager.shared.simulateKey(.upArrow)
@@ -153,8 +160,10 @@ class BLETransportBridge {
             actions: actions
         )
         
+        let generation = BLECentralManager.shared.sessionGeneration
         DispatchQueue.main.async {
-            guard !AppState.shared.isSyncPaused else { return }
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
             AppState.shared.addNotification(notif)
         }
     }
@@ -169,8 +178,10 @@ class BLETransportBridge {
         let likeStatus = components[5]
         
         // Update AppState.status
+        let generation = BLECentralManager.shared.sessionGeneration
         DispatchQueue.main.async {
-            guard !AppState.shared.isSyncPaused else { return }
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
             let music = DeviceStatus.Music(
                 isPlaying: isPlaying,
                 title: title,
@@ -185,7 +196,7 @@ class BLETransportBridge {
             )
             
             if AppState.shared.status == nil {
-                AppState.shared.status = DeviceStatus(battery: DeviceStatus.Battery(level: 0, isCharging: false), isPaired: true, music: music)
+                AppState.shared.status = DeviceStatus(battery: DeviceStatus.Battery(level: 0, isCharging: false, isReported: false), isPaired: true, music: music)
             } else {
                 AppState.shared.status?.music = music
             }
@@ -193,8 +204,10 @@ class BLETransportBridge {
     }
     
     private func handleClipboard(_ text: String) {
+        let generation = BLECentralManager.shared.sessionGeneration
         DispatchQueue.main.async {
-            guard !AppState.shared.isSyncPaused else { return }
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
             if let bytes = text.data(using: .utf8),
                let envelope = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                envelope["andropClipboard"] as? Int == 1,
@@ -210,8 +223,10 @@ class BLETransportBridge {
 
     private func handleDeviceName(_ name: String) {
         print("[ble] Received device name: \(name)")
+        let generation = BLECentralManager.shared.sessionGeneration
         DispatchQueue.main.async {
-            guard !AppState.shared.isSyncPaused else { return }
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
             BLECentralManager.shared.connectedDeviceName = name
             if AppState.shared.device != nil {
                 AppState.shared.device?.name = name
@@ -221,8 +236,10 @@ class BLETransportBridge {
     
     private func handleNotificationDismiss(_ id: String) {
         print("[ble] Received notification dismissal: \(id)")
+        let generation = BLECentralManager.shared.sessionGeneration
         DispatchQueue.main.async {
-            guard !AppState.shared.isSyncPaused else { return }
+            guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
+                  BLECentralManager.shared.sessionGeneration == generation else { return }
             AppState.shared.removeNotificationById(id)
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
         }

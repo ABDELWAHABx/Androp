@@ -40,6 +40,13 @@ struct BLEConstants {
     static let authSuccess: UInt8 = 0x01
     static let authFailed: UInt8 = 0x00
 
+    // The battery characteristic contains exactly one percentage byte.
+    // Empty/truncated or extended values must not become a false 0% alert.
+    static func batteryLevel(from data: Data) -> Int? {
+        guard data.count == 1, let level = data.first, level <= 100 else { return nil }
+        return Int(level)
+    }
+
     // Chunking
     static let chunkHeaderSize = 4 // [index: UInt16][total: UInt16]
     

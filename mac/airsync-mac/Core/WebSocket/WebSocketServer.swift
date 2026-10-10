@@ -63,6 +63,7 @@ class WebSocketServer: ObservableObject {
     init() {
         loadOrGenerateSymmetricKey()
         setupWebSocket(for: server)
+        guard !LifecycleSelfTest.isRequested else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let err = error {
                 print("[websocket] Notification auth error: \(err)")

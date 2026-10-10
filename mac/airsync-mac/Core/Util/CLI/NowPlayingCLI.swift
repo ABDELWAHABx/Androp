@@ -60,6 +60,10 @@ class NowPlayingCLI {
     private var streamGeneration = 0
 
     func startStreaming(onUpdate: @escaping (NowPlayingInfo?) -> Void) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.startStreaming(onUpdate: onUpdate) }
+            return
+        }
         self.onUpdateHandler = onUpdate
         guard !isStreamingActive else { return }
         streamGeneration += 1
@@ -69,6 +73,10 @@ class NowPlayingCLI {
     }
 
     func stopStreaming() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.stopStreaming() }
+            return
+        }
         streamGeneration += 1
         retryWorkItem?.cancel()
         retryWorkItem = nil
@@ -79,6 +87,10 @@ class NowPlayingCLI {
     }
 
     func resetRetryCount() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.resetRetryCount() }
+            return
+        }
         self.retryCount = 0
     }
 
@@ -100,8 +112,11 @@ class NowPlayingCLI {
 
         guard let binPath = resolveBinaryPath() else {
             print("[now-playing] media-control binary not found. Cannot stream updates.")
+            // The caller may pause/restart before this asynchronous callback runs.
+            let generation = streamGeneration
             DispatchQueue.main.async { [weak self] in
-                self?.onUpdateHandler?(nil)
+                guard let self, self.isStreamingActive, self.streamGeneration == generation else { return }
+                self.onUpdateHandler?(nil)
             }
             return
         }
@@ -120,8 +135,7 @@ class NowPlayingCLI {
         let generation = streamGeneration
 
         readHandle.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
+            guard let data = try? handle.read(upToCount: 64 * 1024), !data.isEmpty else {
                 handle.readabilityHandler = nil
                 return
             }
@@ -160,7 +174,7 @@ class NowPlayingCLI {
     }
 
     private func scheduleRetry(generation: Int) {
-        guard isStreamingActive, retryCount < maxRetries else { return }
+        guard isStreamingActive, streamGeneration == generation, retryCount < maxRetries else { return }
         retryWorkItem?.cancel()
         retryCount += 1
         // Back off failed helpers instead of relaunching several times per second.

@@ -46,9 +46,7 @@ public class InboundNearbyConnection: NearbyConnection{
 		}catch{
 			print("Error deleting partially received files: \(error)")
 		}
-		DispatchQueue.main.async {
-			self.delegate?.connectionWasTerminated(connection: self, error: self.lastError)
-		}
+		delegate?.connectionWasTerminated(connection: self, error: self.lastError)
 	}
 	
 	override internal func processReceivedFrame(frameData:Data) async {
@@ -129,25 +127,26 @@ public class InboundNearbyConnection: NearbyConnection{
                     catch { continuation.resume(throwing: error) }
                 }
             }
-            guard !connectionClosed else { return }
-			transferredFiles[id]!.bytesTransferred+=Int64(frame.payloadChunk.body.count)
-			fileInfo.progress?.completedUnitCount=transferredFiles[id]!.bytesTransferred
+            guard !connectionClosed, var updated = transferredFiles[id] else { return }
+			updated.bytesTransferred += Int64(frame.payloadChunk.body.count)
+            transferredFiles[id] = updated
+			fileInfo.progress?.completedUnitCount=updated.bytesTransferred
             let now = ProcessInfo.processInfo.systemUptime
             if now - lastProgressUpdate >= 0.25 {
                 lastProgressUpdate = now
-                let progress = fileInfo.meta.size > 0 ? Double(transferredFiles[id]!.bytesTransferred) / Double(fileInfo.meta.size) : 1
+                let progress = fileInfo.meta.size > 0 ? Double(updated.bytesTransferred) / Double(fileInfo.meta.size) : 1
                 delegate?.incomingTransferProgress(connection: self, id: self.id, progress: progress)
             }
 		}
 		if (frame.payloadChunk.flags & 1)==1{
-            guard transferredFiles[id]!.bytesTransferred == fileInfo.meta.size else { throw NearbyError.protocolError("Truncated file") }
-            delegate?.incomingTransferProgress(connection: self, id: self.id, progress: 1)
-			try? fileInfo.fileHandle?.close()
-			transferredFiles[id]!.fileHandle=nil
+            guard !connectionClosed, let completed = transferredFiles[id] else { return }
+            guard completed.bytesTransferred == fileInfo.meta.size else { throw NearbyError.protocolError("Truncated file") }
+			try fileInfo.fileHandle?.close()
 			fileInfo.progress?.unpublish()
 			completedURLs.append(fileInfo.destinationURL)
 			transferredFiles.removeValue(forKey: id)
-			if transferredFiles.isEmpty{
+            delegate?.incomingTransferProgress(connection: self, id: self.id, progress: 1)
+			if !connectionClosed && transferredFiles.isEmpty{
 				delegate?.transferDidComplete(connection: self)
 				sendDisconnectionAndDisconnect()
 			}
@@ -162,16 +161,18 @@ public class InboundNearbyConnection: NearbyConnection{
 			try sendDisconnectionAndDisconnect()
 			return true
 		}else if let fileInfo=transferredFiles[id]{
-			fileInfo.fileHandle?.write(payload)
-			transferredFiles[id]!.bytesTransferred+=Int64(payload.count)
-			fileInfo.progress?.completedUnitCount=transferredFiles[id]!.bytesTransferred
-			let progress = Double(transferredFiles[id]!.bytesTransferred) / Double(fileInfo.meta.size)
-			delegate?.incomingTransferProgress(connection: self, id: String(id), progress: progress)
-			try fileInfo.fileHandle?.close()
-			transferredFiles[id]!.fileHandle=nil
+			guard currentState == .receivingFiles, !connectionClosed,
+				fileInfo.bytesTransferred == 0, Int64(payload.count) == fileInfo.meta.size,
+				let handle = fileInfo.fileHandle else {
+				throw NearbyError.protocolError("Unexpected byte payload for file")
+			}
+			try handle.write(contentsOf: payload)
+			fileInfo.progress?.completedUnitCount=Int64(payload.count)
+			try handle.close()
 			fileInfo.progress?.unpublish()
 			completedURLs.append(fileInfo.destinationURL)
 			transferredFiles.removeValue(forKey: id)
+            delegate?.incomingTransferProgress(connection: self, id: self.id, progress: 1)
 			try sendDisconnectionAndDisconnect()
 			return true
 		}
@@ -236,7 +237,7 @@ public class InboundNearbyConnection: NearbyConnection{
 		
 		var serverInit=Securegcm_Ukey2ServerInit()
 		serverInit.version=1
-		serverInit.random=Data.randomData(length: 32)
+		serverInit.random=try Data.randomData(length: 32)
 		serverInit.handshakeCipher = .p256Sha512
 		
 		var pkey=Securemessage_GenericPublicKey()
@@ -294,8 +295,8 @@ public class InboundNearbyConnection: NearbyConnection{
 			pairedEncryption.v1.type = .pairedKeyEncryption
 			pairedEncryption.v1.pairedKeyEncryption=Sharing_Nearby_PairedKeyEncryptionFrame()
 			// Presumably used for all the phone number stuff that no one needs anyway
-			pairedEncryption.v1.pairedKeyEncryption.secretIDHash=Data.randomData(length: 6)
-			pairedEncryption.v1.pairedKeyEncryption.signedData=Data.randomData(length: 72)
+			pairedEncryption.v1.pairedKeyEncryption.secretIDHash=try Data.randomData(length: 6)
+			pairedEncryption.v1.pairedKeyEncryption.signedData=try Data.randomData(length: 72)
 			try sendTransferSetupFrame(pairedEncryption)
 			currentState = .sentConnectionResponse
 		} else {

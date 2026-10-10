@@ -28,10 +28,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: private-mac-release-${{ inputs.tag || 'androp-v0.1.0-preview.1' }}
+  group: private-mac-release-${{ inputs.tag || 'androp-v0.1.0-preview.2' }}
   cancel-in-progress: false
 
 jobs:
+  sequoia-regressions:
+    if: github.event.repository.private == true
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
+      - name: Run production lifecycle and parser regressions on macOS 15
+        run: bash mac/Tests/run-mac-regressions.sh
+
   build:
     runs-on: macos-26
     timeout-minutes: 60
@@ -58,7 +70,7 @@ jobs:
 
       - name: Build, test policy and package private downloads
         env:
-          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.1' }}
+          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.2' }}
           RELEASE_ARCHITECTURE: ${{ inputs.architecture || 'arm64' }}
         run: bash Tools/Release/build-mac.sh "$RELEASE_TAG" "$RELEASE_ARCHITECTURE"
 
@@ -74,7 +86,7 @@ jobs:
       - name: Save downloadable builds
         uses: actions/upload-artifact@v4
         with:
-          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.1' }}
+          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.2' }}
           path: |
             mac/dist/*.zip
             mac/dist/*.dmg
@@ -84,7 +96,7 @@ jobs:
           retention-days: 14
 
   release:
-    needs: build
+    needs: [build, sequoia-regressions]
     if: inputs.publish_release == true || github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -98,13 +110,13 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.1' }}
+          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.2' }}
           path: downloads
 
       - name: Publish private prerelease downloads
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.1' }}
+          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.2' }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]

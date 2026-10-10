@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.util.Log
 import app.androp.android.data.local.DataStoreManager
 import app.androp.android.utils.BackgroundWorkController
+import app.androp.android.utils.WakeupHttpHeaders
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import app.androp.android.utils.WakeupHandler
@@ -36,8 +37,10 @@ class WakeupService : Service() {
         private const val WAKEUP_ENDPOINT = "/wakeup"
 
         fun startService(context: Context) {
+            if (BackgroundWorkController.isPaused) return
             val intent = Intent(context, WakeupService::class.java)
-            context.startService(intent)
+            try { context.startService(intent) }
+            catch (error: RuntimeException) { Log.w(TAG, "Wake-up service start rejected", error) }
         }
 
         fun stopService(context: Context) {
@@ -51,6 +54,7 @@ class WakeupService : Service() {
     @Volatile private var isRunning = false
     private val clients = java.util.concurrent.CopyOnWriteArraySet<Socket>()
     private var startJob: kotlinx.coroutines.Job? = null
+    private val lifecycleLock = Any()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -78,7 +82,10 @@ class WakeupService : Service() {
                     stopSelf()
                     return@launch
                 }
-                isRunning = true
+                synchronized(lifecycleLock) {
+                    if (!isActive || BackgroundWorkController.isPaused) return@launch
+                    isRunning = true
+                }
 
                 // Start HTTP server
                 startHttpServer()
@@ -91,18 +98,20 @@ class WakeupService : Service() {
     }
 
     private fun stopWakeupListeners() {
-        isRunning = false
-        startJob?.cancel()
-        clients.forEach { runCatching { it.close() } }
-        clients.clear()
+        synchronized(lifecycleLock) {
+            isRunning = false
+            startJob?.cancel()
+            clients.forEach { runCatching { it.close() } }
+            clients.clear()
 
-        // Stop HTTP server
-        try {
-            httpServerSocket?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error closing HTTP server socket", e)
+            // Stop HTTP server
+            try {
+                httpServerSocket?.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing HTTP server socket", e)
+            }
+            httpServerSocket = null
         }
-        httpServerSocket = null
 
         Log.i(TAG, "Wake-up HTTP server stopped")
     }
@@ -110,20 +119,23 @@ class WakeupService : Service() {
     private suspend fun startHttpServer() {
         withContext(Dispatchers.IO) {
             try {
-                if (!isActive || !isRunning || BackgroundWorkController.isPaused) return@withContext
-                httpServerSocket = ServerSocket(HTTP_PORT)
+                val server = synchronized(lifecycleLock) {
+                    if (!isActive || !isRunning || BackgroundWorkController.isPaused) return@withContext
+                    ServerSocket(HTTP_PORT).also { httpServerSocket = it }
+                }
 
                 serviceScope.launch {
-                    while (isActive && isRunning && httpServerSocket?.isClosed == false) {
+                    while (isActive && isRunning && !server.isClosed) {
                         try {
-                            val clientSocket = httpServerSocket?.accept()
-                            if (clientSocket != null) {
-                                if (!isRunning || BackgroundWorkController.isPaused || clients.size >= 16) {
-                                    clientSocket.close()
-                                    continue
-                                }
-                                clientSocket.soTimeout = 5000
-                                clients.add(clientSocket)
+                            val clientSocket = server.accept()
+                            clientSocket.soTimeout = 5000
+                            val accepted = synchronized(lifecycleLock) {
+                                if (!isRunning || BackgroundWorkController.isPaused || clients.size >= 16) false
+                                else { clients.add(clientSocket); true }
+                            }
+                            if (!accepted) {
+                                clientSocket.close()
+                            } else {
                                 // Handle client connection in a separate coroutine
                                 launch {
                                     try { handleHttpRequest(clientSocket) }
@@ -141,6 +153,8 @@ class WakeupService : Service() {
                 Log.d(TAG, "HTTP server started on port $HTTP_PORT")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start HTTP server", e)
+                stopWakeupListeners()
+                stopSelf()
             }
         }
     }
@@ -151,9 +165,13 @@ class WakeupService : Service() {
                 clientSocket.use { socket ->
                     val input = BufferedInputStream(socket.getInputStream())
                     val output = PrintWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), true)
+                    val deadline = System.nanoTime() + 5_000_000_000L
+                    val checkDeadline = {
+                        if (System.nanoTime() >= deadline) throw java.net.SocketTimeoutException("Wake-up request deadline exceeded")
+                    }
 
                     // Read HTTP request line
-                    val requestLine = readHttpLine(input)
+                    val requestLine = readHttpLine(input, checkDeadline)
                     if (requestLine == null) return@withContext
 
                     val parts = requestLine.split(" ")
@@ -163,19 +181,7 @@ class WakeupService : Service() {
                     val path = parts[1]
 
                     // Read headers to find Content-Length
-                    var contentLength = 0
-                    var line: String?
-                    while (readHttpLine(input).also { line = it } != null) {
-                        if (line!!.isEmpty()) break // End of headers
-                        if (line.lowercase().startsWith("content-length:")) {
-                            contentLength = line.substring(15).trim().toIntOrNull() ?: 0
-                        }
-                    }
-
-                    if (contentLength !in 0..16_384) {
-                        sendHttpResponse(output, 413, "Payload Too Large", "{}")
-                        return@withContext
-                    }
+                    val contentLength = WakeupHttpHeaders.readContentLength(input, checkDeadline)
                     if (!isRunning || BackgroundWorkController.isPaused) return@withContext
                     // Handle wake-up request
                     if (method == "POST" && path == WAKEUP_ENDPOINT) {
@@ -184,6 +190,7 @@ class WakeupService : Service() {
                             val bodyBytes = ByteArray(contentLength)
                             var readCount = 0
                             while (readCount < contentLength) {
+                                checkDeadline()
                                 val count = input.read(bodyBytes, readCount, contentLength - readCount)
                                 if (count < 0) throw IOException("Incomplete wake-up request")
                                 readCount += count
@@ -253,9 +260,10 @@ class WakeupService : Service() {
         }
     }
 
-    private fun readHttpLine(input: BufferedInputStream): String? {
+    private fun readHttpLine(input: BufferedInputStream, checkDeadline: () -> Unit): String? {
         val line = StringBuilder()
         while (line.length < 8192) {
+            checkDeadline()
             val next = input.read()
             if (next < 0) return if (line.isEmpty()) null else line.toString()
             if (next == 10) return line.toString()

@@ -51,10 +51,15 @@ class OutboundQuickShareConnection(
     }
 
     private val executor = Executors.newSingleThreadExecutor()
+    private val lifecycleLock = Any()
+    private var started = false
+    private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
     @Volatile
     private var isRunning = true
 
-    fun start() {
+    fun start() = synchronized(lifecycleLock) {
+        if (!isRunning || started) return@synchronized
+        started = true
         executor.execute {
             try {
                 runHandshake()
@@ -365,13 +370,16 @@ class OutboundQuickShareConnection(
         ByteArray(n).also { java.security.SecureRandom().nextBytes(it) }.toByteString()
 
     fun closeConnection() {
-        isRunning = false
+        synchronized(lifecycleLock) {
+            if (!closed.compareAndSet(false, true)) return
+            isRunning = false
+            executor.shutdownNow()
+        }
         try {
             socket.close()
         } catch (e: Exception) {
             // Ignore
         }
         close()
-        executor.shutdownNow()
     }
 }

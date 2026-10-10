@@ -9,6 +9,36 @@ import java.io.DataOutputStream
 import java.io.OutputStream
 
 class QuickShareConnectionTest {
+    @Test fun closeAttemptsBothStreamsOnceEvenWhenInputCloseFails() {
+        var inputCloses = 0
+        var outputCloses = 0
+        val input = object : ByteArrayInputStream(byteArrayOf()) {
+            override fun close() { inputCloses++; throw java.io.IOException("peer closed") }
+        }
+        val output = object : ByteArrayOutputStream() {
+            override fun close() { outputCloses++ }
+        }
+        val connection = QuickShareConnection(input, output)
+        connection.close()
+        connection.close()
+        assertEquals(1, inputCloses)
+        assertEquals(1, outputCloses)
+    }
+
+    @Test(expected = java.io.IOException::class)
+    fun delayedSendAfterCancelCannotWriteAnotherFrame() {
+        val connection = QuickShareConnection(ByteArrayInputStream(byteArrayOf()), ByteArrayOutputStream())
+        connection.close()
+        connection.writeFrame(byteArrayOf(1))
+    }
+
+    @Test(expected = java.io.IOException::class)
+    fun delayedReadAfterCancelCannotConsumeBufferedFrame() {
+        val connection = QuickShareConnection(ByteArrayInputStream(byteArrayOf(0, 0, 0, 1, 9)), ByteArrayOutputStream())
+        connection.close()
+        connection.readFrame()
+    }
+
     @Test fun framingSurvivesFragmentedReads() {
         val encoded = ByteArrayOutputStream()
         DataOutputStream(encoded).use {

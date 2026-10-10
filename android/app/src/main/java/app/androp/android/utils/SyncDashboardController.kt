@@ -102,7 +102,7 @@ object SyncDashboardController {
     }
 
     /** Every service still calls startForeground immediately, using its declared service type. */
-    fun acquire(service: Service, owner: String, foregroundType: Int, status: String? = null) {
+    fun acquire(service: Service, owner: String, foregroundType: Int, status: String? = null): Boolean {
         initialize(service)
         val alreadyForeground = synchronized(lock) {
             val registered = foregroundOwners[owner]?.get() === service
@@ -111,10 +111,25 @@ object SyncDashboardController {
         }
         update { it.copy(owners = it.owners + owner,
             ownerStatuses = if (status == null) it.ownerStatuses else it.ownerStatuses + (owner to status)) }
-        if (alreadyForeground) return
-        val notification = build(service, state.value)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) service.startForeground(NOTIFICATION_ID, notification, foregroundType)
-        else service.startForeground(NOTIFICATION_ID, notification)
+        if (alreadyForeground) return true
+        return try {
+            val notification = build(service, state.value)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) service.startForeground(NOTIFICATION_ID, notification, foregroundType)
+            else service.startForeground(NOTIFICATION_ID, notification)
+            true
+        } catch (error: RuntimeException) {
+            // startForeground is a separate framework call from startForegroundService:
+            // a try/catch at the caller cannot catch this failure in onCreate.
+            synchronized(lock) {
+                if (foregroundOwners[owner]?.get() === service) {
+                    foregroundOwners.remove(owner)
+                    state.value = state.value.release(owner)
+                }
+            }
+            android.util.Log.w("SyncDashboard", "Foreground service promotion rejected for $owner", error)
+            service.stopSelf()
+            false
+        }
     }
 
     fun release(service: Service, owner: String) {
@@ -236,26 +251,31 @@ object SyncDashboardController {
         val regular = builder.build()
         // Android 16 Live Updates are native and conditional. Samsung chooses Now Bar placement;
         // the ordinary shade notification remains available when promotion is disabled.
-        if (Build.VERSION.SDK_INT >= 36 && snapshot.shouldRequestPromotion &&
-            context.getSystemService(NotificationManager::class.java).canPostPromotedNotifications()) {
-            val native = Notification.Builder.recoverBuilder(context, regular)
-                // Use the same backward-compatible extra as AndroidX NotificationCompat.
-                // The framework setter itself is only available starting with API 36.1.
-                .addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
-                .setShortCriticalText(when {
-                    transfer != null -> "${transfer.percent}%"
-                    snapshot.phoneAlert -> "Alert"
-                    snapshot.battery != null -> "${snapshot.battery}%"
-                    snapshot.transport == "Bluetooth" -> "BLE"
-                    else -> snapshot.transport?.take(7) ?: "Active"
-                })
-            if (transfer != null && !snapshot.phoneAlert && consent == null) {
-                native.setStyle(Notification.ProgressStyle()
-                    .setProgressSegments(listOf(Notification.ProgressStyle.Segment(100)))
-                    .setProgress(transfer.percent).setStyledByProgress(true))
+        try {
+            if (Build.VERSION.SDK_INT >= 36 && snapshot.shouldRequestPromotion &&
+                context.getSystemService(NotificationManager::class.java).canPostPromotedNotifications()) {
+                val native = Notification.Builder.recoverBuilder(context, regular)
+                    // Use the same backward-compatible extra as AndroidX NotificationCompat.
+                    // The framework setter itself is only available starting with API 36.1.
+                    .addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
+                    .setShortCriticalText(when {
+                        transfer != null -> "${transfer.percent}%"
+                        snapshot.phoneAlert -> "Alert"
+                        snapshot.battery != null -> "${snapshot.battery}%"
+                        snapshot.transport == "Bluetooth" -> "BLE"
+                        else -> snapshot.transport?.take(7) ?: "Active"
+                    })
+                if (transfer != null && !snapshot.phoneAlert && consent == null) {
+                    native.setStyle(Notification.ProgressStyle()
+                        .setProgressSegments(listOf(Notification.ProgressStyle.Segment(100)))
+                        .setProgress(transfer.percent).setStyledByProgress(true))
+                }
+                val promoted = native.build()
+                if (promoted.hasPromotableCharacteristics()) return promoted
             }
-            val promoted = native.build()
-            if (promoted.hasPromotableCharacteristics()) return promoted
+        } catch (error: RuntimeException) {
+            // An OEM's Live Update implementation must not take down the ordinary dashboard.
+            android.util.Log.w("SyncDashboard", "Live Update unavailable; using regular notification", error)
         }
         return regular
     }
@@ -272,6 +292,8 @@ object SyncDashboardController {
         try {
             manager.notify(NOTIFICATION_ID, build(context, snapshot))
             synchronized(lock) { lastPublished = snapshot }
-        } catch (_: SecurityException) { }
+        } catch (error: RuntimeException) {
+            android.util.Log.w("SyncDashboard", "Could not publish dashboard notification", error)
+        }
     }
 }

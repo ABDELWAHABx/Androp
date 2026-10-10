@@ -40,17 +40,27 @@ class QuickShareServer(
                 try {
                     while (isRunning) {
                         val socket = listener.accept()
-                        if (!isRunning || serverSocket !== listener) { socket.close(); break }
-                        Log.d(TAG, "New connection from ${socket.remoteSocketAddress}")
-
-                        socket.tcpNoDelay = true
-                        socket.soTimeout = 60_000
-                        val connection = InboundQuickShareConnection(
-                            context = context,
-                            socket = socket
-                        )
-                        onNewConnection(connection)
-                        connection.start()
+                        // stop() must finish registering this accepted socket before it
+                        // snapshots the service's connections for cancellation.
+                        synchronized(this@QuickShareServer) {
+                            if (!isRunning || serverSocket !== listener) {
+                                socket.close()
+                            } else {
+                                var connection: InboundQuickShareConnection? = null
+                                try {
+                                    socket.tcpNoDelay = true
+                                    socket.soTimeout = 60_000
+                                    val accepted = InboundQuickShareConnection(context, socket)
+                                    connection = accepted
+                                    onNewConnection(accepted)
+                                    accepted.start()
+                                } catch (e: Exception) {
+                                    if (connection != null) connection.closeConnection()
+                                    else runCatching { socket.close() }
+                                    throw e
+                                }
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     if (isRunning) {
@@ -64,7 +74,7 @@ class QuickShareServer(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start server", e)
-            isRunning = false
+            stop()
         }
     }
 
