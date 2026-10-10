@@ -394,12 +394,14 @@ struct PhoneInfoProvider: TimelineProvider {
         let updated = (shared["updatedAt"] as? Double).map { Date(timeIntervalSince1970: $0) }
         let paused = shared["isPaused"] as? Bool ?? false
         let connected = !paused && (shared["isPaired"] as? Bool ?? false)
+        // Decide freshness before constructing the immutable connection fields.
+        let stale = connected && (updated.map { Date().timeIntervalSince($0) > 15 * 60 } ?? true)
         var entry = PhoneInfoEntry(
             date: Date(),
             deviceName: String((shared["deviceName"] as? String ?? "Your phone").prefix(200)),
             batteryLevel: min(100, max(0, shared["batteryLevel"] as? Int ?? 0)),
             isCharging: shared["isCharging"] as? Bool ?? false,
-            isPaired: connected,
+            isPaired: connected && !stale,
             wallpaperImageData: image("wallpaperBase64", limit: 3_000_000),
             isLocalNetwork: connected && (shared["isLocalNetwork"] as? Bool ?? false),
             isBLEConnected: connected && (shared["isBLEConnected"] as? Bool ?? false),
@@ -413,8 +415,7 @@ struct PhoneInfoProvider: TimelineProvider {
         entry.lastUpdated = updated
         entry.statusMessage = paused ? "Paused" : "Phone offline"
         // A cached snapshot is not evidence of a live connection after the app stops.
-        if connected, let updated, Date().timeIntervalSince(updated) > 15 * 60 {
-            entry.isPaired = false
+        if stale {
             entry.statusMessage = "Last known status · open androp to refresh"
         }
         return entry
