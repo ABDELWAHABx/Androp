@@ -46,3 +46,7 @@ Physical verification remains necessary for Samsung background behavior and Now 
 ## Preview 4 follow-up
 
 Persistent BLE/Wi-Fi coexistence, bounded discovery, stable phone identity across network loss, saved-Keychain hotspot joining, authenticated network endpoint handoff and retained file selection are implemented. Android 149 JVM tests and lint/assemblies passed; native Mac and packaged macOS 15 lifecycle checks passed. See the root README and verification JSON for exact source commits, workflow links and counts. Physical Samsung interoperability and power/throughput measurements remain unverified.
+
+## Preview 5 automatic transfer follow-up
+
+Both directions now prepare temporary local-only Wi-Fi from authenticated BLE, confirm the paired network before sending, and release their owned network lease on completion/cancellation/Pause. Setup failures retain the selection. Credential changes invalidate active Mac transfers and suppress restoration work. Ready Quick Share endpoints travel through authenticated MacInfo; receiver settings now match the actual service default and update the listener live. Android 171 tests, assemblies and lint (zero errors) passed. Native Mac and exact packaged macOS 15 lifecycle checks passed, including the live receiver toggle. Root verification JSON records exact commits and CI evidence; physical Samsung/M1 networking remains unverified.

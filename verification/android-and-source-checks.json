@@ -1,25 +1,25 @@
 {
-  "releaseTag": "androp-v0.1.0-preview.4",
+  "releaseTag": "androp-v0.1.0-preview.5",
   "tests": {
-    "tests": 149,
+    "tests": 171,
     "failures": 0,
     "errors": 0,
     "skipped": 0
   },
   "lint": {
-    "Warning": 253,
+    "Warning": 255,
     "Hint": 10
   },
   "swift": {
-    "changed_files": 127,
+    "changed_files": 133,
     "new_errors": 0,
     "unchanged_parser_limitations": 4
   },
   "native_mac_build": true,
   "physical_device_testing": false,
   "native_mac_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38090864155",
-    "commit": "26c1230d67159ac05eadda1a2d4b50f7d891ef5a",
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38095194815",
+    "commit": "c982bbadc11afe068be6faf29e21ed54bf031e2a",
     "architecture": "arm64",
     "signatureVerification": true,
     "helperCompiledAndSigned": true,
@@ -29,31 +29,32 @@
     "compilerWarningsRemain": true,
     "pauseCycles": 3,
     "resumeCycles": 2,
-    "bluetoothHandoffLifecyclePassed": true
+    "bluetoothHandoffLifecyclePassed": true,
+    "quickShareLiveSettingsLifecyclePassed": true
   },
   "android_ci": {
     "applicationId": "app.androp.android",
-    "versionName": "4.0.4",
-    "versionCode": 35,
+    "versionName": "4.0.5",
+    "versionCode": 36,
     "minimumAndroid": 30,
     "targetAndroid": 37,
-    "commit": "3bb6da1f84510b71d08dfce26a895a8f413481e3",
-    "publicSourceCommit": "8b7a77ae83939a03fce66d249ae3f7e103cbc16b",
-    "sha256": "146cde26ae96a30711e5a7f7c1d9b31e0ec6d856a12a130d9bc40982fbe4121f",
+    "commit": "b1438ff00c27773f68d632b6125d74928aebda1c",
+    "publicSourceCommit": "e3ceb2d7f83e4770c5204ce2c8b8159fc73a7796",
+    "sha256": "1dd3c94a33bde96634e6fc79e728af479ef52f0c42afd5d0b205eb3d48283c0b",
     "signing": "same local development certificate",
     "optimized": true,
     "localBuild": "assembleDebug assembleRelease testDebugUnitTest lintDebug: success",
-    "tests": 149,
+    "tests": 171,
     "failures": 0,
     "lintErrors": 0,
-    "lintWarnings": 253,
+    "lintWarnings": 255,
     "lintHints": 10,
-    "ciRun": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38091032483",
-    "conclusion": "in_progress",
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38091032483",
+    "ciRun": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38093763079",
+    "conclusion": "success",
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38093763079",
     "sameUpdateSigningCertificate": true
   },
-  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38091596453",
+  "android_release_upload_ci": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38094084630",
   "mac_download_checksums_verified": true,
   "android_download_checksum_and_signature_verified": true,
   "mac_regressions": {
@@ -74,29 +75,34 @@
     "notificationPolicyChecks": 12,
     "clipboardMediaAndDiscoveryChecksPassed": true,
     "hotspotWiFiPolicyChecks": 32,
-    "fileTransferRouteChecks": 10
+    "fileTransferRouteChecks": 22,
+    "preferencePersistenceChecks": 4,
+    "temporaryWiFiOwnershipChecks": 17,
+    "transferNetworkProtocolChecks": 84
   },
   "mac_sequoia_runtime_ci": {
-    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38091596479",
+    "url": "https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38095439241",
     "macOS": "15.7.9",
     "architecture": "arm64",
-    "packagedSourceCommit": "26c1230d67159ac05eadda1a2d4b50f7d891ef5a",
+    "packagedSourceCommit": "c982bbadc11afe068be6faf29e21ed54bf031e2a",
     "pauseCycles": 3,
     "resumeCycles": 2,
     "sourceHashesAndStrictSignaturesVerified": true,
     "bluetoothRadioActivated": false,
     "experimentalPowerHelperActivated": false,
-    "bluetoothHandoffLifecyclePassed": true
+    "bluetoothHandoffLifecyclePassed": true,
+    "quickShareLiveSettingsLifecyclePassed": true
   },
   "hotspot": {
     "normalPermissionsOnly": true,
-    "requiresAndroidAPI": 36,
     "samsungControlVerified": false,
     "automaticGlobalDataSaverToggle": false,
     "macSavedKeychainJoiningImplemented": true,
     "explicitBleNetworkHandoff": true,
     "physicalAssociationVerified": false,
-    "temporaryLocalOnlyTransferHotspotImplemented": false
+    "temporaryLocalOnlyTransferHotspotImplemented": true,
+    "internetHotspotRequiresAndroidAPI": 36,
+    "temporaryTransferMinimumAndroidAPI": 30
   },
   "experimental_closed_lid": {
     "default_enabled": false,
@@ -110,5 +116,65 @@
     "androidLowPowerAdvertising": true,
     "pauseStopsDiscovery": true,
     "physicalInteroperabilityVerified": false
-  }
+  },
+  "automaticFileTransfer": {
+    "bothDirections": true,
+    "encryptedTemporaryCredentials": true,
+    "samePairingAndFreshNetworkConfirmation": true,
+    "authenticatedDirectQuickShareEndpoint": true,
+    "temporaryNetworkHasInternet": false,
+    "pauseReleasesReservation": true,
+    "boundedSetupAndLeaseExpiry": true,
+    "macOriginalNetworkRestorationAttempt": true,
+    "physicalInteroperabilityVerified": false
+  },
+  "mac_release_metadata": {
+    "appMinimumMacOS": "14.5",
+    "architecture": "arm64",
+    "commit": "c982bbadc11afe068be6faf29e21ed54bf031e2a",
+    "experimentalClosedLidDefault": false,
+    "notarized": false,
+    "signing": "ad-hoc",
+    "tag": "androp-v0.1.0-preview.5",
+    "widgetMinimumMacOS": "15.0",
+    "xcode": "Xcode 26.6\nBuild version 17F113"
+  },
+  "release_assets": [
+    {
+      "name": "androp-android-BUILD.json",
+      "size": 682,
+      "sha256": "1b73dcfa5b51fc50af13977541f6ba2c067c6ca50934f740a1b114ddbbf13a0f"
+    },
+    {
+      "name": "androp-android.apk",
+      "size": 37306967,
+      "sha256": "1dd3c94a33bde96634e6fc79e728af479ef52f0c42afd5d0b205eb3d48283c0b"
+    },
+    {
+      "name": "androp-v0.1.0-preview.5-arm64-BUILD.json",
+      "size": 316,
+      "sha256": "65ffe010f643903c3e09a5e6faf01f4128b826636fd5645d020d38bf6074cb58"
+    },
+    {
+      "name": "androp-v0.1.0-preview.5-arm64-SHA256SUMS.txt",
+      "size": 307,
+      "sha256": "f0ce58461e957fbae8bb815b5c3b7c7fbb38a179c924f834f0a90982de6cdb1b"
+    },
+    {
+      "name": "androp-v0.1.0-preview.5-arm64.dmg",
+      "size": 22981091,
+      "sha256": "ddea7bd3bc9787c9c5f8df9ec357f4842b22b6624cdc598256342db9ee42f572"
+    },
+    {
+      "name": "androp-v0.1.0-preview.5-arm64.zip",
+      "size": 20795935,
+      "sha256": "1310e8ca30e5048efb8c6f73920e43f41991ea0ea9b14c451508a05241f71722"
+    },
+    {
+      "name": "SHA256SUMS-android.txt",
+      "size": 85,
+      "sha256": "13ab1f073638c7e98d3bde2aaf4bdfb78301693e83f0fcc9a5aa96544b1a2d35"
+    }
+  ],
+  "mac_download_verification_location": "macOS 15 CI run 38095439241"
 }

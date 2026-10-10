@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: androp-v0.1.0-preview.4
+      RELEASE_TAG: androp-v0.1.0-preview.5
     steps:
       - name: Require private repository and Apple Silicon
         run: |
@@ -27,15 +27,25 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Wait for the packaged release
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+                --jq '.assets[].name' | grep -Fxq "${RELEASE_TAG}-arm64.zip"; then exit 0; fi
+            sleep 20
+          done
+          echo 'Packaged Mac release was not ready within ten minutes.' >&2
+          exit 1
       - name: Download and verify the packaged app
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/androp-sequoia"
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern "${RELEASE_TAG}-arm64.zip" --pattern "${RELEASE_TAG}-arm64-BUILD.json" --pattern "${RELEASE_TAG}-arm64-SHA256SUMS.txt" \
+            --pattern "${RELEASE_TAG}-arm64.zip" --pattern "${RELEASE_TAG}-arm64.dmg" --pattern "${RELEASE_TAG}-arm64-BUILD.json" --pattern "${RELEASE_TAG}-arm64-SHA256SUMS.txt" \
             --dir "$RUNNER_TEMP/androp-sequoia"
           python3 - <<'PY'
-          import hashlib, json, os, subprocess
+          import hashlib, json, os, subprocess, plistlib, zipfile
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'androp-sequoia'
           prefix = os.environ['RELEASE_TAG'] + '-arm64'
@@ -43,7 +53,6 @@ jobs:
           for line in checksums.splitlines():
               expected, name = line.split(None, 1)
               path = root / name.strip()
-              if path.suffix == '.dmg': continue
               assert path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == expected
           metadata = json.loads((root / (prefix + '-BUILD.json')).read_text())
           assert metadata['architecture'] == 'arm64'
@@ -51,7 +60,19 @@ jobs:
               'mac/airsync-mac', 'mac/AirSyncWidget', 'mac/AirSync.xcodeproj'], check=True)
           subprocess.run(['ditto', '-x', '-k', str(root / (prefix + '.zip')), str(root / 'unpacked')], check=True)
           app = next((root / 'unpacked').glob('*/androp.app'))
+          for bundle, identity, minimum in [(app, 'app.androp.mac', '14.5'), (app / 'Contents/PlugIns/andropWidget.appex', 'app.androp.mac.widget', '15.0')]:
+              info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+              assert info['CFBundleIdentifier'] == identity
+              assert info['CFBundleVersion'] == '36' and info['CFBundleShortVersionString'] == '4.1.4'
+              assert info['LSMinimumSystemVersion'] == minimum
+              binary = bundle / 'Contents/MacOS' / info['CFBundleExecutable']
+              assert subprocess.check_output(['lipo', '-archs', str(binary)], text=True).strip() == 'arm64'
+          with zipfile.ZipFile(root / (prefix + '.zip')) as archive:
+              assert archive.testzip() is None
+              assert archive.read(prefix + '/LICENSE') == Path('mac/LICENSE').read_bytes()
+              assert json.loads(archive.read(prefix + '/BUILD.json')) == metadata
           subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
           subprocess.run(['bash', 'mac/Tests/run-app-lifecycle-tests.sh', str(app)], check=True)
+          print('VERIFIED_MAC_METADATA ' + json.dumps(metadata, sort_keys=True))
           print('Packaged arm64 app: signatures, source, hashes and real Pause/Resume passed on macOS 15.')
           PY

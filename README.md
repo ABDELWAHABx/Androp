@@ -6,7 +6,7 @@ androp is a personal continuation of [AirSync macOS](https://github.com/sameeras
 
 Control your Mac from your phone, send files into Android Downloads, share a video at its timestamp, and reach everyday actions from one notification dashboard. Pause stops the underlying work. An empty media session no longer takes over the screen.
 
-[Public source](https://github.com/ABDELWAHABx/Androp) · [Private preview downloads](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.4) · [Reliability review](mac/RELIABILITY_REVIEW.md) · [BLE coverage](mac/BLE_FEATURES.md) · [Crash review](mac/CRASH_REVIEW.md) · [Experience review](mac/EXPERIENCE_REVIEW.md) · [Power and performance review](mac/PERFORMANCE_REVIEW.md) · [Closed-lid experiment](mac/CLOSED_LID_REVIEW.md)
+[Public source](https://github.com/ABDELWAHABx/Androp) · [Private preview downloads](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.5) · [Reliability review](mac/RELIABILITY_REVIEW.md) · [BLE coverage](mac/BLE_FEATURES.md) · [Crash review](mac/CRASH_REVIEW.md) · [Experience review](mac/EXPERIENCE_REVIEW.md) · [Power and performance review](mac/PERFORMANCE_REVIEW.md) · [Closed-lid experiment](mac/CLOSED_LID_REVIEW.md)
 
 ## What changed
 
@@ -18,7 +18,7 @@ Control your Mac from your phone, send files into Android Downloads, share a vid
 | Android dashboard | One quiet notification combines connection state, transfers, consent, clipboard links and Find Phone. Contextual actions open the right screen. Native media keeps its own player. |
 | Samsung / Android 16 | Requests supported Live Updates for active work, with a normal notification fallback. Now Bar placement and visibility remain controlled by Android and Samsung settings. |
 | Remote controls | Trackpad below the buttons in portrait, to their right in wide layouts. Empty media hides; paused media stays compact. Text keyboard and small controls also work over authenticated BLE. Continuous pointer input uses the paired network connection. |
-| File transfers | Review dropped files on Mac, send with progress and cancellation, and confirm the final Android save. Bounded writes, SHA-256 verification and interrupted-transfer cleanup protect the paired transfer path. |
+| File transfers | Send uses authenticated Wi-Fi when available. From BLE, it prepares temporary Wi-Fi, connects the same paired devices, then starts sending. Progress, cancellation and setup retry retain your selection. Mac-to-phone sends verify SHA-256 and the final Android save. |
 | Clipboard | Message acknowledgements, finite retries and duplicate handling distinguish waiting from delivered. Android clipboard reading follows foreground restrictions; explicit Share to androp remains available. |
 | Media | Native Android MediaSession metadata, playback controls and remote volume control your Mac. Audio continues playing on the Mac; this does not stream its audio to the phone. |
 | Bluetooth connection | Stays connected beside Wi-Fi. Radio/lifecycle recovery, low-power Android advertising and bounded Mac discovery backoff; Pause/manual disconnect stop reconnect work. |
@@ -31,11 +31,11 @@ These are implemented changes, not measured battery or throughput claims. Physic
 
 ## Download and install
 
-Build downloads live in the **private** [airsync-selfbuild preview release](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.4). Sign in with an account that has access; public source access does not grant access to those downloads.
+Build downloads live in the **private** [airsync-selfbuild preview release](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/tag/androp-v0.1.0-preview.5). Sign in with an account that has access; public source access does not grant access to those downloads.
 
 ### Android
 
-1. Download [androp-android.apk](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.4/androp-android.apk), the optimized, locally signed private preview.
+1. Download [androp-android.apk](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.5/androp-android.apk), the optimized, locally signed private preview.
 2. On Android 11 or newer, open the APK and allow installation from that source if Android asks.
 3. Open androp, then pair with the matching Mac app. Allow notifications if you want the dashboard in the notification shade.
 
@@ -43,7 +43,7 @@ Use the signed release APK for installation and updates. CI debug artifacts use 
 
 ### macOS
 
-Download the Apple Silicon **[DMG](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.4/androp-v0.1.0-preview.4-arm64.dmg)** or **[ZIP](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.4/androp-v0.1.0-preview.4-arm64.zip)** for M1 and newer Macs. The [native build passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38090864155); installation notes, build metadata and SHA-256 checksums accompany the downloads. Intel Macs require a separate universal build.
+Download the Apple Silicon **[DMG](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.5/androp-v0.1.0-preview.5-arm64.dmg)** or **[ZIP](https://github.com/ABDELWAHABx/airsync-selfbuild/releases/download/androp-v0.1.0-preview.5/androp-v0.1.0-preview.5-arm64.zip)** for M1 and newer Macs. The [native build passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38095194815); installation notes, build metadata and SHA-256 checksums accompany the downloads. Intel Macs require a separate universal build.
 
 Extract the ZIP or mount the DMG, move `androp.app` to Applications, and open it. The private build is ad-hoc signed, without Apple Developer ID signing or notarization. If macOS blocks launch, use the explicit **Open Anyway** option in **System Settings → Privacy & Security** after trying to open it.
 
@@ -55,7 +55,15 @@ On Android, open **Settings → Connection → Hotspot** and allow **Modify syst
 
 Android 16 exposes the API, but some Samsung firmware and carriers block ordinary apps even with that permission. androp reports this instead of claiming success. Android provides no normal app permission to turn global Data Saver off; use the direct settings action when it blocks activation. Hotspot uses your mobile data plan.
 
-Preview 4 adds automatic joining through androp’s Connect action, keeps Bluetooth connected alongside Wi-Fi, and retains selected files while the network connects. Install both updated apps. A dormant Android phone cannot be inserted through a documented public API into the native macOS Wi-Fi menu. [Connection behavior, permissions and cancellation](mac/HOTSPOT_CONNECTION_REVIEW.md).
+### Automatic Wi-Fi for files
+
+Preview 5 makes **Send** handle connection setup in both directions. With an authenticated Wi-Fi connection, files start over it. With BLE only, the phone creates a temporary local Wi-Fi network, exchanges its credentials in an encrypted message with the paired Mac, and the Mac joins automatically. Sending starts after the matching authenticated connection is ready. The phone closes the temporary network afterward; the Mac attempts to return to its previous saved network without replacing another network you chose.
+
+First use may ask for **Nearby Wi-Fi devices** on Android and **Location** on Mac. An Android permission request received in the background asks you to open androp, allow it and retry. Setup failures keep selected files available for retry; Android failures after actual sending starts may require sharing again. Cancel and Pause release the transfer network and cancel further setup work. A Wi-Fi association already submitted to macOS may finish before cleanup runs.
+
+Temporary transfer Wi-Fi is **local-only, without internet**, and may interrupt the Mac’s internet connection while in use. It does not need ADB, change Data Saver, or use cellular tethering. Existing hotspot activity, phone policy or firmware can prevent creation; connect both devices to a shared Wi-Fi network in that case. Bluetooth remains available alongside Wi-Fi; an established authenticated Wi-Fi connection can maintain transfer coordination if BLE drops.
+
+Install both updated apps. A dormant Android phone cannot be inserted through a documented public API into the native macOS Wi-Fi menu. [Connection behavior, permissions and cancellation](mac/HOTSPOT_CONNECTION_REVIEW.md).
 
 ### Battery alerts and phone widget
 
@@ -63,7 +71,7 @@ Open **Settings → My Mac → Phone battery alerts & widgets** to enable low-ba
 
 ### Pair and choose permissions
 
-Open both updated apps on the same Wi-Fi network and scan the Mac's pairing QR code from Android. Existing AirSync pairings are separate; pair again in androp. Leave Bluetooth sync enabled: it stays connected alongside Wi-Fi, with spaced reconnect attempts when the phone is unavailable. Pause stops both transports. Use Wi-Fi or a reachable hotspot connection for bulk files and continuous pointer input. You can select/drop files over BLE and connect the hotspot from the review window; Send enables after the same paired phone is connected over Wi-Fi. Text keyboard, clipboard, media controls and other bounded messages also work over BLE. USB mirroring is a separate adb/scrcpy feature; plugging in a cable alone does not establish sync. The [BLE feature matrix](mac/BLE_FEATURES.md) lists supported commands and payload limits.
+Open both updated apps on the same Wi-Fi network and scan the Mac's pairing QR code from Android. Existing AirSync pairings are separate; pair again in androp. Leave Bluetooth sync enabled: it stays connected alongside Wi-Fi, with spaced reconnect attempts when the phone is unavailable. Pause stops both transports. Use Wi-Fi or a reachable hotspot connection for bulk files and continuous pointer input. You can select/drop files over BLE and press Send; androp prepares Wi-Fi automatically before sending the file bytes. Text keyboard, clipboard, media controls and other bounded messages also work over BLE. USB mirroring is a separate adb/scrcpy feature; plugging in a cable alone does not establish sync. The [BLE feature matrix](mac/BLE_FEATURES.md) lists supported commands and payload limits.
 
 Permissions are feature-specific:
 
@@ -74,7 +82,7 @@ Permissions are feature-specific:
 
 Finder browsing is read-only and uses a revocable session token. Its HTTP traffic is unencrypted; use it only on a trusted local network. Use androp’s Send Files action to upload. Both peers must be updated for the new access protocol.
 
-For Android-to-Mac Quick Share, enable Quick Share in androp on the Mac and keep both devices on reachable Wi-Fi. Paired Mac-to-Android drops use the connected transfer path. Find received files in Downloads.
+For Android-to-Mac Quick Share, enable Quick Share in androp on the Mac. Send can prepare the temporary Wi-Fi connection automatically; receiver consent remains in place. Paired Mac-to-Android drops use the connected transfer path. Find received files in Downloads.
 
 ## Keep awake and closed-lid testing
 
@@ -120,10 +128,10 @@ Optional integrations use `scrcpy`/`adb` for mirroring and `media-control` for m
 As of **10 October 2026**:
 
 - The supplied idle Pause crash was traced to recursive Bluetooth scan/disconnect teardown and fixed. [CRASH_REVIEW.md](mac/CRASH_REVIEW.md) records the section audits and regressions.
-- Android debug and optimized release APKs assembled; **149 JVM tests passed** with no failures, errors or skips. The optimized update retains the preview 1 signing certificate. [Additional Android CI running](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38091032483).
-- Android lint finished with **0 errors, 253 warnings and 10 hints**. Remaining warnings are not presented as a clean lint result.
-- Mac regressions passed on macOS 15 and 26: 19 production Bluetooth-manager cases (including the reported Pause state and 1,000 repeated teardowns), six keep-awake tests, 23 packet checks, 16 remote-input checks, 10 battery-policy checks, 26 hotspot-manager checks, 32 hotspot Wi-Fi policy checks, 10 file-route checks, 12 BLE-control checks, 11 network-recovery checks, 7 widget-placement checks, 12 notification-policy checks, plus clipboard, media and discovery checks.
-- The [native Mac build passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38090864155) on Xcode 26.6 / Swift 6.3.3. The actual compiled app passed a network-loss/Bluetooth-handoff check, three idle Pause cycles and two real Resume cycles. The exact packaged app then passed the same lifecycle check on **macOS 15.7.9**, with [source, signatures and hashes verified](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38091596479). CI kept Bluetooth radio and the experimental helper inactive; physical pairing remains unverified.
+- Android debug and optimized release APKs assembled; **171 JVM tests passed** with no failures, errors or skips. The optimized update retains the preview 1 signing certificate. [Android CI passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38093763079).
+- Android lint finished with **0 errors, 255 warnings and 10 hints**. Remaining warnings are not presented as a clean lint result.
+- Mac regressions passed on macOS 15 and 26: 19 production Bluetooth-manager cases (including the reported Pause state and 1,000 repeated teardowns), six keep-awake tests, 23 packet checks, 16 remote-input checks, 10 battery-policy checks, 26 hotspot-manager checks, 32 hotspot Wi-Fi policy checks, 22 file-route checks, 17 temporary-network ownership checks, 84 encrypted transfer-protocol checks, 4 preference-persistence checks, 12 BLE-control checks, 11 network-recovery checks, 7 widget-placement checks, 12 notification-policy checks, plus clipboard, media and discovery checks.
+- The [native Mac build passed](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38095194815) on Xcode 26.6 / Swift 6.3.3. The actual compiled app passed a network-loss/Bluetooth-handoff check, three idle Pause cycles, two real Resume cycles and live receiving-toggle/listener checks. The exact packaged app then passed the same lifecycle check on **macOS 15.7.9**, with [source, signatures and hashes verified](https://github.com/ABDELWAHABx/airsync-selfbuild/actions/runs/38095439241). CI kept Bluetooth radio and the experimental helper inactive; physical pairing remains unverified.
 - Battery savings, BLE responsiveness, transfer throughput, Samsung Now Bar presentation and closed-lid behavior require measurements or device checks.
 
 [EXPERIENCE_REVIEW.md](mac/EXPERIENCE_REVIEW.md) records protocol behavior and remaining device checks. [PERFORMANCE_REVIEW.md](mac/PERFORMANCE_REVIEW.md) covers implementation findings; [CLOSED_LID_REVIEW.md](mac/CLOSED_LID_REVIEW.md) records the experimental power mechanism and its limits.
