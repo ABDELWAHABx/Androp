@@ -11,7 +11,7 @@ Control your Mac, receive files in Downloads, share clipboard text and timestamp
 - **Pause stops the work:** sync, discovery, transfers and media work are cancelled, with a lightweight Resume action available. Input and notification updates follow activity instead of constant idle polling.
 - **A useful dashboard:** connection, transfers, Nearby consent, clipboard links and Find Phone share one notification. Actions open the relevant screen. Pending Nearby transfers can also be accepted in the app when notifications are disabled.
 - **Native media controls:** Mac playback uses Android MediaSession and native player controls. Empty sessions hide; paused sessions stay compact. Audio stays on the Mac; this does not stream it to Android.
-- **A better remote layout:** controls sit above the trackpad in portrait and to its left in wide layouts. Wi-Fi/USB is required for pointer and text input; selected small controls work over authenticated BLE.
+- **A better remote layout:** controls sit above the trackpad in portrait and to its left in wide layouts. Pointer and text input use the paired network connection; selected small controls work over authenticated BLE.
 - **Confirmed handoff:** clipboard acknowledgements distinguish waiting from delivered, with bounded retries. Explicit YouTube sharing preserves timestamps and offers **Open video on Mac**.
 - **Reliable Downloads delivery:** paired Mac file transfers use bounded writes, SHA-256 verification, final-save acknowledgement and cancellation cleanup. The Mac gets success after the phone saves the file.
 - **Mac power controls:** opt-in activity-based keep-awake shows actual Mac state. Sleep Mac is offered only when a closed lid is reported; acknowledgement means the sleep request was queued.
@@ -26,7 +26,7 @@ On Android 16+, the dashboard can request supported Live Updates. Samsung decide
 
 Use the signed preview APK for updates. CI debug artifacts use a temporary signing identity and cannot replace an installed private release. No signing key is included in the public source.
 
-For Android-to-Mac Quick Share, enable Quick Share in androp on the Mac and keep both devices on Wi-Fi. Mac-to-Android paired file drops save to Downloads. BLE does not carry bulk file transfers.
+For Android-to-Mac Quick Share, enable Quick Share in androp on the Mac and keep both devices on Wi-Fi. Mac-to-Android paired file drops save to Downloads. Use Wi-Fi for bulk files and pointer/text input. USB mirroring is a separate adb/scrcpy feature; plugging in a cable alone does not establish sync. BLE does not carry bulk file transfers.
 
 ## Permissions on Android and Samsung
 

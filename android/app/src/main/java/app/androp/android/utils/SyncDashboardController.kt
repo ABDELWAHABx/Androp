@@ -80,7 +80,7 @@ object SyncDashboardController {
     private fun connectivity(current: SyncDashboardState): SyncDashboardState = current.copy(
         transport = when {
             current.paused -> null
-            WebSocketUtil.isWifiConnected() -> if (WebSocketUtil.currentIpAddress in setOf("127.0.0.1", "localhost", "::1")) "USB" else "Wi-Fi"
+            WebSocketUtil.isWifiConnected() -> "Network"
             app.androp.android.data.ble.BleGattServer.isAnyAuthenticated() -> "Bluetooth"
             else -> null
         },

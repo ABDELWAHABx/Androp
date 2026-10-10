@@ -219,9 +219,9 @@ fun RemoteControlScreen(
     if (showKeyboard && isActive && isForeground && !supportsPointerAndKeyboard) {
         AlertDialog(
             onDismissRequest = onDismissKeyboard,
-            title = { Text("Keyboard requires Wi-Fi or USB") },
+            title = { Text("Keyboard requires a network connection") },
             text = {
-                Text("Connect using Wi-Fi or USB to use the keyboard and trackpad. Arrow keys and media controls are available over Bluetooth.")
+                Text("Connect your phone and Mac over Wi-Fi to use the keyboard and trackpad. Arrow keys and media controls are available over Bluetooth.")
             },
             confirmButton = {
                 TextButton(onClick = onDismissKeyboard) { Text("Got it") }
@@ -350,7 +350,7 @@ fun RemoteControlScreen(
                     contentDescription = if (supportsPointerAndKeyboard) {
                         "Trackpad. Tap to click; use two fingers to scroll or right-click."
                     } else {
-                        "Connect using Wi-Fi or USB to use the trackpad."
+                        "Connect your phone and Mac over Wi-Fi to use the trackpad."
                     }
                     if (supportsPointerAndKeyboard) {
                         onClick(label = "Left click") { clickMouse("left"); true }
@@ -414,7 +414,7 @@ fun RemoteControlScreen(
                 )
                 Text(
                     if (supportsPointerAndKeyboard) "Tap to click · Two fingers to scroll"
-                    else "Connect using Wi-Fi or USB for the trackpad",
+                    else "Connect over Wi-Fi for the trackpad",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(12.dp)
