@@ -18,14 +18,13 @@ fun BleSyncCard(viewModel: app.androp.android.presentation.viewmodel.AirSyncView
     val scope = rememberCoroutineScope()
 
     val bleEnabled by dataStoreManager.getBleSyncEnabled().collectAsState(initial = false)
-    val autoConnect by dataStoreManager.getBleAutoConnectEnabled().collectAsState(initial = true)
 
     val uiState by viewModel.uiState.collectAsState()
     val bleState = uiState.bleConnectionState
 
     val statusText = when (bleState) {
-        BleGattServer.BleConnectionState.DISCONNECTED -> "For nearby connection"
-        BleGattServer.BleConnectionState.ADVERTISING -> "Scanning"
+        BleGattServer.BleConnectionState.DISCONNECTED -> "Keep available nearby, including while Wi-Fi is connected"
+        BleGattServer.BleConnectionState.ADVERTISING -> "Available for your paired Mac nearby"
         BleGattServer.BleConnectionState.CONNECTED -> "Authenticating"
         BleGattServer.BleConnectionState.AUTHENTICATED -> "Connected"
     }
@@ -40,14 +39,6 @@ fun BleSyncCard(viewModel: app.androp.android.presentation.viewmodel.AirSyncView
         }
     )
 
-    IconToggleItem(
-        iconRes = R.drawable.rounded_bluetooth_searching_24,
-        title = "BLE Auto-connect",
-        description = "Automatically switch to Bluetooth when Wi-Fi drops",
-        isChecked = autoConnect,
-        onCheckedChange = {
-            scope.launch { dataStoreManager.setBleAutoConnectEnabled(it) }
-        },
-        enabled = bleEnabled
-    )
+    // Advertising availability is governed by the main Bluetooth switch.
+    // The previous auto-connect preference was never read by the peripheral.
 }

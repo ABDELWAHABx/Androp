@@ -33,7 +33,6 @@ class DiscoveryManager: ObservableObject {
     
     @Published var availableWifiDeviceForCurrentBLE: DiscoveredDevice? = nil
     private var wifiAutoSwitchTimer: Timer?
-    private var wifiStabilityDisconnectBleTimer: Timer?
     private var lastDeviceReconnectAttemptAt: Date?
     private static let lastDeviceReconnectCooldown: TimeInterval = 15.0
 
@@ -50,28 +49,14 @@ class DiscoveryManager: ObservableObject {
                             print("[DiscoveryManager] Wi-Fi device connected. Stopping discovery and advertising.")
                             self.stop()
                         }
-                        // If auto-switch is enabled and BLE is active, wait 5s to ensure Wi-Fi is stable before disconnecting BLE
-                        if AppState.shared.isAutoSwitchWithBLEEnabled && BLECentralManager.shared.isAuthenticated {
-                            print("[DiscoveryManager] Connected to Wi-Fi while BLE is active. Starting 5s stability timer before disconnecting BLE...")
-                            self.wifiStabilityDisconnectBleTimer?.invalidate()
-                            self.wifiStabilityDisconnectBleTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
-                                if AppState.shared.device?.isRegularConnection == true && BLECentralManager.shared.isAuthenticated {
-                                    print("[DiscoveryManager] Wi-Fi connection stayed stable for 5s! Disconnecting BLE connection...")
-                                    BLECentralManager.shared.disconnect()
-                                }
-                            }
-                        }
+                        // Keep authenticated Bluetooth available alongside Wi-Fi.
                     } else {
-                        self.wifiStabilityDisconnectBleTimer?.invalidate()
-                        self.wifiStabilityDisconnectBleTimer = nil
                         if !self.isRunning {
                             print("[DiscoveryManager] BLE device connected. Keeping discovery active for Wi-Fi switch.")
                             self.start()
                         }
                     }
                 } else {
-                    self.wifiStabilityDisconnectBleTimer?.invalidate()
-                    self.wifiStabilityDisconnectBleTimer = nil
                     if !self.isRunning {
                         print("[DiscoveryManager] No device connected. Resuming discovery and advertising.")
                         self.start()
@@ -208,8 +193,6 @@ class DiscoveryManager: ObservableObject {
         networkMonitor = nil
         wifiAutoSwitchTimer?.invalidate()
         wifiAutoSwitchTimer = nil
-        wifiStabilityDisconnectBleTimer?.invalidate()
-        wifiStabilityDisconnectBleTimer = nil
         availableWifiDeviceForCurrentBLE = nil
         let connections = Array(reachabilityConnections.values)
         reachabilityConnections.removeAll()

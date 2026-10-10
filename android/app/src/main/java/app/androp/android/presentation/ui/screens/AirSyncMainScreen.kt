@@ -894,7 +894,11 @@ fun AirSyncMainScreen(
                                         lastConnected = uiState.lastConnectedDevice != null,
                                         uiState = uiState,
                                         isPaused = uiState.isAppPaused,
-                                        connectionLabel = if (wifiConnected) "Connected over network" else "Connected over Bluetooth",
+                                        connectionLabel = when {
+                                            wifiConnected && uiState.bleConnectionState == app.androp.android.data.ble.BleGattServer.BleConnectionState.AUTHENTICATED -> "Bluetooth + network connected"
+                                            wifiConnected -> "Connected over network"
+                                            else -> "Connected over Bluetooth"
+                                        },
                                         onTogglePause = {
                                             viewModel.setAppPaused(context, !uiState.isAppPaused)
                                         }

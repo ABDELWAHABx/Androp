@@ -1,5 +1,10 @@
 package app.androp.android.data.ble
 
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.content.Context
 import android.util.Log
 import app.androp.android.data.local.DataStoreManager
@@ -12,6 +17,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class BleConnectionManager(private val context: Context) {
@@ -23,11 +30,20 @@ class BleConnectionManager(private val context: Context) {
     private val dataStoreManager = DataStoreManager(context)
     private var bleServer: BleGattServer? = null
 
-    private var isBleEnabled = false
     private var observationJob: Job? = null
-    private var isPaused = true
-    private var isManuallyDisconnected = false
-    private var regularConnectionActive = false
+    private var inputs = BleAvailabilityPolicy.Inputs(false, false, true, false, null)
+    private var radioReceiverRegistered = false
+    private val radioReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            // Android delivers this receiver on main. Check actual adapter state in
+            // start(), rather than trusting a broadcast extra to authorize work.
+            val adapter = this@BleConnectionManager.context
+                .getSystemService(android.bluetooth.BluetoothManager::class.java)?.adapter
+            val enabled = try { adapter?.isEnabled == true } catch (_: SecurityException) { false }
+            if (enabled) updateBleState() else bleServer?.stop()
+        }
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val _serverFlow = kotlinx.coroutines.flow.MutableStateFlow<BleGattServer?>(null)
@@ -45,52 +61,55 @@ class BleConnectionManager(private val context: Context) {
             BleTransportBridge.initialize(bleServer!!)
         }
 
+        if (!radioReceiverRegistered) {
+            try {
+                ContextCompat.registerReceiver(context, radioReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+                    ContextCompat.RECEIVER_EXPORTED)
+                radioReceiverRegistered = true
+            } catch (failure: RuntimeException) { Log.w(TAG, "Unable to observe Bluetooth power changes", failure) }
+        }
         if (observationJob?.isActive == true) return
         observationJob = scope.launch {
             combine(
                 dataStoreManager.getBleSyncEnabled(),
                 dataStoreManager.getUserManuallyDisconnected(),
                 dataStoreManager.isAppPaused(),
-                WebSocketUtil.connectionState
-            ) { enabled, manuallyDisconnected, isPaused, wsConnected ->
-                data class BleInputs(val enabled: Boolean, val manuallyDisconnected: Boolean, val isPaused: Boolean, val wsConnected: Boolean)
-                BleInputs(enabled, manuallyDisconnected, isPaused, wsConnected)
-            }.collectLatest { inputs ->
-                isBleEnabled = inputs.enabled
-                isPaused = inputs.isPaused
-                isManuallyDisconnected = inputs.manuallyDisconnected
-                regularConnectionActive = inputs.wsConnected
-                updateBleState(
-                    regularConnectionActive = inputs.wsConnected,
-                    manuallyDisconnected = inputs.manuallyDisconnected,
-                    isPaused = inputs.isPaused
-                )
+                WebSocketUtil.connectionState,
+                dataStoreManager.getLastConnectedDevice().map { it?.symmetricKey }.distinctUntilChanged()
+            ) { enabled, manuallyDisconnected, paused, wsConnected, pairingKey ->
+                BleAvailabilityPolicy.Inputs(enabled, manuallyDisconnected, paused, wsConnected, pairingKey)
+            }.distinctUntilChanged().collectLatest { next ->
+                // An IP change for the same Mac does not interrupt Bluetooth;
+                // changing the pairing key must evict its old authenticated peer.
+                if (inputs.pairingKey != next.pairingKey) bleServer?.stop()
+                inputs = next
+                updateBleState()
             }
         }
     }
 
-    private fun updateBleState(regularConnectionActive: Boolean, manuallyDisconnected: Boolean, isPaused: Boolean = false) {
-        if (isPaused || !isBleEnabled || manuallyDisconnected) {
-            Log.d(TAG, "BLE paused or disabled in settings, stopping/pausing server")
+    fun refreshAvailability() {
+        scope.launch { updateBleState() }
+    }
+
+    private fun updateBleState() {
+        if (!BleAvailabilityPolicy.shouldRun(inputs) || app.androp.android.utils.BackgroundWorkController.isPaused) {
             bleServer?.stop()
             return
         }
-
-        if (regularConnectionActive) {
-            // Regular Wi-Fi/USB connection is up — pause advertising to save power.
-            Log.d(TAG, "Regular connection active — pausing BLE advertising")
-            bleServer?.pauseAdvertising()
-        } else {
-            // No regular connection — ensure server is started and advertising so devices can discover and connect
-            Log.d(TAG, "No regular connection — resuming BLE advertising")
-            bleServer?.start()
-            bleServer?.resumeAdvertising()
-        }
+        // Both operations are idempotent. GATT stops advertising after a central
+        // connects and resumes on disconnect; Wi-Fi never disables this link.
+        bleServer?.start()
+        bleServer?.resumeAdvertising()
     }
 
     fun stop() {
         observationJob?.cancel()
         observationJob = null
+        if (radioReceiverRegistered) {
+            runCatching { context.unregisterReceiver(radioReceiver) }
+            radioReceiverRegistered = false
+        }
         bleServer?.destroy()
         bleServer = null
         _serverFlow.value = null
@@ -116,8 +135,6 @@ class BleConnectionManager(private val context: Context) {
         bleServer = BleGattServer(context)
         _serverFlow.value = bleServer
         BleTransportBridge.initialize(bleServer!!)
-        if (isBleEnabled && !isPaused && !isManuallyDisconnected && !regularConnectionActive) {
-            bleServer?.start()
-        }
+        updateBleState()
     }
 }

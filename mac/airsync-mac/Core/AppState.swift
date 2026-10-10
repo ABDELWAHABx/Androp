@@ -294,40 +294,11 @@ class AppState: ObservableObject {
                 UserDefaults.standard.set(d.name, forKey: "lastRegularDeviceName")
             }
 
-            // BLE connection management: Wi-Fi priority over BLE
-            let isRegularConnection = device?.isRegularConnection ?? false
-            let wasRegularConnection = oldValue?.isRegularConnection ?? false
+            // Bluetooth remains available beside the faster network transport.
+            // The central manager owns discovery backoff; device updates must
+            // never reset it or tear down an authenticated standby link.
+            BLECentralManager.shared.ensureAutomaticConnection()
 
-            if isRegularConnection {
-                // Regular connection established — immediately put BLE to idle (stop scan) and reset manual disconnect flag
-                if isBLEEnabled {
-                    print("[state] Regular connection active — stopping BLE scan")
-                    BLECentralManager.shared.stopScanning()
-                    if BLECentralManager.shared.isConnected {
-                        BLECentralManager.shared.disconnect()
-                    }
-                    BLECentralManager.shared.isManuallyDisconnected = false
-                }
-                // Cancel any pending delayed BLE wake-up tasks
-                self.bleWakeUpWorkItem?.cancel()
-                self.bleWakeUpWorkItem = nil
-            } else if !isRegularConnection && wasRegularConnection {
-                // Regular connection lost — schedule BLE scanning after 5 seconds to give Wi-Fi a chance to reconnect
-                self.bleWakeUpWorkItem?.cancel()
-                let workItem = DispatchWorkItem { [weak self] in
-                    guard let self = self else { return }
-                    let stillDisconnected = self.device == nil || self.device?.isBLE == true
-                    if stillDisconnected && !self.isSyncPaused && self.isBLEEnabled && self.isBLEAutoConnectEnabled
-                        && !BLECentralManager.shared.isAuthenticated
-                        && !UserDefaults.standard.isManuallyDisconnected {
-                        print("[state] Regular connection stayed lost for 5s — resuming BLE scan to auto-connect nearby")
-                        BLECentralManager.shared.isManuallyDisconnected = false
-                        BLECentralManager.shared.startScanning()
-                    }
-                }
-                self.bleWakeUpWorkItem = workItem
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: workItem)
-            }
         }
     }
     @Published var notifications: [Notification] = []
@@ -755,6 +726,7 @@ class AppState: ObservableObject {
             UserDefaults.standard.set(isBLEAutoConnectEnabled, forKey: "isBLEAutoConnectEnabled")
             if isBLEAutoConnectEnabled {
                 BLECentralManager.shared.isManuallyDisconnected = false
+                BLECentralManager.shared.ensureAutomaticConnection()
             }
         }
     }
@@ -1342,6 +1314,24 @@ class AppState: ObservableObject {
             if manual {
                 UserDefaults.standard.isManuallyDisconnected = true
                 WebSocketServer.shared.sendDisconnectRequest()
+            }
+
+            if !manual && !isSyncPaused && BLECentralManager.shared.isAuthenticated {
+                // Only the network path ended. Keep the authenticated phone,
+                // clipboard and controls alive over Bluetooth.
+                WebSocketServer.shared.cancelAllFileTransfers()
+                WebDAVManager.shared.unmount()
+                QuickConnectManager.shared.cancelPendingConnection()
+                activeMacIp = nil
+                isConnectionWeak = false
+                showFileBrowser = false
+                browseItems.removeAll()
+                if adbConnected {
+                    ADBConnector.disconnectADB()
+                    adbConnected = false
+                }
+                updateVirtualDeviceForBLE()
+                return
             }
 
             // Then locally reset state
@@ -2029,22 +2019,8 @@ class AppState: ObservableObject {
                 self.status = nil
                 self.notifications = []
             }
-            // Resume scanning after BLE disconnect (unless a regular connection is already active)
-            let hasRegularConnection = self.device?.isRegularConnection ?? false
-            if !isSyncPaused && isBLEEnabled && isBLEAutoConnectEnabled && !hasRegularConnection
-                && !BLECentralManager.shared.isManuallyDisconnected && !UserDefaults.standard.isManuallyDisconnected {
-                bleWakeUpWorkItem?.cancel()
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self, !self.isSyncPaused, self.isBLEEnabled, self.isBLEAutoConnectEnabled,
-                          !(self.device?.isRegularConnection ?? false), !BLECentralManager.shared.isAuthenticated,
-                          !BLECentralManager.shared.isManuallyDisconnected,
-                          !UserDefaults.standard.isManuallyDisconnected else { return }
-                    self.bleWakeUpWorkItem = nil
-                    BLECentralManager.shared.startScanning()
-                }
-                bleWakeUpWorkItem = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0, execute: work)
-            }
+            // The central manager owns bounded scan/retry scheduling.
+
         }
     }
 
@@ -2071,7 +2047,8 @@ class AppState: ObservableObject {
             port: 0,
             version: "2.0.0",
             adbPorts: [],
-            deviceId: BLECentralManager.shared.connectingDeviceUUID ?? "ble_device"
+            deviceId: UserDefaults.standard.string(forKey: "lastBLEPairedDeviceID")
+                ?? BLECentralManager.shared.connectingDeviceUUID ?? "ble_device"
         )
         
         // Reuse cached wallpaper for BLE connection

@@ -84,6 +84,7 @@ class BleGattServer(private val context: Context) {
     }
 
     private val pendingServices = mutableListOf<BluetoothGattService>()
+    @Volatile private var servicesReady = false
 
     /**
      * Start the GATT server and begin advertising
@@ -105,7 +106,10 @@ class BleGattServer(private val context: Context) {
             return
         }
 
-        setupGattServer()
+        try { setupGattServer() } catch (failure: RuntimeException) {
+            Log.w(TAG, "Bluetooth stack unavailable; waiting for the next lifecycle event", failure)
+            stop()
+        }
     }
 
     /**
@@ -118,8 +122,9 @@ class BleGattServer(private val context: Context) {
         stopAdvertising()
         val server = gattServer
         gattServer = null
-        server?.clearServices()
-        server?.close()
+        servicesReady = false
+        runCatching { server?.clearServices() }.onFailure { Log.w(TAG, "Unable to clear Bluetooth services", it) }
+        runCatching { server?.close() }.onFailure { Log.w(TAG, "Unable to close Bluetooth server", it) }
         connectedDevices.clear()
         notificationSubscriptions.clear()
         authenticatedDevice = null
@@ -205,13 +210,16 @@ class BleGattServer(private val context: Context) {
 
     private fun startAdvertising() {
         if (app.androp.android.utils.BackgroundWorkController.isPaused) return
-        if (gattServer == null || isAdvertisingPaused || connectedDevices.isNotEmpty()) return
+        if (gattServer == null || !servicesReady || isAdvertisingPaused || connectedDevices.isNotEmpty()) return
         if (currentAdvertiseCallback != null) return
 
-        val advertiser = adapter.bluetoothLeAdvertiser ?: return
+        val advertiser = try { adapter.bluetoothLeAdvertiser } catch (failure: RuntimeException) {
+            Log.w(TAG, "Bluetooth advertiser unavailable", failure)
+            null
+        } ?: return
 
         val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
             .setConnectable(true)
             .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
@@ -247,13 +255,19 @@ class BleGattServer(private val context: Context) {
         }
 
         currentAdvertiseCallback = callback
-        advertiser.startAdvertising(settings, data, scanResponse, callback)
+        try { advertiser.startAdvertising(settings, data, scanResponse, callback) }
+        catch (failure: RuntimeException) {
+            currentAdvertiseCallback = null
+            _connectionState.value = BleConnectionState.DISCONNECTED
+            Log.w(TAG, "Unable to advertise; waiting for a radio/settings event", failure)
+        }
     }
 
     private fun stopAdvertising() {
         val callback = currentAdvertiseCallback ?: return
-        adapter.bluetoothLeAdvertiser?.stopAdvertising(callback)
         currentAdvertiseCallback = null
+        runCatching { adapter.bluetoothLeAdvertiser?.stopAdvertising(callback) }
+            .onFailure { Log.w(TAG, "Unable to stop Bluetooth advertising", it) }
     }
 
     /**
@@ -262,7 +276,7 @@ class BleGattServer(private val context: Context) {
      */
     fun pauseAdvertising() {
         if (isAdvertisingPaused) return
-        Log.d(TAG, "BLE advertising paused (regular connection active)")
+        Log.d(TAG, "BLE advertising paused")
         isAdvertisingPaused = true
         stopAdvertising()
         if (_connectionState.value == BleConnectionState.ADVERTISING) {
@@ -275,9 +289,10 @@ class BleGattServer(private val context: Context) {
      */
     fun resumeAdvertising() {
         if (app.androp.android.utils.BackgroundWorkController.isPaused) return
-        if (!isAdvertisingPaused) return
         if (gattServer == null) return
-        Log.d(TAG, "BLE advertising resumed")
+        // Retry only on a lifecycle/radio/settings event after an advertising
+        // failure; startAdvertising itself ignores live or connected sessions.
+        Log.d(TAG, "BLE advertising available")
         isAdvertisingPaused = false
         startAdvertising()
     }
@@ -292,6 +307,7 @@ class BleGattServer(private val context: Context) {
                 gattServer?.addService(next)
             } else {
                 Log.d(TAG, "All services added, starting advertising")
+                servicesReady = true
                 startAdvertising()
             }
         }
@@ -563,6 +579,9 @@ class BleGattServer(private val context: Context) {
                     BleTransportBridge.sendBatteryStatus(app.androp.android.utils.DeviceInfoUtil.getBatteryInfo(context))
                     app.androp.android.utils.SyncManager.startPeriodicSync(context)
                     app.androp.android.utils.SyncManager.checkAndSyncDeviceStatus(context, forceSync = true)
+                    // Retain the existing connected-device foreground service
+                    // when Bluetooth is the first/only transport to authenticate.
+                    app.androp.android.service.AirSyncService.start(context, deviceData?.name)
                 } else {
                     Log.w(TAG, "BLE Auth Failed! Token mismatch.")
                     sendNotification(

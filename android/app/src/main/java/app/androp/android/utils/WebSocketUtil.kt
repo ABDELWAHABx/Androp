@@ -760,6 +760,9 @@ object WebSocketUtil {
         synchronized(connectionLock) {
             if (manual) manualReconnectSuppressed.set(true)
             Log.d(TAG, "Disconnecting WebSocket (manual=$manual)")
+            val keepBle = app.androp.android.data.ble.BleAvailabilityPolicy.keepBleOnNetworkDisconnect(
+                manual, BackgroundWorkController.isPaused,
+                app.androp.android.data.ble.BleGattServer.isAnyAuthenticated())
 
             if (manual) {
                 sendMessage("{\"type\":\"userDisconnected\",\"data\":{}}")
@@ -771,7 +774,7 @@ object WebSocketUtil {
             connectionAttemptJob = null
             pendingSockets.forEach { it.cancel() }
             pendingSockets.clear()
-            SyncManager.stopPeriodicSync()
+            if (!keepBle) SyncManager.stopPeriodicSync()
             updateConnectedStatus(false)
             isConnecting.set(false)
             isSocketOpen.set(false)
@@ -816,7 +819,7 @@ object WebSocketUtil {
             // Clear continue browsing notifications if possible
             ctx?.let { c ->
                 try {
-                    NotificationUtil.clearContinueBrowsingNotifications(c)
+                    if (!keepBle) NotificationUtil.clearContinueBrowsingNotifications(c)
                 } catch (_: Exception) {
                 }
             }
@@ -828,7 +831,7 @@ object WebSocketUtil {
             // Stop media player if running
             ctx?.let { c ->
                 try {
-                    app.androp.android.service.MacMediaPlayerService.stopMacMedia(c)
+                    if (!keepBle) app.androp.android.service.MacMediaPlayerService.stopMacMedia(c)
                 } catch (_: Exception) {
                 }
             }
@@ -839,7 +842,7 @@ object WebSocketUtil {
                 if (manual && bleManager != null && bleManager.isAuthenticated) {
                     BleTransportBridge.sendManualDisconnect()
                 }
-                bleManager?.disconnectAllConnectedDevices()
+                if (!keepBle) bleManager?.disconnectAllConnectedDevices()
             } catch (e: Exception) {
                 Log.w(TAG, "Error disconnecting BLE devices: ${e.message}")
             }
@@ -1031,7 +1034,7 @@ object WebSocketUtil {
 
                 // 2. Discovery Monitoring (Listen for presence packets in case IP changed)
                 DiscoveryOrchestrator.discoveredDevices.collect { discoveredList ->
-                    if (!autoReconnectActive.get() || manualReconnectSuppressed.get() || BackgroundWorkController.isPaused || isConnected() || isConnecting.get()) return@collect
+                    if (!autoReconnectActive.get() || manualReconnectSuppressed.get() || BackgroundWorkController.isPaused || isWifiConnected() || isConnecting.get()) return@collect
                     if (ds.isAppPaused().first() || ds.getUserManuallyDisconnected().first() || !ds.getAutoReconnectEnabled().first()) return@collect
 
                     val last = ds.getLastConnectedDevice().first() ?: return@collect
@@ -1072,7 +1075,7 @@ object WebSocketUtil {
     // Public wrapper to request auto-reconnect from app logic (e.g., network changes)
     fun requestAutoReconnect(context: Context) {
         // Only if not already connected or connecting
-        if (BackgroundWorkController.isPaused || isConnected() || isConnecting.get()) return
+        if (BackgroundWorkController.isPaused || isWifiConnected() || isConnecting.get()) return
         tryStartAutoReconnect(context)
     }
 }

@@ -192,6 +192,8 @@ class BLETransportBridge {
         DispatchQueue.main.async {
             guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
                   BLECentralManager.shared.sessionGeneration == generation else { return }
+            // Compact BLE metadata must not erase network artwork/timeline.
+            guard AppState.shared.device?.isRegularConnection != true else { return }
             let music = DeviceStatus.Music(
                 isPlaying: isPlaying,
                 title: title,
@@ -238,7 +240,7 @@ class BLETransportBridge {
             guard !AppState.shared.isSyncPaused, BLECentralManager.shared.isAuthenticated,
                   BLECentralManager.shared.sessionGeneration == generation else { return }
             BLECentralManager.shared.connectedDeviceName = name
-            if AppState.shared.device != nil {
+            if AppState.shared.device?.isBLE == true {
                 AppState.shared.device?.name = name
             }
         }

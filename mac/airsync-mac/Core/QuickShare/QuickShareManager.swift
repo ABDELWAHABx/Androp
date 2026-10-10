@@ -41,6 +41,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     @Published public var sendingFileName: String?
     @Published public var sendingDeviceName: String?
     private var preparedDeviceID: String?
+    private var preparedPairingToken: String?
     private var preparedFileSizes: [Int64] = []
     private var preparedDeviceName: String?
     private var wsTransferID: String?
@@ -229,9 +230,6 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         guard let device = AppState.shared.device else {
             presentFileError("Connect your Android phone to androp, then drop the files again."); return
         }
-        guard device.isRegularConnection else {
-            presentFileError("File transfers need Wi-Fi. Connect your phone and Mac to the same network, then reconnect in androp."); return
-        }
         guard !urls.isEmpty else { presentFileError("Choose one or more files to send."); return }
         fileSendGeneration &+= 1
         let generation = fileSendGeneration
@@ -240,6 +238,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         preparedFileSizes = []
         selectedFileSize = 0
         preparedDeviceID = device.deviceId
+        preparedPairingToken = UserDefaults.standard.string(forKey: "bleAuthToken")
         preparedDeviceName = device.name
         transferState = .preparing(device.name)
         AppState.shared.showingQuickShareTransfer = true
@@ -277,9 +276,11 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
             DispatchQueue.main.async {
                 guard self.fileSendGeneration == generation else { return }
                 if let failure { self.transferState = .failed(failure); return }
-                guard AppState.shared.device?.deviceId == device.deviceId && !AppState.shared.isSyncPaused else {
-                    self.transferState = .failed("The phone disconnected. Reconnect and choose the files again."); return
+                guard !AppState.shared.isSyncPaused else {
+                    self.transferState = .failed("Resume androp before sending files."); return
                 }
+                // A Wi-Fi handoff can temporarily remove the phone. Keep the
+                // selection; the send gate checks the original paired identity.
                 self.transferURLs = validated
                 self.preparedFileSizes = sizes
                 self.selectedFileSize = bytes
@@ -288,12 +289,21 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         }
     }
 
+    public var canSendPreparedFiles: Bool {
+        FileTransferRoutePolicy.maySend(
+            preparedDeviceID: preparedDeviceID,
+            currentDeviceID: AppState.shared.device?.deviceId,
+            preparedPairingToken: preparedPairingToken,
+            currentPairingToken: UserDefaults.standard.string(forKey: "bleAuthToken"),
+            networkConnected: AppState.shared.device?.isRegularConnection == true,
+            paused: AppState.shared.isSyncPaused)
+    }
+
     public func sendPreparedFiles() {
         guard case .reviewing = transferState, !transferURLs.isEmpty else { return }
-        guard !AppState.shared.isSyncPaused,
-              let device = AppState.shared.device, device.isRegularConnection,
-              device.deviceId == preparedDeviceID else {
-            presentFileError("Reconnect the same phone over Wi-Fi before sending."); return
+        guard canSendPreparedFiles, let device = AppState.shared.device else {
+            dropFeedback = "Connect the same paired phone over Wi-Fi before sending. Your selected files are still here."
+            return
         }
         fileSendGeneration &+= 1
         let generation = fileSendGeneration
@@ -312,6 +322,11 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
             sendingFileName = nil
             transferProgress = 1
             transferState = .finished
+            return
+        }
+        guard canSendPreparedFiles else {
+            wsTransferID = nil
+            transferState = .failed("The paired phone or Wi-Fi connection changed. Review the files again before retrying.")
             return
         }
         let url = files[index]

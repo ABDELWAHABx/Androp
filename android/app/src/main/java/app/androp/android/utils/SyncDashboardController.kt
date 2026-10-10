@@ -83,12 +83,13 @@ object SyncDashboardController {
     private fun connectivity(current: SyncDashboardState): SyncDashboardState = current.copy(
         transport = when {
             current.paused -> null
+            WebSocketUtil.isWifiConnected() && app.androp.android.data.ble.BleGattServer.isAnyAuthenticated() -> "Bluetooth + network"
             WebSocketUtil.isWifiConnected() -> "Network"
             app.androp.android.data.ble.BleGattServer.isAnyAuthenticated() -> "Bluetooth"
             else -> null
         },
         connecting = !current.paused && WebSocketUtil.isConnecting(),
-        reconnecting = !current.paused && WebSocketUtil.isAutoReconnecting()
+        reconnecting = !current.paused && !WebSocketUtil.isConnected() && WebSocketUtil.isAutoReconnecting()
     )
 
     fun refreshConnection() { update { connectivity(it) } }

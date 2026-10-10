@@ -91,7 +91,7 @@ struct CompactDeviceCard: View {
     
     private var isLoading: Bool {
         if device.type == "ble" {
-            return bleManager.connectingDeviceUUID == device.deviceId
+            return !bleManager.isAuthenticated && bleManager.connectingDeviceUUID == device.deviceId
         }
         return quickConnectManager.connectingDeviceID == device.id
     }

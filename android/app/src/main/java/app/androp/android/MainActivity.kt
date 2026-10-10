@@ -308,6 +308,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Permission/settings grants can return without changing BLE preferences.
+        AirSyncApp.getBleConnectionManager()?.refreshAvailability()
         app.androp.android.utils.SyncDashboardController.refreshNotification()
         lifecycleScope.launch {
             val ds = DataStoreManager.getInstance(applicationContext)

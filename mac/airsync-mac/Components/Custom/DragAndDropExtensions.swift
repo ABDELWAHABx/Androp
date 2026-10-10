@@ -68,7 +68,7 @@ struct ConnectedFileDropZone: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .help("Drop one or more Finder files, or click to choose files. Transfers use your connected phone over Wi-Fi.")
+        .help("Drop one or more Finder files, or click to choose files. Choose files while connected by Bluetooth; connect Wi-Fi or your phone hotspot to send.")
         .accessibilityLabel("Send files to your Android phone")
         .accessibilityHint("Choose files or drop files from Finder, then review and send.")
         .onDrop(of: [UTType.fileURL], isTargeted: $targeted) { providers in

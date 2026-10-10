@@ -306,14 +306,20 @@ extension WebSocketServer {
                 }
             }
 
-            if let bleToken = dict["bleAuthToken"] as? String {
+            if let bleToken = dict["bleAuthToken"] as? String, !bleToken.isEmpty {
                 let oldToken = UserDefaults.standard.string(forKey: "bleAuthToken")
                 UserDefaults.standard.set(bleToken, forKey: "bleAuthToken")
-                print("[websocket] Received BLE auth token")
-                
-                // If token changed or was new, and BLE is enabled, we might want to reconnect
+                if !deviceId.isEmpty {
+                    UserDefaults.standard.set(deviceId, forKey: "lastBLEPairedDeviceID")
+                } else {
+                    UserDefaults.standard.removeObject(forKey: "lastBLEPairedDeviceID")
+                }
+                // An authenticated network pairing changing the credential
+                // invalidates the old Bluetooth session before any new commands.
                 if oldToken != bleToken && AppState.shared.isBLEEnabled {
-                    BLECentralManager.shared.startScanning()
+                    BLECentralManager.shared.disconnect(restartScanning: true)
+                } else {
+                    BLECentralManager.shared.ensureAutomaticConnection()
                 }
             }
 

@@ -9,6 +9,10 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     if !condition() { throw RegressionFailure(description: message) }
 }
 func makeManager() -> BLECentralManager {
+    UserDefaults.standard.set("test-pairing-token", forKey: "bleAuthToken")
+    UserDefaults.standard.set(false, forKey: "isManuallyDisconnected")
+    UserDefaults.standard.removeObject(forKey: "bleAuthenticatedPeerUUID")
+    UserDefaults.standard.removeObject(forKey: "bleAuthenticatedTokenFingerprint")
     AppState.shared.device = nil
     AppState.shared.isBLEEnabled = true
     AppState.shared.isBLEAutoConnectEnabled = true
@@ -135,6 +139,89 @@ let cases: [(String, () throws -> Void)] = [
         manager.disconnect(restartScanning: true)
         try expect(manager.connectionStatus == .disconnected, "explicit restart scanned during pause")
     }),
+    ("Wi-Fi keeps automatic BLE discovery eligible", {
+        let manager = makeManager()
+        AppState.shared.device = makeDevice("192.168.1.2")
+        try expect(manager.automaticConnectionAllowedForTesting, "Wi-Fi blocked BLE policy")
+        manager.scheduleScanRestartForTesting(after: 30)
+        try expect(manager.hasPendingScanRestartForTesting, "Wi-Fi prevented BLE retry")
+        manager.ensureAutomaticConnection()
+        try expect(manager.scheduledScanDelayForTesting == 30, "Wi-Fi lifecycle event shortened cooldown")
+        manager.stopScanning()
+    }),
+    ("An authenticated BLE standby survives Wi-Fi discovery requests", {
+        let manager = makeManager()
+        manager.connectionStatus = .authenticated
+        manager.connectingDeviceUUID = "authenticated-peer"
+        AppState.shared.device = makeDevice("192.168.1.2")
+        manager.ensureAutomaticConnection()
+        manager.stopScanning()
+        try expect(manager.isAuthenticated, "Wi-Fi request dropped authenticated BLE")
+        try expect(manager.connectingDeviceUUID == "authenticated-peer", "authenticated peer identity was cleared")
+        try expect(!manager.hasPendingScanRestartForTesting, "authenticated session scheduled discovery")
+    }),
+    ("Global manual disconnect and missing pairing suppress background discovery", {
+        let manager = makeManager()
+        UserDefaults.standard.set(true, forKey: "isManuallyDisconnected")
+        manager.scheduleScanRestartForTesting(after: 30)
+        try expect(!manager.hasPendingScanRestartForTesting, "global manual disconnect was ignored")
+        UserDefaults.standard.set(false, forKey: "isManuallyDisconnected")
+        UserDefaults.standard.removeObject(forKey: "bleAuthToken")
+        manager.scheduleScanRestartForTesting(after: 30)
+        try expect(!manager.hasPendingScanRestartForTesting, "unpaired app scheduled recurring discovery")
+    }),
+    ("Discovery windows stop scanning and back off to a bounded one-minute rest", {
+        let manager = makeManager()
+        for index in 0..<20 {
+            manager.connectionStatus = .scanning
+            manager.finishDiscoveryWindowForTesting()
+            try expect(manager.connectionStatus == .disconnected, "window left continuous scanning active")
+            try expect(manager.hasPendingScanRestartForTesting, "window did not arrange future discovery")
+            let delay = manager.scheduledScanDelayForTesting ?? 0
+            try expect(delay >= 5 && delay <= 60, "scan rest escaped its battery/availability bounds")
+            if index >= 4 { try expect(delay == 60, "repeated missed discovery did not back off") }
+        }
+        manager.disconnect()
+        try expect(!manager.hasPendingScanRestartForTesting, "manual stop retained discovery window")
+    }),
+    ("A discovery window never tears down an established connection", {
+        let manager = makeManager()
+        manager.connectionStatus = .authenticated
+        manager.finishDiscoveryWindowForTesting()
+        try expect(manager.isAuthenticated, "expired window disconnected a live link")
+        try expect(!manager.hasPendingScanRestartForTesting, "live link retained periodic scan work")
+    }),
+    ("Transient connection and authentication timeout retries preserve intent and back off", {
+        let manager = makeManager()
+        AppState.shared.device = makeDevice("192.168.1.2")
+        for index in 0..<20 {
+            manager.retryTransportFailureForTesting()
+            try expect(!manager.isManuallyDisconnected, "transient failure was treated as user disconnect")
+            let delay = manager.scheduledScanDelayForTesting ?? 0
+            try expect(delay >= 3 && delay <= 60, "transport retries escaped their bounds")
+            if index >= 5 { try expect(delay == 60, "failing transport did not back off") }
+        }
+        try expect(AppState.shared.device?.ipAddress == "192.168.1.2", "BLE failure destroyed Wi-Fi")
+        manager.disconnect()
+    }),
+    ("Authenticated peer pin prevents token probing of different BLE advertisers", {
+        let manager = makeManager()
+        manager.rememberPeerForTesting("paired-peer")
+        try expect(manager.mayAutomaticallyConnectForTesting(to: "paired-peer"), "saved peer was rejected")
+        try expect(!manager.mayAutomaticallyConnectForTesting(to: "other-peer"), "existing token could be sent to another advertiser")
+        try expect(UserDefaults.standard.string(forKey: "bleAuthenticatedTokenFingerprint") != "test-pairing-token", "pin persisted a duplicate bearer token")
+        UserDefaults.standard.set("new-pairing-token", forKey: "bleAuthToken")
+        try expect(manager.mayAutomaticallyConnectForTesting(to: "new-peer"), "explicit new pairing retained old peer pin")
+    }),
+    ("Rejected authentication cools down that peer without blocking another phone", {
+        let manager = makeManager()
+        manager.rejectAuthenticationForTesting(peerUUID: "rejected-peer")
+        try expect(!manager.isManuallyDisconnected, "auth rejection changed manual user intent")
+        try expect(!manager.mayAutomaticallyConnectForTesting(to: "rejected-peer"), "rejected peer can immediately loop authentication")
+        try expect(manager.mayAutomaticallyConnectForTesting(to: "different-peer"), "one bad advertiser blocked every phone")
+        try expect(manager.mayAutomaticallyConnectForTesting(to: "rejected-peer", now: Date().addingTimeInterval(301)), "auth cooldown never expires")
+        manager.disconnect()
+    }),
     ("Published teardown callbacks cannot reenter disconnect", {
         let manager = makeManager()
         manager.connectionStatus = .scanning
@@ -148,10 +235,16 @@ let cases: [(String, () throws -> Void)] = [
     })
 ]
 
+let preferenceKeys = ["bleAuthToken", "isManuallyDisconnected", "bleAuthenticatedPeerUUID", "bleAuthenticatedTokenFingerprint"]
+let savedPreferences = preferenceKeys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
 var failures = 0
 for (name, test) in cases {
     do { try test(); print("PASS: \(name)") }
     catch { failures += 1; fputs("FAIL: \(name): \(error)\n", stderr) }
+}
+for (key, value) in savedPreferences {
+    if let value = value { UserDefaults.standard.set(value, forKey: key) }
+    else { UserDefaults.standard.removeObject(forKey: key) }
 }
 print("BLE lifecycle regressions: \(cases.count) tests, \(failures) failures")
 exit(failures == 0 ? 0 : 1)

@@ -25,7 +25,26 @@ enum LifecycleSelfTest {
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
             finish(success: false, message: "Lifecycle self-test exceeded 15 seconds")
         }
+        verifyBluetoothHandoff()
         pause(cycle: 1)
+    }
+
+    @MainActor private static func verifyBluetoothHandoff() {
+        let state = AppState.shared
+        let bluetooth = BLECentralManager.shared
+        let phoneID = "lifecycle-test-phone"
+        UserDefaults.standard.set(phoneID, forKey: "lastBLEPairedDeviceID")
+        state.device = Device(name: "Test phone", ipAddress: "127.0.0.1", port: 0,
+                              version: "1", adbPorts: [], deviceId: phoneID)
+        bluetooth.connectingDeviceUUID = "lifecycle-test-radio"
+        bluetooth.connectionStatus = .authenticated
+        state.disconnectDevice(manual: false)
+        guard state.device?.deviceId == phoneID, state.device?.isBLE == true,
+              bluetooth.isAuthenticated, !state.isSyncPaused else {
+            finish(success: false, message: "Network loss destroyed Bluetooth fallback")
+            return
+        }
+        print("LIFECYCLE handoff: network loss retains authenticated Bluetooth and phone identity")
     }
 
     @MainActor private static func pause(cycle: Int) {

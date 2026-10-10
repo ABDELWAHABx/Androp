@@ -293,7 +293,7 @@ class AirSyncViewModel(
                 Log.d("AirSyncViewModel", "BLE connection state changed: $state")
                 val isBleAuthenticated =
                     state == app.androp.android.data.ble.BleGattServer.BleConnectionState.AUTHENTICATED
-                val isWsConnected = WebSocketUtil.isConnected()
+                val isWsConnected = WebSocketUtil.isWifiConnected()
 
                 _uiState.value = _uiState.value.copy(
                     bleConnectionState = state,

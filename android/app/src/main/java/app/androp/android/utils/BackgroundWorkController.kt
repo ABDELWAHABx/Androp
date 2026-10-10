@@ -21,6 +21,7 @@ object BackgroundWorkController {
         isPaused = true
         val application = context.applicationContext
         runShutdownSteps(listOf(
+            "Bluetooth" to { app.androp.android.AirSyncApp.getBleConnectionManager()?.refreshAvailability(); Unit },
             "phone alert" to { FindPhoneManager.stop() },
             "hotspot status" to { HotspotControlManager.stopObserving() },
             "dashboard" to { SyncDashboardController.setPaused(true) },
@@ -42,6 +43,9 @@ object BackgroundWorkController {
 
     fun resume() {
         isPaused = false
+        // Preference collectors can observe Resume before this runtime flag. An
+        // event-driven recheck closes that ordering gap without polling.
+        app.androp.android.AirSyncApp.getBleConnectionManager()?.refreshAvailability()
         SyncDashboardController.setPaused(false)
         app.androp.android.service.MediaNotificationListener.refreshMonitoring()
     }

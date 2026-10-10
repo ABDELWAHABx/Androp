@@ -109,14 +109,27 @@ struct QuickShareTransferSheet: View {
                 }
             }
             .frame(maxHeight: 168)
-            Text("Files will be saved in Downloads on your phone.")
+            Text("Files use Wi-Fi and are saved in Downloads on your phone.")
                 .font(.caption).foregroundStyle(.secondary)
+            if !manager.canSendPreparedFiles {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Connect Wi-Fi to send", systemImage: "wifi")
+                        .font(.subheadline).fontWeight(.medium)
+                    Text("Your files stay selected. Join the same Wi-Fi network, or connect to your phone's hotspot below. Send becomes available when the same paired phone reconnects.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    PhoneHotspotControls(compact: true)
+                }
+                .padding(12)
+                .background(Color.secondary.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
             HStack {
                 Button("Choose files…") { manager.chooseFilesForConnectedDevice() }
                 Spacer()
                 Button("Cancel") { manager.cancelActiveTransfer() }.keyboardShortcut(.cancelAction)
                 Button("Send") { manager.sendPreparedFiles() }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!manager.canSendPreparedFiles)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityLabel("Send selected files to \(target)")
             }

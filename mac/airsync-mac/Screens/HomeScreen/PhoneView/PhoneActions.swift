@@ -88,6 +88,7 @@ struct FindPhoneButton: View {
 
 struct PhoneConnectionSummary: View {
     @ObservedObject private var appState = AppState.shared
+    @ObservedObject private var bluetooth = BLECentralManager.shared
     var compact = false
 
     private var deviceName: String {
@@ -98,6 +99,7 @@ struct PhoneConnectionSummary: View {
         if appState.isSyncPaused { return "Sync paused" }
         guard let device = appState.device else { return "Phone offline" }
         if device.isBLE { return "Bluetooth LE connected" }
+        if bluetooth.isAuthenticated { return "Bluetooth LE + Wi-Fi connected" }
         return device.ipAddress.hasPrefix("100.") ? "Network connected" : "Wi-Fi connected"
     }
     private var connectionIcon: String {
@@ -184,8 +186,8 @@ struct PhonePrimaryActions: View {
         VStack(spacing: 8) {
             FindPhoneButton(compact: compact)
             HStack(spacing: 6) {
-                PhoneActionTile(title: "Send files", symbol: "square.and.arrow.up", enabled: filesAvailable,
-                                help: filesAvailable ? "Choose files and review before sending" : "Files need a connected Wi-Fi session") {
+                PhoneActionTile(title: "Send files", symbol: "square.and.arrow.up", enabled: available,
+                                help: filesAvailable ? "Choose files and review before sending" : "Choose files, then connect Wi-Fi to send") {
                     QuickShareManager.shared.chooseFilesForConnectedDevice()
                 }
                 .keyboardShortcut("f", modifiers: .command)
