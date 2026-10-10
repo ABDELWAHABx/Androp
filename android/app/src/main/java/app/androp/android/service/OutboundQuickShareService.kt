@@ -13,6 +13,8 @@ import app.androp.android.R
 import app.androp.android.data.local.DataStoreManager
 import app.androp.android.quickshare.OutboundQuickShareConnection
 import app.androp.android.quickshare.QuickShareDiscovery
+import app.androp.android.utils.TransferNetworkManager
+import app.androp.android.utils.WebSocketUtil
 import app.androp.android.utils.NotificationUtil
 import app.androp.android.utils.SyncDashboardController
 import kotlinx.coroutines.SupervisorJob
@@ -20,6 +22,12 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ensureActive
 import java.io.File
@@ -38,16 +46,21 @@ class OutboundQuickShareService : Service() {
         private const val DISCOVERY_TIMEOUT_MS = 15_000L
 
         const val EXTRA_URIS = "uris"
+        private const val EXTRA_PAIRING_KEY = "paired_transfer_key"
+        private const val EXTRA_NETWORK_LEASE = "network_lease"
 
         @Volatile var isSending = false
             private set
 
         @Synchronized
-        fun start(context: Context, uris: List<Uri>): Boolean {
+        fun start(context: Context, uris: List<Uri>, pairingKey: String, networkLease: String? = null): Boolean {
             if (isSending || uris.isEmpty() || uris.size > 256 || app.androp.android.utils.BackgroundWorkController.isPaused) return false
+            if (WebSocketUtil.authenticatedPeerAddress(pairingKey) == null) return false
             isSending = true
             val intent = Intent(context, OutboundQuickShareService::class.java).apply {
                 putParcelableArrayListExtra(EXTRA_URIS, ArrayList(uris))
+                putExtra(EXTRA_PAIRING_KEY, pairingKey)
+                putExtra(EXTRA_NETWORK_LEASE, networkLease)
             }
             return try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
@@ -71,6 +84,8 @@ class OutboundQuickShareService : Service() {
     @Volatile
     private var pendingSocket: Socket? = null
     private var outgoingCacheFiles: List<File> = emptyList()
+    private var expectedPairingKey: String? = null
+    private var networkLease: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -83,6 +98,8 @@ class OutboundQuickShareService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val uris: List<Uri> = intent?.getParcelableArrayListExtra(EXTRA_URIS) ?: emptyList()
         if (activeStart) return START_NOT_STICKY
+        expectedPairingKey = intent?.getStringExtra(EXTRA_PAIRING_KEY)
+        networkLease = intent?.getStringExtra(EXTRA_NETWORK_LEASE)
         // Own the complete staged batch before any permission, pause or discovery failure.
         // This also cleans unreadable files instead of only the metadata-success subset.
         outgoingCacheFiles = uris.filter { it.scheme == "file" }.mapNotNull { it.path?.let(::File) }
@@ -107,6 +124,27 @@ class OutboundQuickShareService : Service() {
                 stopSelf()
                 return@launch
             }
+
+            val expected = expectedPairingKey
+            if (expected == null || pairedDevice.symmetricKey != expected ||
+                WebSocketUtil.authenticatedPeerAddress(expected) == null || dataStoreManager.getUserManuallyDisconnected().first()) {
+                updateNotification("Connection changed before sending. Share the files again when connected.")
+                stopSelf()
+                return@launch
+            }
+            // Stop the active send on Pause, manual disconnect, pairing changes or loss of
+            // the authenticated Wi-Fi session. A later reconnect never replays the files.
+            serviceScope.launch {
+                combine(dataStoreManager.getLastConnectedDevice(), dataStoreManager.isAppPaused(),
+                    dataStoreManager.getUserManuallyDisconnected(), WebSocketUtil.connectionState) { device, paused, manual, _ ->
+                    device?.symmetricKey != expected || paused || manual ||
+                        WebSocketUtil.authenticatedPeerAddress(expected) == null
+                }.first { it }
+                stopSelf()
+            }
+            networkLease?.let { id -> serviceScope.launch {
+                while (isActive) { TransferNetworkManager.keepAlive(id); delay(25_000) }
+            } }
 
             // Must match SyncManager's fallback chain exactly — this is what the Mac stored as
             // AppState.shared.device?.name during pairing, and its Quick Share auto-accept does
@@ -135,64 +173,96 @@ class OutboundQuickShareService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun findAndSend(
+    private suspend fun findAndSend(
         macName: String,
         ourName: String,
         files: List<OutboundQuickShareConnection.PendingFile>
     ) {
+        val key = expectedPairingKey ?: run { stopSelf(); return }
+        // A phone-hosted hotspot need not participate in Android's default NSD
+        // network. New Macs advertise the ready listener through the paired
+        // encrypted socket, allowing a direct connection to that exact peer.
+        val advertisement = withTimeoutOrNull(6_000) {
+            WebSocketUtil.quickShareAdvertisement.map {
+                WebSocketUtil.authenticatedQuickShareAdvertisement(key)?.takeIf { it.port != null }
+            }.filterNotNull().first()
+        }
+        val authenticatedHost = WebSocketUtil.authenticatedPeerAddress(key) ?: run { stopSelf(); return }
+        if (advertisement?.port != null) {
+            val latest = WebSocketUtil.authenticatedQuickShareAdvertisement(key)
+            if (latest?.port != advertisement.port) {
+                updateNotification("Mac file receiving changed. Share again when ready.")
+                stopSelf()
+                return
+            }
+            if (connecting.compareAndSet(false, true)) {
+                connectAndSend(authenticatedHost, advertisement.port, macName, ourName, files)
+            }
+            return
+        }
+        if (WebSocketUtil.authenticatedQuickShareAdvertisement(key)?.supported == true) {
+            updateNotification("Enable file receiving on your Mac, then share again.")
+            delay(2000)
+            stopSelf()
+            return
+        }
+        // Older Macs do not advertise a port; preserve their existing discovery path.
         val d = QuickShareDiscovery(this)
         discovery = d
-
         val timeoutJob = serviceScope.launch {
-            kotlinx.coroutines.delay(DISCOVERY_TIMEOUT_MS)
+            delay(DISCOVERY_TIMEOUT_MS)
             if (connection == null) {
-                Log.w(TAG, "Discovery timed out")
                 updateNotification("Couldn't find $macName")
                 d.stop()
-                kotlinx.coroutines.delay(2000)
+                delay(2000)
                 stopSelf()
             }
         }
-
-        d.start(macName) { resolved ->
-            if (!connecting.compareAndSet(false, true)) return@start // already connecting/connected
+        d.start(macName, expectedHost = authenticatedHost) { resolved ->
+            val address = expectedPairingKey?.let(WebSocketUtil::authenticatedPeerAddress) ?: return@start
+            val expectedAddress = runCatching { java.net.InetAddress.getByName(address) }.getOrNull()
+            if (resolved.host != expectedAddress || !connecting.compareAndSet(false, true)) return@start
             timeoutJob.cancel()
             d.stop()
+            serviceScope.launch { connectAndSend(address, resolved.port, macName, ourName, files) }
+        }
+    }
 
-            // NSD resolve callbacks land on the main thread — do the blocking socket connect
-            // off of it.
-            serviceScope.launch {
-                try {
-                    if ((app.androp.android.utils.BackgroundWorkController.isPaused || dataStoreManager.isAppPaused().first())) {
-                        stopSelf()
-                        return@launch
-                    }
-                    coroutineContext.ensureActive()
-                    val socket = Socket()
-                    pendingSocket = socket
-                    coroutineContext.ensureActive()
-                    socket.connect(InetSocketAddress(resolved.host, resolved.port), 10_000)
-                    socket.tcpNoDelay = true
-                    socket.soTimeout = 60_000
-                    val conn = OutboundQuickShareConnection(
-                        context = this@OutboundQuickShareService,
-                        socket = socket,
-                        ourDeviceName = ourName,
-                        files = files
-                    )
-                    coroutineContext.ensureActive()
-                    connection = conn
-                    wireCallbacks(conn, macName)
-                    conn.start()
-                } catch (e: Exception) {
-                    runCatching { pendingSocket?.close() }
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    Log.e(TAG, "Failed to connect to $macName", e)
-                    updateNotification("Couldn't connect to $macName")
-                    kotlinx.coroutines.delay(2000)
-                    stopSelf()
-                }
+    private suspend fun connectAndSend(
+        address: String, port: Int, macName: String, ourName: String,
+        files: List<OutboundQuickShareConnection.PendingFile>
+    ) {
+        try {
+            check(port in 1..65535) { "Invalid file receiving endpoint" }
+            if (app.androp.android.utils.BackgroundWorkController.isPaused || dataStoreManager.isAppPaused().first()) {
+                stopSelf(); return
             }
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            val liveAddress = expectedPairingKey?.let(WebSocketUtil::authenticatedPeerAddress)
+            check(liveAddress == address) { "Paired connection changed" }
+            val socket = Socket()
+            pendingSocket = socket
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            socket.connect(InetSocketAddress(address, port), 10_000)
+            socket.tcpNoDelay = true
+            socket.soTimeout = 60_000
+            val conn = OutboundQuickShareConnection(
+                context = this@OutboundQuickShareService,
+                socket = socket,
+                ourDeviceName = ourName,
+                files = files
+            )
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            connection = conn
+            wireCallbacks(conn, macName)
+            conn.start() // Receiver consent and the Quick Share handshake remain required.
+        } catch (error: Exception) {
+            runCatching { pendingSocket?.close() }
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            Log.w(TAG, "Couldn't open the paired file receiver", error)
+            updateNotification("Couldn't connect to $macName")
+            delay(2000)
+            stopSelf()
         }
     }
 
@@ -314,6 +384,9 @@ class OutboundQuickShareService : Service() {
 
     override fun onDestroy() {
         serviceScope.cancel()
+        networkLease?.let(TransferNetworkManager::stop)
+        networkLease = null
+        expectedPairingKey = null
         discovery?.stop()
         runCatching { pendingSocket?.close() }
         connection?.closeConnection()

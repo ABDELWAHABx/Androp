@@ -38,13 +38,16 @@ class QuickShareDiscovery(private val context: Context) {
     private var generation = 0
     private val infoCallbacks = java.util.concurrent.ConcurrentHashMap.newKeySet<NsdManager.ServiceInfoCallback>()
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+    private var expectedAddress: InetAddress? = null
 
     @Synchronized
-    fun start(targetDeviceName: String, onFound: (ResolvedHost) -> Unit) {
+    fun start(targetDeviceName: String, expectedHost: String? = null, onFound: (ResolvedHost) -> Unit) {
         stop()
 
         if (app.androp.android.utils.BackgroundWorkController.isPaused) return
         val currentGeneration = generation
+        expectedAddress = expectedHost?.let { runCatching { InetAddress.getByName(it) }.getOrNull() }
+        if (expectedHost != null && expectedAddress == null) return
         val normalizedTarget = targetDeviceName.replace("’", "'").lowercase()
 
         discoveryListener = object : NsdManager.DiscoveryListener {
@@ -148,7 +151,11 @@ class QuickShareDiscovery(private val context: Context) {
         Log.d(TAG, "Resolved '$deviceName' at ${info.host}:${info.port}")
 
         if (normalizedFound == normalizedTarget) {
-            val host = info.host ?: return
+            val candidates = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+                info.hostAddresses else listOfNotNull(info.host)
+            val expected = expectedAddress
+            val host = if (expected == null) candidates.firstOrNull() else candidates.firstOrNull { it == expected }
+            if (host == null) return
             onFound(ResolvedHost(host, info.port, deviceName))
         }
     }
@@ -168,5 +175,6 @@ class QuickShareDiscovery(private val context: Context) {
             }
         }
         discoveryListener = null
+        expectedAddress = null
     }
 }

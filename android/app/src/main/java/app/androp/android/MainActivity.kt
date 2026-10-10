@@ -42,6 +42,9 @@ import app.androp.android.crash.CrashReportActivity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.flow.collect
 import app.androp.android.utils.AppNavigation
 import app.androp.android.utils.PairingLink
 
@@ -87,6 +90,16 @@ class MainActivity : ComponentActivity() {
             launchIntent?.getStringExtra(AppNavigation.EXTRA_DESTINATION), launchIntent?.action
         )
         navigationRequestId++
+    }
+
+    private val transferNetworkPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { result ->
+        val granted = result[app.androp.android.utils.TransferNetworkManager.requiredPermission()] == true
+        val message = if (granted) "Wi-Fi permission granted. Send your files again to connect."
+            else if (Build.VERSION.SDK_INT < 33) "Temporary Wi-Fi needs Precise Location on this Android version. Allow it in app permissions, or use a shared Wi-Fi network."
+            else "Wi-Fi transfers can also use an existing shared network."
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     // Flag to keep splash screen visible during app initialization
@@ -192,6 +205,16 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         super.onCreate(savedInstanceState)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                app.androp.android.utils.TransferNetworkManager.permissionNeeded.collect { needed ->
+                    if (needed && app.androp.android.utils.TransferNetworkManager.consumePendingPermission() &&
+                        !app.androp.android.utils.TransferNetworkManager.hasPermission(this@MainActivity)) {
+                        transferNetworkPermissionLauncher.launch(app.androp.android.utils.TransferNetworkManager.requiredPermissions())
+                    }
+                }
+            }
+        }
 
         ExceptionReport(this) { deviceInfo, stackTrace ->
             CrashHandler.onCrash(applicationContext, deviceInfo, stackTrace)

@@ -36,6 +36,9 @@ object WebSocketUtil {
     private const val HANDSHAKE_TIMEOUT_MS = 10_000L
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val connectionEpoch = ConnectionEpoch()
+    private val quickShareEndpointCache = QuickShareEndpointCache()
+    private val mutableQuickShareAdvertisement = MutableStateFlow(QuickShareEndpointCache.Advertisement())
+    internal val quickShareAdvertisement = mutableQuickShareAdvertisement.asStateFlow()
     private val connectionLock = Any()
     private val pendingSockets = java.util.concurrent.CopyOnWriteArraySet<WebSocket>()
     private var webSocket: WebSocket? = null
@@ -49,7 +52,10 @@ object WebSocketUtil {
     private fun updateConnectedStatus(status: Boolean) {
         isConnected.set(status)
         _connectionStateFlow.value = status
-        if (!status) WebDavServer.revokeAccess()
+        if (!status) {
+            WebDavServer.revokeAccess()
+            synchronized(connectionLock) { mutableQuickShareAdvertisement.value = quickShareEndpointCache.clear() }
+        }
         notifyConnectionStatusListeners(status)
         // A permanently held LOW_LATENCY Wi-Fi lock prevents the radio from sleeping.
         // WebSocket traffic and OS connection management do not require it.
@@ -144,7 +150,9 @@ object WebSocketUtil {
             if (manualAttempt) manualReconnectSuppressed.set(false)
             else if (manualReconnectSuppressed.get()) return
             isConnecting.set(true)
-            connectionEpoch.advance()
+            val epoch = connectionEpoch.advance()
+            mutableQuickShareAdvertisement.value = quickShareEndpointCache.begin(epoch)
+            epoch
         }
         WebSocketFileTransfer.cancelAll()
 
@@ -422,6 +430,18 @@ object WebSocketUtil {
                                             }
                                         }
                                         if (!handshakeCompleted.get()) return
+                                    }
+
+                                    // Capture only decrypted messages on this exact live socket.
+                                    // BLE macInfo and asynchronous UI handlers cannot replace the endpoint.
+                                    if (key != null) {
+                                        val info = runCatching { org.json.JSONObject(decryptedMessage) }.getOrNull()
+                                        if (info?.optString("type") == "macInfo") {
+                                            val details = info.optJSONObject("data")
+                                            quickShareEndpointCache.update(epoch,
+                                                details?.opt("quickShareEndpointSupported") == true,
+                                                details?.opt("quickSharePort"))?.let { mutableQuickShareAdvertisement.value = it }
+                                        }
                                     }
 
                                     WebSocketMessageHandler.handleIncomingMessage(
@@ -882,6 +902,20 @@ object WebSocketUtil {
         handshakeCompleted.set(false)
         handshakeTimeoutJob?.cancel()
         appContext = null
+    }
+
+    /** A network route is usable only after the encrypted handshake for this exact pairing. */
+    internal fun authenticatedPeerAddress(pairingKey: String): String? = synchronized(connectionLock) {
+        if (BackgroundWorkController.isPaused || manualReconnectSuppressed.get() ||
+            !isConnected.get() || !handshakeCompleted.get() || !isSocketOpen.get()) return@synchronized null
+        val expected = runCatching { CryptoUtil.decodeKey(pairingKey).encoded }.getOrNull()
+            ?: return@synchronized null
+        val active = currentSymmetricKey?.encoded ?: return@synchronized null
+        currentIpAddress?.takeIf { java.security.MessageDigest.isEqual(expected, active) }
+    }
+
+    internal fun authenticatedQuickShareAdvertisement(pairingKey: String): QuickShareEndpointCache.Advertisement? = synchronized(connectionLock) {
+        if (authenticatedPeerAddress(pairingKey) == null) null else mutableQuickShareAdvertisement.value
     }
 
     fun isWifiConnected(): Boolean {

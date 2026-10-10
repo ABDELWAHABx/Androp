@@ -25,6 +25,8 @@ object BleTransportBridge {
     private val upgradeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var networkUpgradeJob: Job? = null
 
+    internal fun authenticatedServer(): BleGattServer? = gattServer?.takeIf { it.captureAuthenticatedPeer() != null }
+
     fun initialize(server: BleGattServer) {
         synchronized(upgradeLock) { networkUpgradeJob?.cancel(); networkUpgradeJob = null; gattServer = server }
     }
@@ -211,6 +213,11 @@ object BleTransportBridge {
         // characteristic without changing legacy media command framing.
         if (action.toByteArray(Charsets.UTF_8).size <= 64 * 1024 && action.startsWith("{")) {
             val message = try { JSONObject(action) } catch (_: Exception) { null }
+            if (message?.optString("type") == "transferNetwork") {
+                val server = gattServer ?: return
+                app.androp.android.utils.TransferNetworkManager.receive(context, server, message, action.toByteArray(Charsets.UTF_8).size)
+                return
+            }
             if (message?.optString("type") == "connectNetwork") {
                 if (BleGattServer.isAnyAuthenticated() && !app.androp.android.utils.BackgroundWorkController.isPaused)
                     handleNetworkUpgrade(context, message, action.toByteArray(Charsets.UTF_8).size)

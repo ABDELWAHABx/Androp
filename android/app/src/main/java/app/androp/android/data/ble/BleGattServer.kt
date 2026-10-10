@@ -123,6 +123,7 @@ class BleGattServer(private val context: Context) {
      * Stop the GATT server and advertising
      */
     fun stop() {
+        app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this)
         serverGeneration++
         scope.coroutineContext.cancelChildren()
         authenticationTimeout = null
@@ -353,7 +354,11 @@ class BleGattServer(private val context: Context) {
                 notificationSubscriptions.remove(device.address)
                 authenticationTimeout?.cancel()
                 authenticationTimeout = null
-                if (authenticatedDevice == device) authenticatedDevice = null
+                if (authenticatedDevice == device) {
+                    authenticatedDevice = null
+                    authenticatedPeer = null
+                    app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this@BleGattServer, allowWifiFallback = true)
+                }
                 reassemblers.clear()
                 clearSendQueue()
                 if (connectedDevices.isEmpty()) {
@@ -760,7 +765,9 @@ class BleGattServer(private val context: Context) {
                         if (generation == serverGeneration && notificationInFlight && sendQueue.peekFirst() === message) {
                             Log.w(TAG, "BLE notification completion timed out; resetting connection")
                             clearSendQueue()
+                            app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this@BleGattServer, allowWifiFallback = true)
                             isAuthenticated = false
+                            authenticatedPeer = null
                             authenticatedDevice = null
                             authenticatedFlag.set(false)
                             ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
@@ -827,6 +834,7 @@ class BleGattServer(private val context: Context) {
     }
 
     fun disconnectAllConnectedDevices() {
+        app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this)
         Log.d(TAG, "Disconnecting all connected BLE devices manually...")
         val devicesCopy = connectedDevices.toList()
         for (device in devicesCopy) {

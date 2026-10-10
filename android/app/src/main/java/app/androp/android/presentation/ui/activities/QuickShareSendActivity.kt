@@ -8,8 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Parcelable
-import android.provider.OpenableColumns
-import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -57,22 +57,18 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.androp.android.R
+import app.androp.android.presentation.viewmodel.OutgoingShareViewModel
+import app.androp.android.utils.TransferNetworkManager
 import app.androp.android.presentation.viewmodel.AirSyncViewModel
-import app.androp.android.service.OutboundQuickShareService
 import app.androp.android.ui.theme.AirSyncTheme
 import app.androp.android.utils.YouTubeHandoff
 import app.androp.android.utils.ClipboardSyncManager
 import app.androp.android.utils.ShortcutUtil
-import app.androp.android.utils.StoragePathResolver
-import app.androp.android.utils.OutgoingShareCache
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 class QuickShareSendActivity : ComponentActivity() {
 
@@ -157,6 +153,30 @@ private fun QuickShareSendScreen(
     var showVideoChoice by remember { mutableStateOf(false) }
     val textScope = rememberCoroutineScope()
     val videoURL = remember(sharedText) { sharedText?.let(YouTubeHandoff::extract) }
+    val outgoing: OutgoingShareViewModel = viewModel { OutgoingShareViewModel(context.applicationContext) }
+    val outgoingState by outgoing.state.collectAsState()
+    val nearbyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        // Approximate Location alone cannot start a local-only hotspot on API 30–32.
+        outgoing.permissionResult(result[TransferNetworkManager.requiredPermission()] == true)
+    }
+    val closeShare = { outgoing.cancel(); onFinished() }
+    LaunchedEffect(outgoingState) {
+        if (uris.isNotEmpty()) when (val state = outgoingState) {
+            is OutgoingShareViewModel.State.Progress -> uiState = SendUiState.Progress(state.message)
+            is OutgoingShareViewModel.State.Permission -> {
+                uiState = SendUiState.Progress(if (android.os.Build.VERSION.SDK_INT >= 33)
+                    "Allow Nearby Wi-Fi to connect your Mac…" else "Allow Precise Location to prepare transfer Wi-Fi…")
+                if (outgoing.beginPermissionRequest()) nearbyPermission.launch(TransferNetworkManager.requiredPermissions())
+            }
+            is OutgoingShareViewModel.State.Error -> uiState = SendUiState.Error(state.message)
+            is OutgoingShareViewModel.State.Started -> {
+                reportSummonShortcutUsed(context)
+                uiState = SendUiState.Success
+                delay(1200)
+                onFinished()
+            }
+        }
+    }
     suspend fun sendText(handoff: Boolean) {
         uiState = SendUiState.Loading
         val delivered = ClipboardSyncManager.sendAndAwait(sharedText.orEmpty(), videoHandoff = handoff)
@@ -187,31 +207,20 @@ private fun QuickShareSendScreen(
             } else if (uris.isEmpty()) {
                 if (videoURL != null) showVideoChoice = true else sendText(false)
             } else {
-                var staged: List<File> = emptyList()
-                var handedToService = false
-                try {
-                    check(!OutboundQuickShareService.isSending) { "A file transfer is already running. Try again when it finishes." }
-                    withContext(Dispatchers.IO) { staged = copyUrisToCache(context, uris) }
-                    handedToService = OutboundQuickShareService.start(context, staged.map(Uri::fromFile))
-                    check(handedToService) { "Couldn't start sending. Wait for the current transfer, then try again." }
-                    reportSummonShortcutUsed(context)
-                    uiState = SendUiState.Success
-                    delay(1200)
-                    onFinished()
-                } catch (e: Exception) {
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    Log.w("QuickShareSendActivity", "Couldn't prepare shared files", e)
-                    uiState = SendUiState.Error(e.message ?: "Couldn't read the selected files")
-                } finally {
-                    if (!handedToService) withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
-                        staged.forEach { runCatching { it.delete() } }
-                    }
-                }
+                outgoing.begin(uris)
             }
         }
     }
 
-    if (showVideoChoice) {
+    if (uiState is SendUiState.Error && uris.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = closeShare,
+            title = { Text("Files not sent") },
+            text = { Text((uiState as SendUiState.Error).message) },
+            confirmButton = { TextButton(onClick = { outgoing.retry() }) { Text("Retry") } },
+            dismissButton = { TextButton(onClick = closeShare) { Text("Cancel") } }
+        )
+    } else if (showVideoChoice) {
         AlertDialog(
             onDismissRequest = onFinished,
             title = { Text("Continue watching on Mac") },
@@ -240,7 +249,7 @@ private fun QuickShareSendScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .clickable(onClick = onFinished),
+            .clickable(onClick = closeShare),
         contentAlignment = Alignment.BottomCenter
     ) {
         Surface(
@@ -266,15 +275,21 @@ private fun QuickShareSendScreen(
                 )
 
                 val label = when (uiState) {
+                    is SendUiState.Progress -> (uiState as SendUiState.Progress).message
                     is SendUiState.Loading -> "Sending to ${pairedDeviceName ?: stringResource(R.string.your_mac)}..."
                     is SendUiState.Success -> if (uris.isEmpty()) "Delivered to ${pairedDeviceName ?: stringResource(R.string.your_mac)}" else "File transfer started"
-                    is SendUiState.Error -> (uiState as SendUiState.Error).message
+                    is SendUiState.Error -> if (uris.isNotEmpty()) "File transfer needs attention" else (uiState as SendUiState.Error).message
                 }
                 Text(
                     text = label,
+                    modifier = Modifier.weight(1f, fill = false),
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onSurface
                 )
+
+                if (uris.isNotEmpty() && uiState !is SendUiState.Success) {
+                    TextButton(onClick = closeShare) { Text("Cancel") }
+                }
 
                 AnimatedContent(
                     targetState = uiState,
@@ -283,7 +298,7 @@ private fun QuickShareSendScreen(
                 ) { state ->
                     Box(modifier = Modifier.size(28.dp), contentAlignment = Alignment.Center) {
                         when (state) {
-                            is SendUiState.Loading -> LoadingIndicator(
+                            is SendUiState.Loading, is SendUiState.Progress -> LoadingIndicator(
                                 modifier = Modifier.size(24.dp),
                                 color = MaterialTheme.colorScheme.primary
                             )
@@ -311,6 +326,7 @@ private fun QuickShareSendScreen(
 
 sealed class SendUiState {
     data object Loading : SendUiState()
+    data class Progress(val message: String) : SendUiState()
     data object Success : SendUiState()
     data class Error(val message: String) : SendUiState()
 }
@@ -321,26 +337,6 @@ private fun reportSummonShortcutUsed(context: Context) {
     } catch (_: Exception) {
 
     }
-}
-
-private suspend fun copyUrisToCache(context: Context, uris: List<Uri>): List<File> {
-    val coroutine = currentCoroutineContext()
-    val sources = uris.map { uri ->
-        coroutine.ensureActive()
-        val fallback = "file_${java.util.UUID.randomUUID()}"
-        var name = if (uri.scheme == "file") uri.lastPathSegment ?: fallback else fallback
-        if (uri.scheme == "content") {
-            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (cursor.moveToFirst() && index >= 0) name = cursor.getString(index) ?: fallback
-            }
-        }
-        OutgoingShareCache.Source(name) {
-            requireNotNull(context.contentResolver.openInputStream(uri)) { "Couldn't read $name" }
-        }
-    }
-    return OutgoingShareCache.stage(File(context.cacheDir, "quickshare_outgoing"), sources,
-        checkActive = { coroutine.ensureActive() })
 }
 
 @Preview(name = "Loading", showBackground = true)

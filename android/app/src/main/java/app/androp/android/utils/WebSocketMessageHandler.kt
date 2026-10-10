@@ -71,6 +71,7 @@ object WebSocketMessageHandler {
             }
 
             when (type) {
+                "transferNetwork" -> TransferNetworkManager.handleNetworkEnvelope(context, jsonObject, json.toByteArray(Charsets.UTF_8).size)
                 "phoneHotspotControl" -> HotspotControlManager.handle(context, data)
                 "requestWebDavAccess" -> WebDavServer.publishAccess()
                 "fileTransferInit", "fileChunk", "fileTransferComplete", "fileTransferCancel" ->

@@ -21,6 +21,7 @@ object BackgroundWorkController {
         isPaused = true
         val application = context.applicationContext
         runShutdownSteps(listOf(
+            "temporary transfer Wi-Fi" to { TransferNetworkManager.cancelAll() },
             "Bluetooth" to { app.androp.android.AirSyncApp.getBleConnectionManager()?.refreshAvailability(); Unit },
             "phone alert" to { FindPhoneManager.stop() },
             "hotspot status" to { HotspotControlManager.stopObserving() },
