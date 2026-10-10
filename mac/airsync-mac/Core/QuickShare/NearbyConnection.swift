@@ -207,7 +207,7 @@ public class NearbyConnection{
 		let iv=Data.randomData(length: 16)
 		var encryptedData=Data(count: serializedMsg.count+16)
 		var encryptedLength:size_t=0
-        var encryptionStatus: CCCryptorStatus = kCCSuccess
+        var encryptionStatus = CCCryptorStatus(kCCSuccess)
 		encryptedData.withUnsafeMutableBytes({
 			let status=CCCrypt(
 				CCOperation(kCCEncrypt),
@@ -277,7 +277,7 @@ public class NearbyConnection{
 		var decryptedData=Data(count: headerAndBody.body.count)
 		
 		var decryptedLength:Int=0
-        var decryptionStatus: CCCryptorStatus = kCCSuccess
+        var decryptionStatus = CCCryptorStatus(kCCSuccess)
 		decryptedData.withUnsafeMutableBytes({
 			let status=CCCrypt(
 				CCOperation(kCCDecrypt),

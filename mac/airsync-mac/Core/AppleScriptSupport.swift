@@ -977,6 +977,10 @@ class AirSyncQuickShareGetStatusCommand: NSScriptCommand {
         switch qsm.transferState {
         case .idle:
             stateStr = "idle"
+        case .preparing:
+            stateStr = "preparing"
+        case .reviewing:
+            stateStr = "reviewing"
         case .discovering:
             stateStr = "discovering"
         case .connecting(let id):

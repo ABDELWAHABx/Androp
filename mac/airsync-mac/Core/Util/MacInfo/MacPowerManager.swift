@@ -335,8 +335,10 @@ final class MacPowerManager: ObservableObject {
             guard let port = IONotificationPortCreate(kIOMainPortDefault) else { IOObjectRelease(service); return }
             IONotificationPortSetDispatchQueue(port, self.ioQueue)
             var object: io_object_t = 0
-            let result = IOServiceAddInterestNotification(port, service, kIOGeneralInterest, { _, service, kind, _ in
-                guard kind == kIOPMMessageClamshellStateChange else { return }
+            let result = IOServiceAddInterestNotification(port, service, kIOGeneralInterest, { _, service, _, _ in
+                // Re-read on root-domain events rather than depending on the
+                // clamshell-message C macro, which Swift cannot import in Xcode 26.
+                // publishStatus suppresses unchanged snapshots; no polling is needed.
                 let value = MacPowerManager.readLid(service)
                 DispatchQueue.main.async {
                     guard MacPowerManager.shared.started else { return }

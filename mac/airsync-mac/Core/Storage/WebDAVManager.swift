@@ -1,5 +1,6 @@
 import Foundation
 import Cocoa
+import Combine
 import Darwin
 
 final class WebDAVManager {

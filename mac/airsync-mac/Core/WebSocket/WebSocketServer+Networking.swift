@@ -59,7 +59,7 @@ extension WebSocketServer {
     }
 
     func getAvailableNetworkAdapters() -> [(name: String, address: String)] {
-        var adapters: [(String, String)] = []
+        var adapters: [(name: String, address: String)] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>? = nil
 
         if getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr {
@@ -89,7 +89,10 @@ extension WebSocketServer {
             }
             freeifaddrs(ifaddr)
         }
-        return adapters.sorted { $0.name == $1.name ? $0.address < $1.address : $0.name < $1.name }
+        return adapters.sorted { lhs, rhs in
+            if lhs.name == rhs.name { return lhs.address < rhs.address }
+            return lhs.name < rhs.name
+        }
     }
 
     func ipIsPrivatePreferred(_ ip: String) -> Bool {
