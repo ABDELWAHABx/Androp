@@ -216,11 +216,12 @@ struct PhonePrimaryActions: View {
 struct PhoneHotspotControls: View {
     @ObservedObject private var appState = AppState.shared
     @ObservedObject private var hotspot = PhoneHotspotManager.shared
+    @ObservedObject private var wifi = HotspotWiFiConnector.shared
     @State private var expanded = false
     var compact = false
 
     private var available: Bool { appState.device != nil && !appState.isSyncPaused }
-    private var idle: Bool { hotspot.pendingAction == nil }
+    private var idle: Bool { hotspot.pendingAction == nil && !wifi.isBusy }
     private var canControl: Bool {
         available && idle && hotspot.state?.canAttemptControl == true && hotspot.state?.status != "unsupported"
     }
@@ -235,9 +236,38 @@ struct PhoneHotspotControls: View {
         DisclosureGroup(isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: 8) {
                 if !available {
-                    Text(appState.isSyncPaused ? "Resume sync to control your phone's hotspot." : "Connect your phone to check hotspot availability.")
-                        .foregroundStyle(.secondary)
+                    if wifi.isBusy {
+                        Text(wifi.message ?? "Joining your phone's Wi-Fi…").foregroundStyle(.secondary)
+                        Button("Cancel connection") { wifi.cancel() }
+                    } else {
+                        Text(appState.isSyncPaused ? "Resume sync to control your phone's hotspot." : "Connect your phone to check hotspot availability.")
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
+                    TextField("Phone hotspot Wi-Fi name", text: $wifi.ssid)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(wifi.isBusy)
+                        .accessibilityLabel("Phone hotspot Wi-Fi network name")
+                    HStack {
+                        Menu("Saved networks") {
+                            if wifi.savedNetworks.isEmpty { Text("No saved names found. Enter the hotspot name above.") }
+                            ForEach(wifi.savedNetworks, id: \.self) { name in
+                                Button(name) { wifi.ssid = name }
+                            }
+                            Divider()
+                            Button("Refresh saved networks") { wifi.loadSavedNetworks() }
+                        }
+                        .disabled(wifi.isBusy)
+                        Spacer(minLength: 0)
+                        Button(wifi.isBusy ? "Cancel" : "Connect") {
+                            if wifi.isBusy { wifi.cancel() } else { wifi.connect() }
+                        }
+                        .disabled(!wifi.isBusy && (!idle || !HotspotWiFiPolicy.validSSID(wifi.ssid)))
+                        .help("Enable your phone hotspot and switch this Mac to its Wi-Fi using the password already saved in Keychain")
+                    }
+                    Text("Choose your hotspot name once. Connect uses its saved Mac password; macOS may ask for Location or Keychain access.")
+                        .foregroundStyle(.secondary)
+                    if let message = wifi.message { Text(message).foregroundStyle(.secondary) }
                     if let enabled = hotspot.state?.hotspotEnabled {
                         Label(enabled ? "Last reported: hotspot on" : "Last reported: hotspot off",
                               systemImage: enabled ? "personalhotspot" : "wifi.slash")
@@ -282,8 +312,9 @@ struct PhoneHotspotControls: View {
                 .font(compact ? .caption.weight(.medium) : .subheadline.weight(.medium))
         }
         .onChange(of: expanded) { _, isExpanded in
-            if isExpanded && available { hotspot.refreshIfNeeded() }
+            if isExpanded && available { hotspot.refreshIfNeeded(); wifi.loadSavedNetworks() }
         }
+        .onChange(of: appState.device?.deviceId) { _, _ in wifi.selectPhone() }
     }
 }
 

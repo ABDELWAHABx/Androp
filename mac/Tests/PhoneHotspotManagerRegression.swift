@@ -75,7 +75,36 @@ struct PhoneHotspotManagerRegression {
         state.device = nil
         drain()
         expect(manager.pendingAction == nil && manager.message == nil, "disconnect clears status and timeout")
-        print("Phone hotspot manager: 14 checks passed")
+        var results: [String] = []
+        let completion: (Bool?) -> Void = { value in results.append(value.map { $0 ? "on" : "off" } ?? "failed") }
+        state.device = HotspotTestDevice(deviceId: "phone-c")
+        drain()
+        manager.send(.status, completion: completion)
+        let statusRequest = transport.messages.last!
+        manager.handleState(reply(statusRequest, status: "ready", enabled: false))
+        expect(results == ["off"], "confirmed off is distinct from failed observation")
+        manager.send(.enable, completion: completion)
+        let activation = transport.messages.last!
+        manager.handleState(reply(activation, status: "requesting", enabled: nil))
+        expect(results == ["off"], "submission cannot start Wi-Fi joining")
+        manager.handleState(reply(activation, status: "enabled", enabled: true))
+        expect(results == ["off", "on"], "confirmed activation completes once")
+        manager.handleState(reply(activation, status: "enabled", enabled: true))
+        expect(results.count == 2, "duplicate confirmation cannot join twice")
+        manager.send(.status, completion: completion)
+        state.isSyncPaused = true
+        drain()
+        expect(results.last == "failed", "pause cancels completion without reporting hotspot off")
+        state.isSyncPaused = false
+        drain()
+        transport.accepts = false
+        manager.send(.status, completion: completion)
+        expect(results.count == 4 && results.last == "failed", "transport failure cannot activate hotspot")
+        transport.accepts = true
+        manager.send(.status) { _ in manager.send(.enable) }
+        manager.handleState(reply(transport.messages.last!, status: "ready", enabled: false))
+        expect(manager.pendingAction == .enable, "completion can enqueue activation without old cleanup clearing it")
+        print("Phone hotspot manager: 21 checks passed")
     }
 
     private static func reply(_ request: [String: Any], id: String? = nil, action: String? = nil,

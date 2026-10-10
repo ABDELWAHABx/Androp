@@ -30,6 +30,7 @@ final class PhoneHotspotManager: ObservableObject {
     private var targetID: String?
     private var timeout: DispatchWorkItem?
     private var connectionObserver: AnyCancellable?
+    private var requestCompletion: ((Bool?) -> Void)?
 
     private init() {
         targetID = AppState.shared.device?.deviceId
@@ -42,14 +43,15 @@ final class PhoneHotspotManager: ObservableObject {
         if state == nil && pendingAction == nil { send(.status) }
     }
 
-    func send(_ action: Action) {
+    func send(_ action: Action, completion: ((Bool?) -> Void)? = nil) {
         let appState = AppState.shared
         guard !appState.isSyncPaused, let device = appState.device, !device.deviceId.isEmpty,
-              request == nil else { return }
+              request == nil else { completion?(nil); return }
         if targetID != device.deviceId { reset() }
         targetID = device.deviceId
         let request = Request(id: UUID().uuidString, deviceID: device.deviceId, action: action)
         self.request = request
+        requestCompletion = completion
         pendingAction = action
         message = action == .setup ? "Requesting setup on your phone…" : "Waiting for your phone…"
         guard WebSocketServer.shared.sendPowerProtocol(type: "phoneHotspotControl", data: [
@@ -91,7 +93,9 @@ final class PhoneHotspotManager: ObservableObject {
         )
         let detail = (data["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         message = detail.flatMap { $0.isEmpty ? nil : String($0.prefix(1_024)) }
-        if status != "requesting" { finishRequest() }
+        if status != "requesting" {
+            finishRequest(succeeded: ["enabled", "disabled", "ready"].contains(status) ? state?.hotspotEnabled : nil)
+        }
     }
 
     private static let validStatuses: Set<String> = [
@@ -106,11 +110,14 @@ final class PhoneHotspotManager: ObservableObject {
         targetID = currentID
     }
 
-    private func finishRequest() {
+    private func finishRequest(succeeded: Bool? = nil) {
         timeout?.cancel()
         timeout = nil
         request = nil
         pendingAction = nil
+        let completion = requestCompletion
+        requestCompletion = nil
+        completion?(succeeded)
     }
 
     private func reset() {

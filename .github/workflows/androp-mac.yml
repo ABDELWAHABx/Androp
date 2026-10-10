@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: private-mac-release-${{ inputs.tag || 'androp-v0.1.0-preview.3' }}
+  group: private-mac-release-${{ inputs.tag || 'androp-v0.1.0-preview.4' }}
   cancel-in-progress: false
 
 jobs:
@@ -70,7 +70,7 @@ jobs:
 
       - name: Build, test policy and package private downloads
         env:
-          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.3' }}
+          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.4' }}
           RELEASE_ARCHITECTURE: ${{ inputs.architecture || 'arm64' }}
         run: bash Tools/Release/build-mac.sh "$RELEASE_TAG" "$RELEASE_ARCHITECTURE"
 
@@ -86,7 +86,7 @@ jobs:
       - name: Save downloadable builds
         uses: actions/upload-artifact@v4
         with:
-          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.3' }}
+          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.4' }}
           path: |
             mac/dist/*.zip
             mac/dist/*.dmg
@@ -110,13 +110,13 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.3' }}
+          name: androp-mac-${{ inputs.tag || 'androp-v0.1.0-preview.4' }}
           path: downloads
 
       - name: Publish private prerelease downloads
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.3' }}
+          RELEASE_TAG: ${{ inputs.tag || 'androp-v0.1.0-preview.4' }}
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]
