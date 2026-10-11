@@ -99,7 +99,7 @@ object HotspotControlManager {
     }
 
     /** Pause cancels observation, not a hotspot the user explicitly enabled. */
-    fun stopObserving() { main.post { pending?.close() } }
+    fun stopObserving() { main.post { if (Build.VERSION.SDK_INT >= 36) pending?.close() } }
 
     private fun canWrite(context: Context) = runCatching { Settings.System.canWrite(context) }.getOrDefault(false)
 
