@@ -80,19 +80,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if !urls.isEmpty, !AppState.shared.isSyncPaused {
-            QuickShareManager.shared.transferURLs = urls
-            QuickShareManager.shared.startDiscovery(autoTargetName: nil)
-            AppState.shared.showingQuickShareTransfer = true
-        }
+        let files = urls.filter(\.isFileURL)
+        if !files.isEmpty { QuickShareManager.shared.send(files) }
     }
 
     @objc func handleServices(_ pboard: NSPasteboard, userData: String, error: AutoreleasingUnsafeMutablePointer<NSString>) {
         guard !AppState.shared.isSyncPaused else { return }
         if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
-            QuickShareManager.shared.transferURLs = urls
-            QuickShareManager.shared.startDiscovery(autoTargetName: nil)
-            AppState.shared.showingQuickShareTransfer = true
+            QuickShareManager.shared.send(urls)
+        } else if let text = pboard.string(forType: .string), !text.isEmpty {
+            AppState.shared.sendClipboardToAndroid(text: text, force: true)
         }
     }
 

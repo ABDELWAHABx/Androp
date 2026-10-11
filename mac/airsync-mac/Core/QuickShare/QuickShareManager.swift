@@ -228,7 +228,21 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         AppState.shared.showingQuickShareTransfer = true
     }
 
-    public func prepareFilesForConnectedDevice(_ urls: [URL]) {
+    /// One entry point for every drop, Dock, Services and menu-bar send: with a phone
+    /// connected the files go straight to it (no picker, no review step), like AirDrop to
+    /// a contact. Option, or no connected phone, opens nearby-device discovery instead.
+    public func send(_ urls: [URL], pickDevice: Bool = false) {
+        guard !urls.isEmpty, !AppState.shared.isSyncPaused else { return }
+        if !pickDevice, AppState.shared.device != nil {
+            prepareFilesForConnectedDevice(urls, sendImmediately: true)
+        } else {
+            transferURLs = urls
+            startDiscovery(autoTargetName: nil)
+            AppState.shared.showingQuickShareTransfer = true
+        }
+    }
+
+    public func prepareFilesForConnectedDevice(_ urls: [URL], sendImmediately: Bool = false) {
         guard canPrepareFiles else {
             dropFeedback = "Finish or cancel the current transfer before adding files."
             return
@@ -295,6 +309,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
                 self.preparedFileSizes = sizes
                 self.selectedFileSize = bytes
                 self.transferState = .reviewing(device.name)
+                if sendImmediately && self.canSendPreparedFiles { self.sendPreparedFiles() }
             }
         }
     }
