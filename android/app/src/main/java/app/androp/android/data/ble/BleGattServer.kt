@@ -483,7 +483,9 @@ class BleGattServer(private val context: Context) {
                 if (authenticatedDevice == null) {
                     _connectionState.value =
                         if (gattServer != null && !isAdvertisingPaused) BleConnectionState.ADVERTISING else BleConnectionState.DISCONNECTED
-                    if (gattServer != null && !isAdvertisingPaused) startAdvertising()
+                    // The controller usually ends a connectable advertisement once a
+                    // central connects to it; restart it rather than trust our callback.
+                    if (gattServer != null && !isAdvertisingPaused) { stopAdvertising(); startAdvertising() }
                 }
             }
         }
@@ -1064,6 +1066,7 @@ class BleGattServer(private val context: Context) {
         reassemblers.clear()
         legacyAuthChunks.clear()
         if (gattServer != null && !isAdvertisingPaused) {
+            stopAdvertising()
             startAdvertising()
         }
     }
