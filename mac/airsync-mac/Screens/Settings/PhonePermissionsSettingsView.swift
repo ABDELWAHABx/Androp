@@ -13,6 +13,10 @@ struct PhonePermissionsSettingsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Turn on everything androp can do on your phone: notifications, clipboard from any app, calls, hotspot and staying connected in the background.")
                         .fixedSize(horizontal: false, vertical: true)
+                    Text("This includes notification access, the androp clipboard Accessibility service (it only notices Copy taps), display over other apps, all-files access and battery exemption. You can turn any of them off later on the phone.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
 
                     if !granter.adbInstalled {
                         step(1, "Install Android platform tools on this Mac:")

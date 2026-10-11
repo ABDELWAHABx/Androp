@@ -11,7 +11,7 @@ nonisolated enum BulkFileReceiver {
     static func handleOffer(_ data: [String: Any]) {
         guard let id = data["id"] as? String, (1...128).contains(id.utf8.count),
               let name = data["name"] as? String, validName(name),
-              let size = (data["size"] as? Int) ?? (data["size"] as? Double).map({ Int($0) }), size >= 0 else { return }
+              let size = data["size"] as? Int, (0...(1 << 50)).contains(size) else { return }
         func reject(_ reason: String) {
             WebSocketServer.shared.sendBulkFileMessage(type: "fileBulkReject", data: ["id": id, "error": reason])
         }
@@ -24,7 +24,7 @@ nonisolated enum BulkFileReceiver {
         }
         let free = (try? downloads.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage) ?? Int64.max
-        guard free > Int64(size) + 64 * 1024 * 1024 else { reject("Your Mac doesn't have enough free space."); return }
+        guard free - 64 * 1024 * 1024 > Int64(size) else { reject("Your Mac doesn't have enough free space."); return }
         guard let socket = BulkTransferSocket() else { reject("Your Mac couldn't open a transfer port."); return }
         guard WebSocketServer.shared.sendBulkFileMessage(type: "fileBulkAccept",
             data: ["id": id, "port": Int(socket.port), "key": socket.keyBase64]) else { socket.close(); return }
@@ -52,7 +52,7 @@ nonisolated enum BulkFileReceiver {
                 QuickShareManager.shared.bulkReceiveFinished(id: id, success: result != nil, error: message)
                 if let result { QuickShareManager.notifyReceived([result]) }
                 WebSocketServer.shared.sendBulkFileMessage(type: "fileBulkResult",
-                    data: ["id": id, "ok": result != nil, "error": result == nil ? message : NSNull()])
+                    data: ["id": id, "ok": result != nil, "error": result == nil ? message as Any : NSNull()])
             }
         }
         guard socket.acceptPeer(transferID: id, timeout: 15, isActive: { true }), let opener = socket.helloOpener else {

@@ -54,7 +54,7 @@ object JsonUtil {
         val portsJson = adbPorts.joinToString(",") { "\"${escape(it)}\"" }
         val targetIpJson =
             if (targetIpAddress != null) """, "targetIpAddress": "${escape(targetIpAddress)}" """ else ""
-        return """{"type":"device","data":{"id":"${escape(id)}","name":"${escape(name)}","ipAddress":"${escape(ipAddress)}","port":$port,"version":"${escape(version)}","adbPorts":[$portsJson]$targetIpJson}}"""
+        return """{"type":"device","data":{"id":"${escape(id)}","name":"${escape(name)}","ipAddress":"${escape(ipAddress)}","port":$port,"version":"${escape(version)}","adbPorts":[$portsJson],"bulkTransfer":true$targetIpJson}}"""
     }
 
     /**
@@ -84,7 +84,7 @@ object JsonUtil {
         val portsJson = adbPorts.joinToString(",") { "\"${escape(it)}\"" }
         val targetIpJson =
             if (targetIpAddress != null) """, "targetIpAddress": "${escape(targetIpAddress)}" """ else ""
-        return """{"type":"device","data":{"id":"${escape(id)}","name":"${escape(name)}","ipAddress":"${escape(ipAddress)}","port":$port,"version":"${escape(version)}","adbPorts":[$portsJson]$wallpaperJson$bleTokenJson$targetIpJson}}"""
+        return """{"type":"device","data":{"id":"${escape(id)}","name":"${escape(name)}","ipAddress":"${escape(ipAddress)}","port":$port,"version":"${escape(version)}","adbPorts":[$portsJson],"bulkTransfer":true$wallpaperJson$bleTokenJson$targetIpJson}}"""
     }
 
     /**

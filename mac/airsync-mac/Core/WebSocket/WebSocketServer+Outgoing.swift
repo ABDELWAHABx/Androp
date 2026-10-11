@@ -473,7 +473,7 @@ extension WebSocketServer {
                 var hasher = SHA256()
                 let checksum: String? = nil
                 let mime = self.mimeType(for: url) ?? "application/octet-stream"
-                let bulk = BulkTransferSocket()
+                let bulk = BulkTransferSocket.peerSupportsBulk ? BulkTransferSocket() : nil
                 defer { bulk?.close() }
                 guard send(FileTransferProtocol.buildInit(id: transferID, name: url.lastPathComponent,
                     size: Int64(size), mime: mime, chunkSize: chunkSize, checksum: checksum, isClipboard: isClipboard,

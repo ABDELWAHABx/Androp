@@ -319,6 +319,10 @@ extension WebSocketServer {
                 }
             }
 
+            // Newer phones accept the direct encrypted stream; others keep chunked transfers
+            // without waiting for a stream that will never connect.
+            BulkTransferSocket.peerSupportsBulk = dict["bulkTransfer"] as? Bool == true
+
             if let bleToken = dict["bleAuthToken"] as? String, !bleToken.isEmpty {
                 let oldToken = UserDefaults.standard.string(forKey: "bleAuthToken")
                 UserDefaults.standard.set(bleToken, forKey: "bleAuthToken")

@@ -62,6 +62,9 @@ nonisolated enum BulkTransferError: Error { case invalidRecord, closed, timedOut
 /// A blocking TCP endpoint for one transfer. The Mac always listens (the phone already
 /// reaches it for the control connection, on home Wi-Fi or the phone's temporary hotspot).
 nonisolated final class BulkTransferSocket {
+    /// Set from the phone's device info; read on the file-send queue.
+    nonisolated(unsafe) static var peerSupportsBulk = false
+
     let port: UInt16
     let key: SymmetricKey
     let keyBase64: String
@@ -75,6 +78,10 @@ nonisolated final class BulkTransferSocket {
         guard fd >= 0 else { return nil }
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        // Buffers set before listen() let accepted sockets negotiate a large TCP window.
+        var buffer: Int32 = 4 * 1024 * 1024
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, socklen_t(MemoryLayout<Int32>.size))
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
@@ -116,31 +123,36 @@ nonisolated final class BulkTransferSocket {
             guard ready > 0 else { continue }
             let client = accept(fd, nil, nil)
             guard client >= 0 else { continue }
-            configure(client)
+            configure(client, timeoutSeconds: 5) // a silent connection cannot hold the deadline
             lock.lock(); peerFD = client; lock.unlock()
             let opener = BulkTransferProtocol.Sealer(key: key, direction: BulkTransferProtocol.phoneToMac)
             if let hello = try? readRecord(opener), hello.type == BulkTransferProtocol.typeHello,
                String(data: hello.payload, encoding: .utf8) == transferID {
                 helloOpener = opener
+                configure(client, timeoutSeconds: 30)
                 lock.lock(); Darwin.close(listenFD); listenFD = -1; lock.unlock()
                 return true
             }
             lock.lock(); Darwin.close(client); peerFD = -1; lock.unlock()
         }
+        // No phone proved the key: stop listening rather than stay bound for the transfer.
+        lock.lock()
+        if listenFD >= 0 { Darwin.close(listenFD); listenFD = -1 }
+        lock.unlock()
         return false
     }
 
     /// The receive direction after a successful hello, positioned after it.
     private(set) var helloOpener: BulkTransferProtocol.Sealer?
 
-    private func configure(_ fd: Int32) {
+    private func configure(_ fd: Int32, timeoutSeconds: Int) {
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
         var buffer: Int32 = 4 * 1024 * 1024
         setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buffer, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buffer, socklen_t(MemoryLayout<Int32>.size))
-        var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     }
@@ -158,14 +170,6 @@ nonisolated final class BulkTransferSocket {
         guard length > BulkTransferProtocol.tagBytes,
               length <= BulkTransferProtocol.maxPayload + 1 + BulkTransferProtocol.tagBytes else { throw BulkTransferError.invalidRecord }
         return try opener.open(try readExactly(length))
-    }
-
-    /// Waits for the phone to close its side (it does so after it stored the file).
-    func waitForPeerClose(timeout: TimeInterval) {
-        lock.lock(); let fd = peerFD; lock.unlock()
-        guard fd >= 0 else { return }
-        var poller = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        _ = poll(&poller, 1, Int32(timeout * 1000))
     }
 
     private func writeAll(_ data: Data) throws {
