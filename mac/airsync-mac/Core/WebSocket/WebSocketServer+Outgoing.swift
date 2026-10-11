@@ -27,6 +27,11 @@ extension WebSocketServer {
         return BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: payload)
     }
 
+    /// Tells the phone whether macOS will accept remote pointer/keyboard input.
+    func sendRemoteControlStatus(inputAllowed: Bool) {
+        _ = sendPowerProtocol(type: "remoteControlStatus", data: ["inputAllowed": inputAllowed])
+    }
+
     func broadcast(message: String) {
         lock.lock()
         let sessions = primarySessionID == nil ? [] : activeSessions

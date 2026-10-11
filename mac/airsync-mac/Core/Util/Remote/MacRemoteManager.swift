@@ -67,6 +67,60 @@ class MacRemoteManager: ObservableObject {
         AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
+    private var lastTrustCheck: TimeInterval = 0
+    private var reportedTrust: Bool?
+    private var promptedForTrust = false
+
+    /// Called before synthetic input. Without Accessibility macOS drops every
+    /// event silently, so ask once and tell the phone, instead of failing quietly.
+    /// The check is cheap but still rate-limited for 60 Hz pointer streams.
+    func ensureInputAllowed() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastTrustCheck < (reportedTrust == true ? 10 : 1) { return }
+        lastTrustCheck = now
+        let trusted = isAccessibilityTrusted()
+        // Repeat "not allowed" (at most once a second) so a reconnected phone
+        // still learns why input is ignored; "allowed" is sent once per change.
+        if trusted != reportedTrust || !trusted {
+            reportedTrust = trusted
+            WebSocketServer.shared.sendRemoteControlStatus(inputAllowed: trusted)
+        }
+        if !trusted && !promptedForTrust {
+            promptedForTrust = true
+            DispatchQueue.main.async { self.requestAccessibilityPermission() }
+        }
+    }
+
+    /// Current pointer location in global CoreGraphics coordinates (top-left of
+    /// the primary display), correct on every display arrangement.
+    private func currentPointer() -> CGPoint {
+        if let location = CGEvent(source: nil)?.location { return location }
+        let mouse = NSEvent.mouseLocation
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? cachedScreenHeight
+        return CGPoint(x: mouse.x, y: primaryHeight - mouse.y)
+    }
+
+    /// Keep the cursor on a connected display so a large swipe cannot park it off-screen.
+    private func clampToDisplays(_ point: CGPoint) -> CGPoint {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return point }
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return point }
+        let bounds = displays.prefix(Int(count)).map { CGDisplayBounds($0) }
+        if bounds.contains(where: { $0.contains(point) }) { return point }
+        guard let nearest = bounds.min(by: { distance(point, $0) < distance(point, $1) }) else { return point }
+        return CGPoint(x: min(max(point.x, nearest.minX), nearest.maxX - 1),
+                       y: min(max(point.y, nearest.minY), nearest.maxY - 1))
+    }
+
+    private func distance(_ point: CGPoint, _ rect: CGRect) -> CGFloat {
+        let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+        let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+        return dx * dx + dy * dy
+    }
+
+    private var heldButton: CGMouseButton?
+
     func lockScreen() {
         let libPath = "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
         if let handle = dlopen(libPath, RTLD_NOW) {
@@ -90,23 +144,26 @@ class MacRemoteManager: ObservableObject {
     
     func simulateMouseRelativeMove(dx: CGFloat, dy: CGFloat) {
         guard dx.isFinite, dy.isFinite, abs(dx) <= 1_000_000, abs(dy) <= 1_000_000 else { return }
-        let mouseLoc = NSEvent.mouseLocation
-        
-        // Convert Cocoa coordinates (bottom-left) to CoreGraphics (top-left)
-        // Use cached screen height to avoid querying screen frame 100 times/sec
-        let currentPos = CGPoint(x: mouseLoc.x, y: cachedScreenHeight - mouseLoc.y)
-        let newPos = CGPoint(x: currentPos.x + dx, y: currentPos.y + dy)
-        
-        if let event = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: newPos, mouseButton: .left) {
+        let current = currentPointer()
+        let newPos = clampToDisplays(CGPoint(x: current.x + dx, y: current.y + dy))
+        // While a button is held the move is a drag, so windows and selections follow.
+        let type: CGEventType
+        switch heldButton {
+        case .left?: type = .leftMouseDragged
+        case .right?: type = .rightMouseDragged
+        case .center?: type = .otherMouseDragged
+        default: type = .mouseMoved
+        }
+        if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: newPos,
+                               mouseButton: heldButton ?? .left) {
             event.post(tap: .cghidEventTap)
         }
     }
-    
+
+    private var lastClick: (button: CGMouseButton, time: TimeInterval, count: Int64)?
+
     func simulateMouseClick(button: CGMouseButton, isDown: Bool) {
-        let mouseLoc = NSEvent.mouseLocation
-        let screenFrame = NSScreen.main?.frame ?? .zero
-        let currentPos = CGPoint(x: mouseLoc.x, y: screenFrame.height - mouseLoc.y)
-        
+        let currentPos = currentPointer()
         let mouseType: CGEventType
         switch button {
         case .left: mouseType = isDown ? .leftMouseDown : .leftMouseUp
@@ -114,8 +171,21 @@ class MacRemoteManager: ObservableObject {
         case .center: mouseType = isDown ? .otherMouseDown : .otherMouseUp
         @unknown default: return
         }
-        
+        // Report double-clicks so Finder opens files and text selects words.
+        let now = ProcessInfo.processInfo.systemUptime
+        var clickCount: Int64 = 1
+        if isDown {
+            if let last = lastClick, last.button == button, now - last.time < NSEvent.doubleClickInterval {
+                clickCount = min(last.count + 1, 3)
+            }
+            lastClick = (button, now, clickCount)
+            heldButton = button
+        } else {
+            clickCount = lastClick?.count ?? 1
+            if heldButton == button { heldButton = nil }
+        }
         if let event = CGEvent(mouseEventSource: nil, mouseType: mouseType, mouseCursorPosition: currentPos, mouseButton: button) {
+            event.setIntegerValueField(.mouseEventClickState, value: clickCount)
             event.post(tap: .cghidEventTap)
         }
     }

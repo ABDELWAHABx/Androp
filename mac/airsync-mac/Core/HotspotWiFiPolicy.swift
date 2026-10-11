@@ -18,8 +18,26 @@ nonisolated enum HotspotWiFiPolicy {
             (bytes[0] == 192 && bytes[1] == 168)
     }
 
-    static func mayRetry(attempt: Int, elapsed: TimeInterval, cancelled: Bool) -> Bool {
-        !cancelled && attempt >= 0 && attempt < 6 && elapsed.isFinite && elapsed >= 0 && elapsed < 30
+    static func mayRetry(attempt: Int, elapsed: TimeInterval, cancelled: Bool,
+                         maxAttempts: Int = 6, window: TimeInterval = 30) -> Bool {
+        !cancelled && attempt >= 0 && attempt < maxAttempts && elapsed.isFinite && elapsed >= 0 && elapsed < window
+    }
+
+    /// Pick the saved network most likely to be this phone's hotspot, so the
+    /// common case needs no setup: exact name, then name containment, then the
+    /// usual Android/Samsung/Pixel default hotspot names.
+    static func likelyHotspot(phoneName: String?, savedNetworks: [String]) -> String? {
+        let phone = (phoneName ?? "").lowercased().trimmingCharacters(in: .whitespaces)
+        if !phone.isEmpty {
+            if let exact = savedNetworks.first(where: { $0.lowercased() == phone }) { return exact }
+            if let partial = savedNetworks.first(where: {
+                let name = $0.lowercased()
+                return name.count >= 4 && (name.contains(phone) || phone.contains(name))
+            }) { return partial }
+        }
+        let defaults = ["androidap", "galaxy", "pixel", "oneplus", "xiaomi", "redmi", "moto", "nothing"]
+        let candidates = savedNetworks.filter { name in defaults.contains { name.lowercased().hasPrefix($0) } }
+        return candidates.count == 1 ? candidates[0] : nil
     }
 
     static func mayRecoverHandoff(status: String?, hasPhone: Bool, paused: Bool, manuallyDisconnected: Bool) -> Bool {

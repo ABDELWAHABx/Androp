@@ -185,10 +185,16 @@ class BLECentralManager: NSObject, ObservableObject {
         UserDefaults.standard.set(fingerprint, forKey: "bleAuthenticatedTokenFingerprint")
     }
 
-    private func mayAutomaticallyConnect(to uuid: String, now: Date = Date()) -> Bool {
+    private func mayAutomaticallyConnect(to uuid: String, manufacturerData: Data? = nil, now: Date = Date()) -> Bool {
         if let deadline = rejectedPeers[uuid], deadline > now { return false }
         if activeQRPairingSession != nil { return true }
         guard let fingerprint = tokenFingerprint() else { return false }
+        // The paired phone proves it holds the token in its advertisement, so a new
+        // private Bluetooth address (Android rotates it) no longer blocks reconnects.
+        if let token = UserDefaults.standard.string(forKey: "bleAuthToken"),
+           BLEAdvertisementProof.verifies(manufacturerData: manufacturerData, token: token, now: now) {
+            return true
+        }
         // A newly paired phone has a different token, so its first BLE contact
         // can establish a new pin. Never send the existing token to other
         // advertisers after its authenticated peripheral has been learned.
@@ -212,10 +218,11 @@ class BLECentralManager: NSObject, ObservableObject {
             scheduleAutomaticScanRestart(after: 1)
             return
         }
-        // Ten seconds of discovery followed by 5, 10, 20, 40, then 60
-        // seconds of radio rest. Established BLE connections have no scan timer.
-        let delay = min(60, 5 * pow(2, Double(discoveryBackoffStep)))
-        discoveryBackoffStep = min(discoveryBackoffStep + 1, 4)
+        // Established BLE connections have no scan timer.
+        // Ten seconds of discovery, then 5, 10, 20 and at most 30 seconds of rest,
+        // so a phone coming back into range reconnects within about half a minute.
+        let delay = min(30, 5 * pow(2, Double(discoveryBackoffStep)))
+        discoveryBackoffStep = min(discoveryBackoffStep + 1, 3)
         scheduleAutomaticScanRestart(after: delay)
     }
 
@@ -232,8 +239,8 @@ class BLECentralManager: NSObject, ObservableObject {
             scheduleAutomaticScanRestart(after: 1)
             return
         }
-        let delay = min(60, 3 * pow(2, Double(failureBackoffStep)))
-        failureBackoffStep = min(failureBackoffStep + 1, 5)
+        let delay = min(30, 3 * pow(2, Double(failureBackoffStep)))
+        failureBackoffStep = min(failureBackoffStep + 1, 4)
         scheduleAutomaticScanRestart(after: delay)
     }
 
@@ -245,7 +252,7 @@ class BLECentralManager: NSObject, ObservableObject {
         if rejectedPeers.count >= 64, let oldest = rejectedPeers.min(by: { $0.value < $1.value })?.key {
             rejectedPeers.removeValue(forKey: oldest)
         }
-        rejectedPeers[peerUUID] = Date().addingTimeInterval(activeQRPairingSession == nil ? 300 : 10)
+        rejectedPeers[peerUUID] = Date().addingTimeInterval(activeQRPairingSession == nil ? 60 : 10)
         retryAfterTransportFailure()
     }
 
@@ -537,7 +544,8 @@ extension BLECentralManager: CBCentralManagerDelegate {
             guard connectionStatus == .disconnected || connectionStatus == .scanning else { return }
             guard discoveredPeripheral == nil else { return }
 
-            guard mayAutomaticallyConnect(to: uuidStr) else { return }
+            guard mayAutomaticallyConnect(to: uuidStr,
+                manufacturerData: advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data) else { return }
 
             stopScanning()
             discoveredPeripheral = peripheral

@@ -59,17 +59,13 @@ fun ConnectionStatusCard(
                     Text(connectedDevice?.name?.takeIf { isConnected } ?: "androp",
                         style = MaterialTheme.typography.titleLarge)
                     Text(when {
-                        isPaused -> "Paused · Background sync stopped"
+                        isPaused -> "Paused"
                         isConnecting -> "Connecting to your Mac…"
                         isConnected -> connectionLabel
-                        else -> "Ready to connect"
+                        else -> "Not connected"
                     }, style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            }
-            if (isConnected && !isPaused && (connectionLabel.contains("Bluetooth", ignoreCase = true) || connectionLabel.contains("BLE", ignoreCase = true))) {
-                Text("Bluetooth supports clipboard text, media, notifications, keyboard and phone controls. Use Wi-Fi or USB for files, screen sharing and the trackpad.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 onTogglePause?.let { toggle ->

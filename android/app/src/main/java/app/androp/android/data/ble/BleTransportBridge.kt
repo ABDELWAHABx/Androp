@@ -235,7 +235,7 @@ object BleTransportBridge {
             action == "stopFindPhone" -> app.androp.android.utils.FindPhoneManager.stop()
             action == "manual_disconnect" -> {
                 Log.d(TAG, "Received manual disconnect from Mac via BLE")
-                app.androp.android.utils.WebSocketUtil.disconnect(context, manual = true)
+                app.androp.android.utils.WebSocketUtil.disconnect(context, manual = true, persistManual = false)
                 gattServer?.disconnectAllConnectedDevices()
             }
 

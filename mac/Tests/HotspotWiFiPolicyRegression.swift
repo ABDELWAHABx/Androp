@@ -15,6 +15,10 @@ struct HotspotWiFiPolicyRegression {
         precondition(!HotspotWiFiPolicy.mayRetry(attempt: 0, elapsed: 30, cancelled: false))
         precondition(!HotspotWiFiPolicy.mayRetry(attempt: 0, elapsed: .nan, cancelled: false))
         precondition(!HotspotWiFiPolicy.mayRetry(attempt: 0, elapsed: 1, cancelled: true))
+        precondition(HotspotWiFiPolicy.mayRetry(attempt: 10, elapsed: 50, cancelled: false, maxAttempts: 40, window: 75))
+        precondition(HotspotWiFiPolicy.likelyHotspot(phoneName: "Galaxy S21 FE", savedNetworks: ["Home", "Galaxy S21 FE"]) == "Galaxy S21 FE")
+        precondition(HotspotWiFiPolicy.likelyHotspot(phoneName: "Ahmed's S21", savedNetworks: ["Home", "AndroidAP_1234"]) == "AndroidAP_1234")
+        precondition(HotspotWiFiPolicy.likelyHotspot(phoneName: "Phone", savedNetworks: ["Home", "Office"]) == nil)
         let attempt = HotspotWiFiAttempt()
         attempt.cancel()
         let start = ProcessInfo.processInfo.systemUptime

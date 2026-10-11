@@ -68,6 +68,7 @@ import app.androp.android.presentation.ui.components.KeyboardInputSheet
 import app.androp.android.presentation.ui.components.KeyboardModifiers
 import app.androp.android.presentation.ui.components.ModifierStatus
 import app.androp.android.utils.HapticUtil
+import app.androp.android.utils.MacRemoteStatus
 import app.androp.android.utils.WebSocketUtil
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -87,12 +88,15 @@ fun RemoteControlScreen(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val lifecycleState by lifecycle.currentStateFlow.collectAsState()
     val isForeground = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
-    val supportsPointer by WebSocketUtil.connectionState.collectAsState()
+    val wifiConnected by WebSocketUtil.connectionState.collectAsState()
     val bluetoothState by remember {
         AirSyncApp.getBleConnectionManager()?.connectionState
             ?: flowOf(BleGattServer.BleConnectionState.DISCONNECTED)
     }.collectAsState(initial = BleGattServer.BleConnectionState.DISCONNECTED)
-    val supportsKeyboard = supportsPointer || bluetoothState == BleGattServer.BleConnectionState.AUTHENTICATED
+    // Any authenticated link drives the whole remote; Bluetooth just batches motion more.
+    val supportsPointer = wifiConnected || bluetoothState == BleGattServer.BleConnectionState.AUTHENTICATED
+    val supportsKeyboard = supportsPointer
+    val macInputAllowed by MacRemoteStatus.inputAllowed.collectAsState()
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -113,7 +117,6 @@ fun RemoteControlScreen(
         // Observe state for the UI, then verify the live transport at dispatch time:
         // a disconnect can happen between recomposition and the next key/gesture.
         if (!WebSocketUtil.isConnected()) return
-        if (action in setOf("mouse_move", "mouse_scroll", "mouse_click") && !WebSocketUtil.isWifiConnected()) return
         try {
             val data = JSONObject().put("action", action)
             if (value != null) data.put("value", value)
@@ -131,14 +134,15 @@ fun RemoteControlScreen(
     // Accumulate deltas rather than queueing every pointer event. The conflated signal
     // wakes the sender only on input, so an idle or hidden trackpad does no polling.
     val motion = remember { PendingRemoteMotion() }
-    LaunchedEffect(isActive, supportsPointer, lifecycle) {
+    LaunchedEffect(isActive, supportsPointer, wifiConnected, lifecycle) {
         motion.clear()
         if (!isActive || !supportsPointer) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             try {
                 while (true) {
                     motion.signal.receive()
-                    delay(16) // One batch per display frame, preserving all movement.
+                    // One batch per frame on Wi-Fi; fewer, larger batches fit Bluetooth.
+                    delay(if (wifiConnected) 16 else 40)
                     val move = motion.move
                     val scroll = motion.scroll
                     motion.move = Offset.Zero
@@ -231,10 +235,8 @@ fun RemoteControlScreen(
     if (showKeyboard && isActive && isForeground && !supportsKeyboard) {
         AlertDialog(
             onDismissRequest = onDismissKeyboard,
-            title = { Text("Connect your Mac to use the keyboard") },
-            text = {
-                Text("Connect your paired Mac over Bluetooth or Wi-Fi to type and send keyboard shortcuts. The trackpad needs Wi-Fi or a hotspot connection.")
-            },
+            title = { Text("Mac not connected") },
+            text = { Text("Bring your phone near your Mac.") },
             confirmButton = {
                 TextButton(onClick = onDismissKeyboard) { Text("Got it") }
             }
@@ -360,9 +362,9 @@ fun RemoteControlScreen(
                 .fillMaxWidth()
                 .semantics {
                     contentDescription = if (supportsPointer) {
-                        "Trackpad. Tap to click; use two fingers to scroll or right-click."
+                        "Trackpad. Tap to click; use two fingers to scroll or right-click; hold then move to drag."
                     } else {
-                        "Connect your phone and Mac over Wi-Fi or a hotspot to use the trackpad."
+                        "Mac not connected."
                     }
                     if (supportsPointer) {
                         onClick(label = "Left click") { clickMouse("left"); true }
@@ -371,9 +373,10 @@ fun RemoteControlScreen(
                 .pointerInput(isActive, isForeground, supportsPointer) {
                     if (!isActive || !isForeground || !supportsPointer) return@pointerInput
                     awaitEachGesture {
-                        awaitFirstDown()
+                        val down = awaitFirstDown()
                         var totalMoved = 0f
                         var isTwoFinger = false
+                        var dragging = false
                         val dragThreshold = viewConfiguration.touchSlop
                         while (true) {
                             val event = awaitPointerEvent()
@@ -381,7 +384,10 @@ fun RemoteControlScreen(
                             val pressed = pointers.filter { it.pressed }
                             if (pressed.size >= 2) isTwoFinger = true
                             if (pressed.isEmpty()) {
-                                if (totalMoved < dragThreshold) {
+                                if (dragging) {
+                                    motion.signal.trySend(Unit)
+                                    sendRemoteAction("mouse_click", extras = mapOf("button" to "left", "isDown" to false), performHaptic = false)
+                                } else if (totalMoved < dragThreshold) {
                                     clickMouse(if (isTwoFinger) "right" else "left")
                                 }
                                 pointers.forEach { it.consume() }
@@ -397,6 +403,13 @@ fun RemoteControlScreen(
                             } else if (!isTwoFinger && continuing.size == 1) {
                                 val change = continuing.single()
                                 val delta = change.position - change.previousPosition
+                                // Rest the finger, then move: drag like a held trackpad click.
+                                if (!dragging && totalMoved < dragThreshold &&
+                                    change.uptimeMillis - down.uptimeMillis > 400 &&
+                                    totalMoved + delta.getDistance() >= dragThreshold) {
+                                    dragging = true
+                                    sendRemoteAction("mouse_click", extras = mapOf("button" to "left", "isDown" to true))
+                                }
                                 totalMoved += delta.getDistance()
                                 motion.move += delta * 1.8f
                                 if (delta != Offset.Zero) motion.signal.trySend(Unit)
@@ -425,8 +438,11 @@ fun RemoteControlScreen(
                     tint = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    if (supportsPointer) "Tap to click · Two fingers to scroll"
-                    else "Connect over Wi-Fi or a hotspot for the trackpad",
+                    when {
+                        !supportsPointer -> "Mac not connected"
+                        macInputAllowed == false -> "On your Mac, allow androp in Accessibility"
+                        else -> "Tap to click · Two fingers to scroll"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(12.dp)

@@ -21,9 +21,10 @@ class BleControlPolicyTest {
         assertFalse(BleControlPolicy.acceptsIncoming("mediaControl", 65537))
         assertFalse(BleControlPolicy.acceptsOutgoing("macMediaControl", 0))
     }
-    @Test fun keyboardAndButtonsWorkButCursorStreamStaysOnNetwork() {
-        for (action in listOf("type", "keypress", "arrow_up", "vol_set", "lock_screen")) assertTrue(BleControlPolicy.acceptsRemoteAction(action))
-        for (action in listOf("mouse_move", "mouse_click", "mouse_scroll", "unknown")) assertFalse(BleControlPolicy.acceptsRemoteAction(action))
+    @Test fun wholeRemoteIncludingTrackpadWorksOverBluetooth() {
+        for (action in listOf("type", "keypress", "arrow_up", "vol_set", "lock_screen", "mouse_move", "mouse_click", "mouse_scroll"))
+            assertTrue(BleControlPolicy.acceptsRemoteAction(action))
+        assertFalse(BleControlPolicy.acceptsRemoteAction("unknown"))
     }
     @Test fun explicitClipboardWaitAllowsAllRetriesInsteadOfTimingOutAtFirstRetry() {
         for (bytes in listOf(1, 1024, 65536)) {

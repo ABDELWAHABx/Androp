@@ -121,6 +121,7 @@ import app.androp.android.presentation.ui.components.buttons.ListExpandToggleBut
 import app.androp.android.presentation.ui.components.cards.ConnectionStatusCard
 import app.androp.android.presentation.ui.components.cards.DashboardActionsCard
 import app.androp.android.presentation.ui.components.cards.IncomingNearbyConsentCard
+import app.androp.android.presentation.ui.components.cards.TransfersCard
 import app.androp.android.presentation.ui.components.cards.MacPowerControlsCard
 import app.androp.android.presentation.ui.components.cards.IconToggleItem
 import app.androp.android.presentation.ui.components.cards.LastConnectedDeviceCard
@@ -910,9 +911,8 @@ fun AirSyncMainScreen(
                                         uiState = uiState,
                                         isPaused = uiState.isAppPaused,
                                         connectionLabel = when {
-                                            wifiConnected && uiState.bleConnectionState == app.androp.android.data.ble.BleGattServer.BleConnectionState.AUTHENTICATED -> "Bluetooth + network connected"
-                                            wifiConnected -> "Connected over network"
-                                            else -> "Connected over Bluetooth"
+                                            wifiConnected -> "Connected"
+                                            else -> "Connected · Bluetooth"
                                         },
                                         onTogglePause = {
                                             viewModel.setAppPaused(context, !uiState.isAppPaused)
@@ -932,6 +932,12 @@ fun AirSyncMainScreen(
                                 }
 
                                 IncomingNearbyConsentCard()
+                                if (uiState.lastConnectedDevice != null) {
+                                    TransfersCard(
+                                        canSend = !uiState.isAppPaused,
+                                        onSendFiles = { filesPicker.launch(arrayOf("*/*")) }
+                                    )
+                                }
                                 MacPowerControlsCard()
 
                                 DashboardActionsCard(
@@ -1584,9 +1590,8 @@ fun AirSyncMainScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text("Files", style = MaterialTheme.typography.headlineSmall)
-                    Text("Files received from your Mac are saved in Downloads. Enable Quick Share in androp on your Mac to receive phone files. Send uses your paired Wi-Fi connection or prepares temporary Wi-Fi over Bluetooth automatically.")
-                    if (uiState.isAppPaused) Text("Resume androp before sending files.")
-                    else if (uiState.lastConnectedDevice == null) Text("Pair your Mac before sending files.")
+                    if (uiState.isAppPaused) Text("Sync is paused.")
+                    else if (uiState.lastConnectedDevice == null) Text("Pair your Mac first.")
                     Button(
                         onClick = {
                             showFilesSheet = false
@@ -1599,7 +1604,7 @@ fun AirSyncMainScreen(
                         try {
                             context.startActivity(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))
                         } catch (_: Exception) {
-                            Toast.makeText(context, "Open My Files → Downloads to find received files", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "Files are in Downloads", Toast.LENGTH_LONG).show()
                         }
                     }) { Text("Open Downloads") }
                 }

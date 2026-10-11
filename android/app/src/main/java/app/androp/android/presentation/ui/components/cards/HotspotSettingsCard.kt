@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -23,29 +24,32 @@ fun HotspotSettingsCard(context: Context) {
         try {
             context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         } catch (_: RuntimeException) {
-            Toast.makeText(context, "Open Samsung Settings → Connections → Mobile Hotspot and Tethering.", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Open Settings → Hotspot", Toast.LENGTH_SHORT).show()
         }
     }
+    // One switch-like row: grant once, then Connect on the Mac does the rest.
+    val canControl = Build.VERSION.SDK_INT >= 36
+    val granted = canControl && runCatching { Settings.System.canWrite(context) }.getOrDefault(false)
     RoundedCardContainer {
         Column(Modifier.padding(16.dp)) {
-            Text("Hotspot from your Mac", style = MaterialTheme.typography.titleMedium)
+            Text("Hotspot", style = MaterialTheme.typography.titleMedium)
             Text(
-                if (Build.VERSION.SDK_INT >= 36)
-                    "Allow Modify system settings once, then try Hotspot in androp on your Mac. Some Samsung firmware and carriers block control by ordinary apps even after permission is granted."
-                else "This Android version does not expose the public hotspot control API. Use the phone's hotspot settings.",
+                when {
+                    granted -> "Your Mac can turn it on."
+                    canControl -> "Let your Mac turn on Hotspot when it needs internet."
+                    else -> "Your Mac will ask you to turn it on."
+                },
                 style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(vertical = 8.dp)
             )
-            if (Build.VERSION.SDK_INT >= 36) {
+            if (canControl && !granted) {
                 Button(onClick = { open(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${context.packageName}"))) }) {
-                    Text("Allow Modify system settings")
+                    Text("Allow")
                 }
+            } else {
+                TextButton(onClick = { open(Intent("android.settings.TETHER_SETTINGS")) }) { Text("Hotspot settings") }
             }
-            Text("Data Saver must be off to start a Samsung hotspot. Android does not offer a normal permission to switch it off automatically. Use the button below, then retry from your Mac. Hotspot uses your mobile data and carrier plan.",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(vertical = 8.dp))
-            Button(onClick = { open(Intent("android.settings.TETHER_SETTINGS")) }) { Text("Open hotspot settings") }
-            Button(onClick = { open(Intent("android.settings.DATA_SAVER_SETTINGS")) }) { Text("Open Data Saver settings") }
         }
     }
 }

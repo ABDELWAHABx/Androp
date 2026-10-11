@@ -818,7 +818,14 @@ object WebSocketUtil {
                 "remoteControl" -> {
                     if (!app.androp.android.data.ble.BleControlPolicy.acceptsRemoteAction(data.optString("action")) ||
                         message.toByteArray(Charsets.UTF_8).size > app.androp.android.data.ble.BleControlPolicy.MAX_CONTROL_BYTES) return false
-                    return ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, message)
+                    // Pointer motion replaces any unsent motion frame instead of queueing
+                    // behind it, so a slow radio adds no lag (the phone already batches deltas).
+                    val stateKey = when (data.optString("action")) {
+                        "mouse_move" -> "remote:move"
+                        "mouse_scroll" -> "remote:scroll"
+                        else -> null
+                    }
+                    return ble.sendChunkedNotification(BleConstants.CHAR_MAC_CONTROL, message, stateKey)
                 }
 
                 "notification" -> {
@@ -850,7 +857,12 @@ object WebSocketUtil {
      * (handshake timeout, network change, socket error) must pass false so auto-reconnect can
      * still resume.
      */
-    fun disconnect(context: Context? = null, manual: Boolean = false) {
+    /**
+     * [persistManual] false is used when the Mac asked to disconnect: the Mac remembers
+     * that choice itself, and the phone keeps Bluetooth available so the Mac can come
+     * back the moment it reconnects (relaunch, Bluetooth toggle) without phone setup.
+     */
+    fun disconnect(context: Context? = null, manual: Boolean = false, persistManual: Boolean = manual) {
         WebSocketFileTransfer.cancelAll()
         synchronized(connectionLock) {
             if (manual) manualReconnectSuppressed.set(true)
@@ -879,7 +891,7 @@ object WebSocketUtil {
 
             val ctx = context ?: appContext
 
-            if (manual && !BackgroundWorkController.isPaused) {
+            if (manual && persistManual && !BackgroundWorkController.isPaused) {
                 ctx?.let { c ->
                     scope.launch {
                         try {

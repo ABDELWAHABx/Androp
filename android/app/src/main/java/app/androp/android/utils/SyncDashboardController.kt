@@ -164,8 +164,9 @@ object SyncDashboardController {
         update { current ->
             if (current.paused || "$sending:$id" in current.cancelledTransfers) current else current.copy(
                 transfers = current.transfers.filterNot { it.id == id && it.sending == sending },
-                lastEvent = detail ?: "${if (success) { if (sending) "Sent" else "Received" } else "Transfer failed"} · $name",
+                lastEvent = detail ?: "${if (success) { if (sending) "Sent" else "Received" } else "Couldn't send"} $name",
                 receivedFile = uri?.takeIf { success && !sending })
+                .finished(id, name, success, sending, uri, System.currentTimeMillis())
         }
     }
     fun clearTransfers(kind: String) { update { it.copy(transfers = it.transfers.filterNot { transfer -> transfer.kind == kind }) } }
@@ -174,7 +175,7 @@ object SyncDashboardController {
     }
     fun consent(id: String, sender: String, files: String) { update { if (it.paused) it else it.copy(consents = (it.consents.filterNot { c -> c.id == id } + DashboardConsent(id, sender, files)).takeLast(8)) } }
     fun clearConsent(id: String) { update { it.copy(consents = it.consents.filterNot { consent -> consent.id == id }) } }
-    fun link(url: String) { update { if (it.paused) it else it.copy(link = url, lastEvent = "Link received · Open in browser", receivedFile = null) } }
+    fun link(url: String) { update { if (it.paused) it else it.copy(link = url, lastEvent = "Link from your Mac", receivedFile = null) } }
     fun clearLink() { update { it.copy(link = null, lastEvent = if (it.link != null) null else it.lastEvent) } }
     fun clipboard(sent: Boolean) { update { if (it.paused) it else it.copy(lastEvent = if (sent) "Clipboard sent" else "Clipboard received", receivedFile = null) } }
     fun clearActivity() { update { it.copy(lastEvent = null, link = null, receivedFile = null, hotspotSetup = null) } }
@@ -187,8 +188,8 @@ object SyncDashboardController {
         synchronized(lock) {
             if (channelCreated) return
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "androp dashboard", NotificationManager.IMPORTANCE_LOW).apply {
-                    description = "Connection, transfers and quick controls in one quiet notification"
+                NotificationChannel(CHANNEL_ID, "Connected Mac", NotificationManager.IMPORTANCE_LOW).apply {
+                    description = "Connection, files and controls"
                     setShowBadge(false); setSound(null, null); enableVibration(false)
                 })
             channelCreated = true
@@ -207,21 +208,24 @@ object SyncDashboardController {
 
     fun build(context: Context, snapshot: SyncDashboardState = state.value): Notification {
         ensureChannel(context)
-        val lines = mutableListOf(snapshot.connectionLine)
-        if (!snapshot.paused) {
-            if (snapshot.phoneAlert) lines += "Find phone alert · Tap Stop alert to end"
-            snapshot.consents.firstOrNull()?.let { lines += "${it.sender}: ${it.files}" }
-            snapshot.transfers.take(3).forEach { lines += "${if (it.sending) "↑ Sending" else "↓ Receiving"} ${it.name} · ${it.percent}%" }
-            snapshot.hotspotSetupMessage?.let { lines += it }
-            snapshot.lastEvent?.let { lines += it }
-            snapshot.ownerStatuses.filterKeys { it != OWNER_SYNC }.values.forEach { if (it !in lines && snapshot.transfers.isEmpty()) lines += it }
+        // Native shape: title says what is happening, one short line says where.
+        // Extra rows appear only when several transfers run at once.
+        val detail = snapshot.detail.ifBlank {
+            snapshot.ownerStatuses.filterKeys { it != OWNER_SYNC }.values.firstOrNull() ?: snapshot.connectionLine
         }
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_laptop_24)
-            .setContentTitle(if (snapshot.paused) "androp · Paused" else "androp")
-            .setContentText(snapshot.activityLine)
-            .setSubText(if (snapshot.paused) null else snapshot.connectionLine)
-            .setStyle(NotificationCompat.BigTextStyle().setBigContentTitle("androp dashboard").bigText(lines.take(6).joinToString("\n")))
+            .setContentTitle(snapshot.headline)
+            .setContentText(detail)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setColor(ContextCompat.getColor(context, android.R.color.system_accent1_600))
+        }
+        if (!snapshot.paused && snapshot.transfers.size > 1) {
+            builder.setStyle(NotificationCompat.InboxStyle().also { inbox ->
+                snapshot.transfers.take(5).forEach { inbox.addLine("${if (it.sending) "↑" else "↓"} ${it.name} · ${it.percent}%") }
+            })
+        }
+        builder
             .setContentIntent(destination(context, "dashboard", 40010))
             .setOnlyAlertOnce(true).setSilent(true).setShowWhen(false)
             .setOngoing(snapshot.owners.isNotEmpty() || snapshot.paused || snapshot.shouldRequestPromotion)
@@ -229,8 +233,8 @@ object SyncDashboardController {
             .setCategory(NotificationCompat.CATEGORY_SERVICE).setPriority(NotificationCompat.PRIORITY_LOW)
             .setDeleteIntent(action(context, NotificationActionReceiver.ACTION_CLEAR_ACTIVITY, 40011))
             .setPublicVersion(NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_laptop_24).setContentTitle("androp")
-                .setContentText(if (snapshot.paused) "Syncing paused" else "Connection and quick controls")
+                .setSmallIcon(R.drawable.ic_laptop_24).setContentTitle(if (snapshot.paused) "Sync paused" else (snapshot.device ?: "Mac"))
+                .setContentText(if (snapshot.paused) "" else if (snapshot.transport != null) "Connected" else "Not connected")
                 .setSilent(true).setShowWhen(false).build())
         val consent = snapshot.consents.firstOrNull()
         val transfer = snapshot.transfers.firstOrNull()
@@ -251,9 +255,9 @@ object SyncDashboardController {
                 }
                 // A direct user-tapped activity PendingIntent avoids background launch restrictions.
                 val label = when (snapshot.hotspotSetup) {
-                    "dataSaver" -> "Data Saver"
-                    "permission" -> "Allow hotspot"
-                    else -> "Hotspot settings"
+                    "dataSaver" -> "Turn off Data Saver"
+                    "permission" -> "Allow"
+                    else -> "Open Hotspot"
                 }
                 builder.addAction(0, label, PendingIntent.getActivity(context, 40020,
                     settingsIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
@@ -265,7 +269,7 @@ object SyncDashboardController {
             snapshot.receivedFile != null -> {
                 val uri = snapshot.receivedFile.toUri()
                 val mimeType = runCatching { context.contentResolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
-                builder.addAction(0, "Open file", PendingIntent.getActivity(context, 40017,
+                builder.addAction(0, "Open", PendingIntent.getActivity(context, 40017,
                     Intent(Intent.ACTION_VIEW).apply { setDataAndType(uri, mimeType); flags = Intent.FLAG_GRANT_READ_URI_PERMISSION },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             }
@@ -288,8 +292,7 @@ object SyncDashboardController {
                         transfer != null -> "${transfer.percent}%"
                         snapshot.phoneAlert -> "Alert"
                         snapshot.battery != null -> "${snapshot.battery}%"
-                        snapshot.transport == "Bluetooth" -> "BLE"
-                        else -> snapshot.transport?.take(7) ?: "Active"
+                        else -> "On"
                     })
                 if (transfer != null && !snapshot.phoneAlert && consent == null) {
                     native.setStyle(Notification.ProgressStyle()

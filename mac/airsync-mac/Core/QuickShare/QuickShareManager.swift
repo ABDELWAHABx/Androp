@@ -542,6 +542,7 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         print("[quickshare] Transfer \(id) completed on disk with urls: \(urls)")
         self.transferState = .finished
         self.transferProgress = 1.0
+        Self.notifyReceived(urls)
         
         // Pop up overlay if enabled and exactly one file transferred
         if AppState.shared.popupSharedImages, urls.count == 1, let firstURL = urls.first, isImage(url: firstURL) {
@@ -553,6 +554,17 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         resetTransfer(after: 1.5)
     }
     
+    /// Received files announce themselves; clicking the banner reveals them in Finder.
+    static func notifyReceived(_ urls: [URL]) {
+        guard let first = urls.first else { return }
+        let content = UNMutableNotificationContent()
+        content.title = urls.count == 1 ? first.lastPathComponent : "\(urls.count) files"
+        content.body = "From \(AppState.shared.device?.name ?? "your phone") · in Downloads"
+        content.userInfo = ["type": "receivedFile", "path": first.path]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(
+            identifier: "received_\(UUID().uuidString)", content: content, trigger: nil))
+    }
+
     private func resetTransfer(after delay: TimeInterval) {
         resetGeneration &+= 1
         let generation = resetGeneration

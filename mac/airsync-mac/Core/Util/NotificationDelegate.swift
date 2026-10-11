@@ -39,6 +39,12 @@ class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 AppState.shared.removeCallEventById(eventId)
             }
         }
+        // A received file: clicking reveals it in Finder, like AirDrop.
+        else if notificationType == "receivedFile" {
+            if let path = userInfo["path"] as? String, FileManager.default.fileExists(atPath: path) {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
+        }
         // Handle Quick Share notification actions
         else if notificationType == "quickshare" {
             let transferID = userInfo["transferID"] as? String ?? ""

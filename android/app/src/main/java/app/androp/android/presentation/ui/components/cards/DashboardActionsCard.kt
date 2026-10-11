@@ -32,40 +32,31 @@ fun DashboardActionsCard(
     onEnableNotificationSync: () -> Unit,
     onNearbyPermission: () -> Unit
 ) {
+    // Only what still needs doing. Remote, Clipboard and Settings already have tabs,
+    // so this card disappears entirely once the phone is paired and permitted.
+    val needsPairing = !hasPairedDevice && !paused
+    if (!needsPairing && notificationsAllowed && !notificationSyncNeedsAccess && !nearbyNeedsAccess) return
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceBright)
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Quick actions", style = MaterialTheme.typography.titleMedium)
-            if (!connected && !paused) {
-                Text("Open androp on your Mac and scan its QR code. Keep both devices on the same Wi-Fi.",
+            if (needsPairing) {
+                Text("Pair your Mac", style = MaterialTheme.typography.titleMedium)
+                Text("Open androp on your Mac and scan the code.",
                     style = MaterialTheme.typography.bodyMedium)
                 FilledTonalButton(onClick = onPair, modifier = Modifier.fillMaxWidth()) {
-                    Text("Pair your Mac")
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = onRemote, enabled = connected && !paused,
-                    modifier = Modifier.weight(1f)) { Text("Remote Mac") }
-                FilledTonalButton(onClick = onFiles, enabled = hasPairedDevice && !paused,
-                    modifier = Modifier.weight(1f)) { Text("Files") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(onClick = onClipboard, enabled = connected && !paused,
-                    modifier = Modifier.weight(1f)) { Text("Clipboard") }
-                FilledTonalButton(onClick = onSettings, modifier = Modifier.weight(1f)) {
-                    Text("Settings")
+                    Text("Scan code")
                 }
             }
             if (!notificationsAllowed) {
-                TextButton(onClick = onEnableDashboard) { Text("Enable notification dashboard") }
+                TextButton(onClick = onEnableDashboard) { Text("Allow notifications") }
             }
             if (notificationSyncNeedsAccess) {
-                TextButton(onClick = onEnableNotificationSync) { Text("Enable phone notification sync") }
+                TextButton(onClick = onEnableNotificationSync) { Text("Show phone notifications on Mac") }
             }
             if (nearbyNeedsAccess) {
-                TextButton(onClick = onNearbyPermission) { Text("Allow Nearby devices for Bluetooth") }
+                TextButton(onClick = onNearbyPermission) { Text("Allow Nearby devices") }
             }
         }
     }

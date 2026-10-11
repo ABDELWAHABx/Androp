@@ -79,6 +79,7 @@ object WebSocketMessageHandler {
                 "clipboardUpdate" -> handleClipboardUpdate(context, data)
                 "clipboardAck" -> ClipboardSyncManager.handleAcknowledgement(data)
                 "macPowerControlResponse" -> MacPowerCommandResults.handle(data)
+                "remoteControlStatus" -> MacRemoteStatus.handle(data)
                 "volumeControl" -> handleVolumeControl(context, data)
                 "mediaControl" -> handleMediaControl(context, data)
                 "findPhone" -> when (data.optString("action", "start")) {
@@ -430,7 +431,7 @@ object WebSocketMessageHandler {
 
     private fun handleDisconnectRequest(context: Context) {
         try {
-            WebSocketUtil.disconnect(context, manual = true)
+            WebSocketUtil.disconnect(context, manual = true, persistManual = false)
             Log.d(TAG, "WebSocket disconnected as per request")
         } catch (e: Exception) {
             Log.e(TAG, "Error handling disconnect request: ${e.message}")

@@ -65,15 +65,32 @@ class SyncDashboardStateTest {
         val setup = SyncDashboardState(hotspotSetup = "dataSaver")
         assertTrue(setup.shouldShow)
         assertFalse(setup.shouldRequestPromotion)
-        assertTrue(setup.activityLine.contains("Data Saver"))
+        assertTrue(setup.detail.contains("Data Saver"))
         assertNull(setup.pause().hotspotSetup)
-        assertFalse(setup.pause().activityLine.contains("Data Saver"))
+        assertFalse(setup.pause().detail.contains("Data Saver"))
     }
 
     @Test fun hotspotSetupCannotHideIncomingFileConsent() {
         val setup = SyncDashboardState(hotspotSetup = "permission",
             consents = listOf(DashboardConsent("id", "Mac", "photo.jpg")))
-        assertEquals("Mac wants to share files", setup.activityLine)
+        assertEquals("Mac wants to share", setup.headline)
+    }
+
+    @Test fun finishedTransfersStayListedNewestFirstWithoutDuplicates() {
+        val state = SyncDashboardState()
+            .finished("1", "a.jpg", true, false, "content://a", 1)
+            .finished("2", "b.pdf", false, true, null, 2)
+            .finished("1", "a.jpg", true, false, "content://a", 3)
+        assertEquals(listOf("a.jpg", "b.pdf"), state.recent.map { it.name })
+        assertNull(state.recent.last().uri)
+    }
+
+    @Test fun headlineFollowsTheMostImportantActivity() {
+        val idle = SyncDashboardState(device = "MacBook", transport = "Bluetooth")
+        assertEquals("MacBook", idle.headline)
+        val sending = idle.withProgress("1", "movie.mp4", 40, true)
+        assertEquals("Sending movie.mp4", sending.headline)
+        assertTrue(sending.detail.startsWith("40%"))
     }
 
     @Test fun hotspotActionPublishesImmediatelyWithoutProgressPolling() {

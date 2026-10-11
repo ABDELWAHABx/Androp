@@ -148,8 +148,8 @@ class BleConnectionManager(private val context: Context) {
     val isAuthenticated: Boolean
         get() = bleServer?.isAuthenticated ?: false
 
-    fun sendChunkedNotification(characteristicUuid: java.util.UUID, payload: String): Boolean =
-        bleServer?.sendChunkedNotification(characteristicUuid, payload) ?: false
+    fun sendChunkedNotification(characteristicUuid: java.util.UUID, payload: String, stateKey: String? = null): Boolean =
+        bleServer?.sendChunkedNotification(characteristicUuid, payload, stateKey) ?: false
 
     fun sendNotification(characteristicUuid: java.util.UUID, data: ByteArray): Boolean =
         bleServer?.sendNotification(characteristicUuid, data) ?: false

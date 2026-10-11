@@ -55,21 +55,23 @@ final class PhoneHotspotManager: ObservableObject {
         self.request = request
         requestCompletion = completion
         pendingAction = action
-        message = action == .setup ? "Requesting setup on your phone…" : "Waiting for your phone…"
+        message = action == .setup ? "Check your phone" : nil
         guard PhoneHotspotTransport.send([
             "id": request.id, "action": action.rawValue
         ], bluetoothPeer: request.bluetoothPeer) else {
             finishRequest()
-            message = "Couldn't send the request. Reconnect your phone and try again."
+            message = "Phone not connected."
             return
         }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.request?.id == request.id else { return }
             self.finishRequest()
-            self.message = "Your phone did not confirm the hotspot state. Refresh or check Hotspot settings on your phone."
+            self.message = "No answer from your phone."
         }
         timeout = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: work)
+        // The phone answers status at once; only a real switch takes a few seconds.
+        let wait: TimeInterval = action == .enable || action == .disable ? 25 : 8
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
     }
 
     /// Called only after the existing transport authenticates the phone.

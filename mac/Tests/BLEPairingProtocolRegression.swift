@@ -8,6 +8,15 @@ struct BLEPairingProtocolRegression {
             precondition(condition(), label)
             count += 1
         }
+        // Rotating advertisement proof shared with Android (BleAdvertisementProofTest).
+        let proof = BLEAdvertisementProof.proof(token: "token", window: 100)
+        expect(proof.map { String(format: "%02x", $0) }.joined() == "ff06e76291", "advertisement proof matches Android vector")
+        let now = Date(timeIntervalSince1970: 100 * 600 + 5)
+        expect(BLEAdvertisementProof.verifies(manufacturerData: Data([0xFF, 0xFF]) + proof, token: "token", now: now), "valid proof accepted")
+        expect(!BLEAdvertisementProof.verifies(manufacturerData: Data([0xFF, 0xFF]) + proof, token: "other", now: now), "wrong token rejected")
+        expect(!BLEAdvertisementProof.verifies(manufacturerData: Data([0xFF, 0xFF]) + proof,
+                                               token: "token", now: now.addingTimeInterval(1_800)), "stale proof rejected")
+        expect(!BLEAdvertisementProof.verifies(manufacturerData: nil, token: "token", now: now), "missing proof rejected")
         let key = Data(0..<32)
         let pairing = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
         let nonce = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!

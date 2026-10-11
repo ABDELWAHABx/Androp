@@ -123,10 +123,8 @@ extension WebSocketServer {
                 } else { handleStatusUpdate(message) }
             }
         case .remoteControl:
-            // Cursor streaming needs the throughput and latency of Wi-Fi/USB.
-            guard let data = message.data.value as? [String: Any],
-                  let action = data["action"] as? String,
-                  !["mouse_move", "mouse_scroll", "mouse_click"].contains(action) else { return }
+            // The phone coalesces pointer motion over Bluetooth, so the trackpad
+            // works on every authenticated transport, not only Wi-Fi.
             handleRemoteControl(message)
         case .macMediaControl: handleMacMediaControlRequest(message)
         case .notificationActionResponse: handleNotificationActionResponse(message)
@@ -785,14 +783,7 @@ extension WebSocketServer {
                             
                             try FileManager.default.moveItem(at: state.tempUrl, to: finalDest)
 
-                            DispatchQueue.main.async {
-                                AppState.shared.postNativeNotification(
-                                    id: "incoming_file_\(id)",
-                                    appName: "androp",
-                                    title: "Received: \(finalName)",
-                                    body: "Saved to Downloads"
-                                )
-                            }
+                            DispatchQueue.main.async { QuickShareManager.notifyReceived([finalDest]) }
                         } catch {
                             print("[websocket] (file-transfer) Failed to move incoming file: \(error)")
                         }
@@ -848,9 +839,12 @@ extension WebSocketServer {
             case "type":
                 guard let text = dict["text"] as? String, text.utf8.count <= 64 * 1024 else { return }
             case "vol_set":
-                guard let level = dict["value"] as? Int, (0...100).contains(level) else { return }
+                guard let level = MacRemoteInputPolicy.number(dict["value"]), (0...100).contains(level) else { return }
             case "mouse_move", "mouse_scroll":
-                guard let dx = dict["dx"] as? Double, let dy = dict["dy"] as? Double,
+                // Android's JSON writes integral doubles as integers (3.0 -> 3), so
+                // accept any JSON number; rejecting Int dropped most pointer frames.
+                guard let dx = MacRemoteInputPolicy.number(dict["dx"]),
+                      let dy = MacRemoteInputPolicy.number(dict["dy"]),
                       dx.isFinite, dy.isFinite else { return }
             case "mouse_click":
                 guard dict["button"] is String, dict["isDown"] is Bool else { return }
@@ -860,6 +854,9 @@ extension WebSocketServer {
             default: return
             }
             DispatchQueue.main.async { MacPowerManager.shared.noteRemoteActivity() }
+            if MacRemoteInputPolicy.needsAccessibility(action) {
+                MacRemoteManager.shared.ensureInputAllowed()
+            }
             #if DEBUG
             print("[WebSocketServer] Received remote action: \(action)")
             #endif
@@ -886,14 +883,14 @@ extension WebSocketServer {
             case "vol_down": MacRemoteManager.shared.decreaseVolume()
             case "vol_mute": MacRemoteManager.shared.toggleMute()
             case "vol_set":
-                if let value = dict["value"] as? Int {
-                    MacRemoteManager.shared.setVolume(value)
+                if let value = MacRemoteInputPolicy.number(dict["value"]) {
+                    MacRemoteManager.shared.setVolume(Int(value.rounded()))
                 }
             case "media_play_pause": MacRemoteManager.shared.simulateMediaKey(.playPause)
             case "media_next": MacRemoteManager.shared.simulateMediaKey(.next)
             case "media_prev": MacRemoteManager.shared.simulateMediaKey(.previous)
             case "mouse_move":
-                if let dx = dict["dx"] as? Double, let dy = dict["dy"] as? Double {
+                if let dx = MacRemoteInputPolicy.number(dict["dx"]), let dy = MacRemoteInputPolicy.number(dict["dy"]) {
                     MacRemoteManager.shared.simulateMouseRelativeMove(dx: CGFloat(dx), dy: CGFloat(dy))
                 }
             case "mouse_click":
@@ -907,8 +904,8 @@ extension WebSocketServer {
                     MacRemoteManager.shared.simulateMouseClick(button: button, isDown: isDown)
                 }
             case "mouse_scroll":
-                if let dx = dict["dx"] as? Double, let dy = dict["dy"] as? Double {
-                    MacRemoteManager.shared.simulateMouseScroll(dx: CGFloat(dx), dy: CGFloat(dy))
+                if let dx = MacRemoteInputPolicy.number(dict["dx"]), let dy = MacRemoteInputPolicy.number(dict["dy"]) {
+                    MacRemoteManager.shared.simulateMouseScroll(dx: CGFloat(dx), dy: dy)
                 }
             case "lock_screen":
                 MacRemoteManager.shared.lockScreen()
@@ -1056,8 +1053,8 @@ extension WebSocketServer {
             AppState.shared.postNativeNotification(
                 id: "transfer_verified_\(id)",
                 appName: "androp",
-                title: "Transfer complete",
-                body: verified ? "File sent successfully" : "File might be incomplete"
+                title: verified ? "Sent to \(AppState.shared.device?.name ?? "your phone")" : "Couldn't send file",
+                body: verified ? "In Downloads on your phone" : "Try sending it again"
             )
         }
     }

@@ -50,6 +50,10 @@ struct PhoneView: View {
                 }
                 
             }
+            .overlay(alignment: .bottom) {
+                PhoneTransferPill()
+                    .padding(10)
+            }
             .frame(width: cardWidth, height: cardHeight)
             .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
             .overlay(
@@ -77,6 +81,62 @@ struct PhoneView: View {
               let nsImage = NSImage(data: data) else { return }
         // Setting displayedImage triggers fade in representable
         displayedImage = nsImage
+    }
+}
+
+/// Live file activity on the phone card itself, so transfers are visible
+/// without opening another window.
+struct PhoneTransferPill: View {
+    @ObservedObject private var manager = QuickShareManager.shared
+
+    private var content: (icon: String, title: String, progress: Double?)? {
+        switch manager.transferState {
+        case .preparing, .reviewing, .connectingNetwork, .discovering, .connecting, .awaitingPin:
+            return ("arrow.up.circle", manager.sendingFileName ?? "Preparing…", nil)
+        case .sending:
+            return ("arrow.up.circle.fill", manager.sendingFileName ?? "Sending", manager.transferProgress)
+        case .receiving:
+            return ("arrow.down.circle.fill", "Receiving", manager.transferProgress)
+        case .incomingAwaitingConsent(_, let device):
+            return ("arrow.down.circle", "\(device.name) wants to share", nil)
+        case .finished:
+            return ("checkmark.circle.fill", "Done", 1)
+        case .failed(let reason):
+            return ("exclamationmark.circle.fill", reason, nil)
+        case .idle:
+            return nil
+        }
+    }
+
+    var body: some View {
+        if let content {
+            Button {
+                AppState.shared.showingQuickShareTransfer = true
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: content.icon)
+                        Text(content.title).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        if let progress = content.progress, progress < 1 {
+                            Text(progress, format: .percent.precision(.fractionLength(0)))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .font(.caption.weight(.medium))
+                    if let progress = content.progress, progress < 1 {
+                        ProgressView(value: progress).controlSize(.mini)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.snappy, value: content.title)
+        }
     }
 }
 

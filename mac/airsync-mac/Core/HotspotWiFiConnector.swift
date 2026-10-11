@@ -102,22 +102,25 @@ nonisolated enum HotspotWiFiWorker {
         _ = join(ssid: previousSSID, attempt: attempt, onlyWhileUnassociated: true)
     }
 
-    static func join(ssid: String, attempt: HotspotWiFiAttempt, onlyWhileUnassociated: Bool = false) -> String {
+    /// `patient` keeps scanning for about a minute while the user turns the hotspot on by hand.
+    static func join(ssid: String, attempt: HotspotWiFiAttempt, onlyWhileUnassociated: Bool = false, patient: Bool = false) -> String {
         guard HotspotWiFiPolicy.validSSID(ssid), !attempt.isCancelled else { return "Connection cancelled." }
         guard let wifi = CWWiFiClient.shared().interface(), wifi.powerOn() else {
             return "Turn on Wi-Fi on your Mac, then try Connect again."
         }
-        if wifi.ssid() == ssid { return "Already connected to your phone's Wi-Fi. Internet access depends on the phone and carrier." }
+        if wifi.ssid() == ssid { return "Connected to your phone's hotspot." }
         func mayContinue() -> Bool {
             !attempt.isCancelled && (!onlyWhileUnassociated || wifi.ssid() == nil || wifi.ssid() == ssid)
         }
         guard mayContinue() else { return "Wi-Fi changed. Keeping the current network." }
         let started = ProcessInfo.processInfo.systemUptime
         var network: CWNetwork?
-        for index in 0..<6 {
+        let maxAttempts = patient ? 40 : 6
+        for index in 0..<maxAttempts {
             guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
             guard HotspotWiFiPolicy.mayRetry(attempt: index, elapsed: ProcessInfo.processInfo.systemUptime - started,
-                                            cancelled: attempt.isCancelled) else { break }
+                                            cancelled: attempt.isCancelled, maxAttempts: maxAttempts,
+                                            window: patient ? 75 : 30) else { break }
             do {
                 let matches = try wifi.scanForNetworks(withName: ssid)
                 // Never downgrade to an open lookalike with the same name.
@@ -126,14 +129,14 @@ nonisolated enum HotspotWiFiWorker {
                         $0.supportsSecurity(.wpa3Personal) || $0.supportsSecurity(.wpa3Transition))
                 }.max { $0.rssiValue < $1.rssiValue }
             } catch {
-                if index == 5 { return "macOS could not scan for the hotspot. Check Wi-Fi and androp's Location access, then retry." }
+                if index == maxAttempts - 1 { return "Mac couldn't scan for Wi-Fi. Allow androp in Location Services." }
             }
             if network != nil { break }
-            if index < 5 { attempt.waitForRetry() }
+            if index < maxAttempts - 1 { attempt.waitForRetry() }
         }
         guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
         guard let network else {
-            return "The selected WPA2/WPA3 hotspot wasn't found. Check its Wi-Fi name, phone hotspot settings and Mac Location access."
+            return "Couldn't find “\(ssid)”. Turn on Hotspot on your phone and try again."
         }
         guard let ssidData = network.ssidData else { return "macOS did not provide the hotspot identity. Check Location access." }
         var password: NSString?
@@ -147,16 +150,16 @@ nonisolated enum HotspotWiFiWorker {
         guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
         guard status == errSecSuccess, let savedPassword = password as String?, !savedPassword.isEmpty else {
             return status == errSecItemNotFound
-                ? "No saved password was found for this hotspot. Join it once in the Mac Wi-Fi menu and save its password, then retry."
-                : "macOS did not allow access to the saved Wi-Fi password. Allow androp's Keychain request, or join using the Mac Wi-Fi menu."
+                ? "Join “\(ssid)” once from the Wi-Fi menu. androp connects automatically after that."
+                : "Allow androp's Keychain request to use the saved hotspot password."
         }
         do {
             guard mayContinue() else { return "Connection cancelled or Wi-Fi changed." }
             try wifi.associate(to: network, password: savedPassword)
             if attempt.isCancelled { return "Cancelled. macOS may have completed the Wi-Fi connection already." }
             return wifi.ssid() == ssid
-                ? "Connected to your phone's Wi-Fi. Internet access depends on the phone and carrier."
-                : "macOS accepted the connection but hasn't confirmed the selected network. Check the Wi-Fi menu."
+                ? "Connected to your phone's hotspot."
+                : "Joining your phone's hotspot…"
         } catch {
             return "macOS couldn't join the hotspot with its saved password. Check the password in the Mac Wi-Fi menu and retry."
         }
@@ -207,8 +210,14 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         HotspotWiFiWorker.queue.async {
             let names = HotspotWiFiWorker.savedNetworks()
             DispatchQueue.main.async { [weak self] in
-                self?.savedNetworks = names
-                self?.loadingNetworks = false
+                guard let self else { return }
+                self.savedNetworks = names
+                self.loadingNetworks = false
+                // First use: guess the phone's hotspot so Connect works without setup.
+                if self.ssid.isEmpty, !self.isBusy,
+                   let guess = HotspotWiFiPolicy.likelyHotspot(phoneName: AppState.shared.device?.name, savedNetworks: names) {
+                    self.ssid = guess
+                }
             }
         }
     }
@@ -229,16 +238,16 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         case .authorizedAlways, .authorizedWhenInUse: activatePhone(token)
         case .notDetermined:
             awaitingPermission = true
-            message = "Allow Location access so macOS can find your hotspot."
+            message = "Allow Location so your Mac can find the hotspot."
             location.requestWhenInUseAuthorization()
             let timeout = DispatchWorkItem { [weak self] in
                 guard let self, self.attempt === token, self.awaitingPermission else { return }
-                self.finish(token, "Location permission is still needed. Allow androp in Privacy & Security → Location Services, then retry.")
+                self.finish(token, "Allow androp in Location Services, then try again.")
             }
             permissionTimeout = timeout
             DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
         default:
-            finish(token, "Allow androp in System Settings → Privacy & Security → Location Services, then retry Connect.")
+            finish(token, "Allow androp in Location Services, then try again.")
         }
     }
 
@@ -251,7 +260,7 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
                 self.permissionTimeout?.cancel()
                 self.activatePhone(token)
             case .denied, .restricted:
-                self.finish(token, "Location access is required to find and join the hotspot. You can still join it using the Mac Wi-Fi menu.")
+                self.finish(token, "Allow androp in Location Services, then try again.")
             default: break
             }
         }
@@ -260,45 +269,53 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
     private func activatePhone(_ token: HotspotWiFiAttempt) {
         guard attempt === token, !token.isCancelled, !AppState.shared.isSyncPaused,
               PhoneHotspotTransport.matches(deviceID: phoneID ?? "", bluetoothPeer: bluetoothPeer) else { finish(token, "Connection cancelled. Reconnect your phone and retry."); return }
-        message = "Requesting your phone's hotspot…"
+        message = "Turning on your phone's hotspot…"
         // Ask for a fresh observation even if an older status said it was on.
         PhoneHotspotManager.shared.send(.status) { [weak self] enabled in
             guard let self, self.attempt === token, !token.isCancelled else { return }
-            guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else { self.finish(token, "Connection cancelled. The phone changed or sync paused."); return }
             if enabled == true { self.join(token); return }
-            guard enabled != nil else { self.finish(token, "Your phone did not confirm hotspot status. Refresh and retry."); return }
-            guard PhoneHotspotManager.shared.state?.canAttemptControl == true else {
-                self.finish(token, "Your phone couldn't confirm hotspot control. Use Setup on phone and check its reported status.")
+            guard enabled != nil, PhoneHotspotManager.shared.state?.canAttemptControl == true else {
+                // No answer, or the phone can't switch it itself: never dead-end.
+                self.waitForManualHotspot(token)
                 return
             }
             PhoneHotspotManager.shared.send(.enable) { [weak self] enabled in
                 guard let self, self.attempt === token, !token.isCancelled else { return }
+                if enabled == true { self.join(token); return }
                 // Some phones drop their old Wi-Fi before they can send the
-                // final state. After an acknowledged activation request only,
-                // look for the selected secure hotspot; finding/associating with
-                // that real network supplies the Mac-side confirmation instead.
+                // final state; scanning for the real network confirms instead.
                 if enabled == nil && HotspotWiFiPolicy.mayRecoverHandoff(
                     status: PhoneHotspotManager.shared.state?.status,
                     hasPhone: AppState.shared.device != nil,
                     paused: AppState.shared.isSyncPaused,
                     manuallyDisconnected: UserDefaults.standard.isManuallyDisconnected) {
-                    self.join(token)
+                    self.join(token, patient: true)
                     return
                 }
-                guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else { self.finish(token, "Connection cancelled. The phone changed or sync paused."); return }
-                if enabled == true { self.join(token) }
-                else { self.finish(token, "Hotspot activation wasn't confirmed. Check the phone's hotspot status or use Setup on phone.") }
+                self.waitForManualHotspot(token)
             }
         }
     }
 
-    private func join(_ token: HotspotWiFiAttempt) {
+    /// Put a one-tap Hotspot action on the phone and keep looking for the
+    /// network, joining the moment it appears.
+    private func waitForManualHotspot(_ token: HotspotWiFiAttempt) {
+        guard attempt === token, !token.isCancelled else { return }
+        message = "Turn on Hotspot on your phone…"
+        if PhoneHotspotManager.shared.pendingAction == nil,
+           PhoneHotspotTransport.matches(deviceID: phoneID ?? "", bluetoothPeer: bluetoothPeer) {
+            PhoneHotspotManager.shared.send(.setup)
+        }
+        join(token, patient: true)
+    }
+
+    private func join(_ token: HotspotWiFiAttempt, patient: Bool = false) {
         guard attempt === token, !token.isCancelled, !AppState.shared.isSyncPaused else { return }
         joining = true
-        message = "Finding your hotspot and joining with its saved Mac password…"
+        if !patient { message = "Joining your phone's hotspot…" }
         let name = requestedSSID
         HotspotWiFiWorker.queue.async {
-            let result = HotspotWiFiWorker.join(ssid: name, attempt: token)
+            let result = HotspotWiFiWorker.join(ssid: name, attempt: token, patient: patient)
             let address = HotspotWiFiWorker.joinedIPv4(ssid: name, attempt: token)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.attempt === token else { return }
@@ -324,8 +341,8 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         guard let token = attempt else { return }
         token.cancel()
         if joining {
-            message = "Cancelling… a Wi-Fi request already submitted to macOS may finish."
-        } else { finish(token, "Connection cancelled. A hotspot request already sent to the phone may still complete.") }
+            message = "Cancelling…"
+        } else { finish(token, "Cancelled.") }
     }
 
     private func finish(_ token: HotspotWiFiAttempt, _ result: String) {

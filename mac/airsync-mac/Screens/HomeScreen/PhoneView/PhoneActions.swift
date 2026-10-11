@@ -213,110 +213,93 @@ struct PhonePrimaryActions: View {
     }
 }
 
-/// Compact on both main-window and menu-bar surfaces. Expanding requests one
-/// fresh status when none is known; there is no timer or background polling.
+/// One row, one button. Connect turns the phone's hotspot on (or asks you to,
+/// with a one-tap action on the phone) and joins it with the Mac's saved password.
 struct PhoneHotspotControls: View {
     @ObservedObject private var appState = AppState.shared
     @ObservedObject private var hotspot = PhoneHotspotManager.shared
     @ObservedObject private var wifi = HotspotWiFiConnector.shared
-    @State private var expanded = false
+    @State private var editingName = false
     var compact = false
 
     private var available: Bool { appState.device != nil && !appState.isSyncPaused }
     private var idle: Bool { hotspot.pendingAction == nil && !wifi.isBusy }
-    private var canControl: Bool {
-        available && idle && hotspot.state?.canAttemptControl == true && hotspot.state?.status != "unsupported"
-    }
-    private var label: String {
-        guard available else { return "Phone hotspot" }
-        if hotspot.pendingAction != nil { return "Phone hotspot · waiting" }
-        if let enabled = hotspot.state?.hotspotEnabled { return "Phone hotspot · \(enabled ? "on" : "off")" }
-        return "Phone hotspot"
+    private var hasName: Bool { HotspotWiFiPolicy.validSSID(wifi.ssid) }
+
+    private var status: String? {
+        if wifi.isBusy { return wifi.message ?? "Connecting…" }
+        if let message = wifi.message { return message }
+        if hasName { return wifi.ssid }
+        return nil
     }
 
     var body: some View {
-        DisclosureGroup(isExpanded: $expanded) {
-            VStack(alignment: .leading, spacing: 8) {
-                if !available {
-                    if wifi.isBusy {
-                        Text(wifi.message ?? "Joining your phone's Wi-Fi…").foregroundStyle(.secondary)
-                        Button("Cancel connection") { wifi.cancel() }
-                    } else {
-                        Text(appState.isSyncPaused ? "Resume sync to control your phone's hotspot." : "Connect your phone to check hotspot availability.")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "personalhotspot")
+                    .foregroundStyle(hotspot.state?.hotspotEnabled == true ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Hotspot")
+                        .font(compact ? .caption.weight(.medium) : .subheadline.weight(.medium))
+                    if let status {
+                        Text(status)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-                } else {
-                    TextField("Phone hotspot Wi-Fi name", text: $wifi.ssid)
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(wifi.isBusy)
-                        .accessibilityLabel("Phone hotspot Wi-Fi network name")
-                    HStack {
-                        Menu("Saved networks") {
-                            if wifi.savedNetworks.isEmpty { Text("No saved names found. Enter the hotspot name above.") }
-                            ForEach(wifi.savedNetworks, id: \.self) { name in
-                                Button(name) { wifi.ssid = name }
-                            }
-                            Divider()
-                            Button("Refresh saved networks") { wifi.loadSavedNetworks() }
-                        }
-                        .disabled(wifi.isBusy)
-                        Spacer(minLength: 0)
-                        Button(wifi.isBusy ? "Cancel" : "Connect") {
-                            if wifi.isBusy { wifi.cancel() } else { wifi.connect() }
-                        }
-                        .disabled(!wifi.isBusy && (!idle || !HotspotWiFiPolicy.validSSID(wifi.ssid)))
-                        .help("Enable your phone hotspot and switch this Mac to its Wi-Fi using the password already saved in Keychain")
-                    }
-                    Text("Choose your hotspot name once. Connect uses its saved Mac password; macOS may ask for Location or Keychain access.")
-                        .foregroundStyle(.secondary)
-                    if let message = wifi.message { Text(message).foregroundStyle(.secondary) }
-                    if let enabled = hotspot.state?.hotspotEnabled {
-                        Label(enabled ? "Last reported: hotspot on" : "Last reported: hotspot off",
-                              systemImage: enabled ? "personalhotspot" : "wifi.slash")
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack(spacing: 6) {
-                        Button("Enable") { hotspot.send(.enable) }
-                            .disabled(!canControl || hotspot.state?.dataSaverEnabled != false || hotspot.state?.hotspotEnabled == true)
-                            .help("Ask your phone to enable internet tethering. Phone permission, firmware and carrier support are required.")
-                        Button("Disable") { hotspot.send(.disable) }
-                            .disabled(!canControl || hotspot.state?.hotspotEnabled == false)
-                            .help("Ask your phone to stop the hotspot session started by androp.")
-                        Spacer(minLength: 0)
-                        Button { hotspot.send(.status) } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .disabled(!idle)
-                        .accessibilityLabel("Refresh phone hotspot status")
-                        .help("Check the current state and permissions on your phone")
-                    }
-                    .buttonStyle(.bordered)
-                    Button("Setup on phone") { hotspot.send(.setup) }
-                        .disabled(!idle)
-                        .help("Request a setup action in your phone's androp notification")
-                    if hotspot.state?.dataSaverEnabled == true {
-                        Text("Turn off Data Saver on your phone before enabling its hotspot. androp cannot change Data Saver automatically.")
-                            .foregroundStyle(.secondary)
-                    }
-                    if let message = hotspot.message {
-                        Text(message).foregroundStyle(.secondary)
-                    } else if hotspot.state == nil {
-                        Text("Refresh to check this phone's hotspot support and permissions.")
-                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                Spacer(minLength: 4)
+                if wifi.isBusy {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { wifi.cancel() }
+                        .buttonStyle(.borderless)
+                } else {
+                    Menu {
+                        ForEach(wifi.savedNetworks, id: \.self) { name in
+                            Button {
+                                wifi.ssid = name
+                            } label: {
+                                if name == wifi.ssid { Label(name, systemImage: "checkmark") } else { Text(name) }
+                            }
+                        }
+                        if !wifi.savedNetworks.isEmpty { Divider() }
+                        Button("Other network…") { editingName = true }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .help("Choose your phone's hotspot")
+                    Button("Connect") {
+                        if hasName { wifi.connect() } else { editingName = true }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(!available || !idle)
+                }
             }
-            .font(.caption)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 6)
-        } label: {
-            Label(label, systemImage: "personalhotspot")
-                .font(compact ? .caption.weight(.medium) : .subheadline.weight(.medium))
+            if editingName {
+                HStack {
+                    TextField("Hotspot name", text: $wifi.ssid)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { editingName = false }
+                    Button("Done") { editingName = false }
+                        .disabled(!hasName)
+                }
+                .font(.caption)
+            }
         }
-        .onChange(of: expanded) { _, isExpanded in
-            if isExpanded && available { hotspot.refreshIfNeeded(); wifi.loadSavedNetworks() }
+        .opacity(available || wifi.isBusy ? 1 : 0.5)
+        .onAppear {
+            wifi.selectPhone()
+            wifi.loadSavedNetworks()
         }
-        .onChange(of: appState.device?.deviceId) { _, _ in wifi.selectPhone() }
+        .onChange(of: appState.device?.deviceId) { _, _ in
+            wifi.selectPhone()
+            wifi.loadSavedNetworks()
+        }
     }
 }
 

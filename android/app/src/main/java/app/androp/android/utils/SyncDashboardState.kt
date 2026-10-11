@@ -11,6 +11,16 @@ data class DashboardTransfer(
 
 data class DashboardConsent(val id: String, val sender: String, val files: String)
 
+/** A finished transfer kept for the in-app list; [uri] is set for received files. */
+data class DashboardRecentTransfer(
+    val id: String,
+    val name: String,
+    val sending: Boolean,
+    val success: Boolean,
+    val uri: String?,
+    val finishedAt: Long
+)
+
 data class SyncDashboardState(
     val owners: Set<String> = emptySet(),
     val ownerStatuses: Map<String, String> = emptyMap(),
@@ -28,7 +38,8 @@ data class SyncDashboardState(
     val receivedFile: String? = null,
     val phoneAlert: Boolean = false,
     val hotspotSetup: String? = null,
-    val cancelledTransfers: Set<String> = emptySet()
+    val cancelledTransfers: Set<String> = emptySet(),
+    val recent: List<DashboardRecentTransfer> = emptyList()
 ) {
     val shouldRequestPromotion: Boolean
         get() = !paused && (transport != null || transfers.isNotEmpty() || phoneAlert)
@@ -38,18 +49,45 @@ data class SyncDashboardState(
 
     val connectionLine: String
         get() = when {
-            paused -> "Paused · Background syncing stopped"
+            paused -> "Paused"
             transport != null -> listOfNotNull(device ?: "Mac", transport,
                 battery?.let { "$it%${if (charging) " · Charging" else ""}" }).joinToString(" · ")
-            connecting -> "Connecting to ${device ?: "Mac"}"
-            reconnecting -> "Waiting to reconnect${device?.let { " to $it" } ?: ""}"
-            else -> "Ready${device?.let { " · $it" } ?: ""}"
+            connecting -> "Connecting to ${device ?: "Mac"}…"
+            else -> "${device ?: "Mac"} · Not connected"
+        }
+
+    /** Notification title: the one thing happening now, the way system notifications read. */
+    val headline: String
+        get() = when {
+            paused -> "Sync paused"
+            phoneAlert -> "Ringing your phone"
+            consents.isNotEmpty() -> "${consents.first().sender} wants to share"
+            transfers.isNotEmpty() -> transfers.first().let { "${if (it.sending) "Sending" else "Receiving"} ${it.name}" }
+            hotspotSetup != null -> "Turn on Hotspot"
+            lastEvent != null -> lastEvent
+            else -> device ?: "Mac"
+        }
+
+    /** Notification body: one short supporting line. */
+    val detail: String
+        get() = when {
+            paused -> device ?: "Mac"
+            phoneAlert -> "From ${device ?: "your Mac"}"
+            consents.isNotEmpty() -> consents.first().files
+            transfers.isNotEmpty() -> "${transfers.first().percent}%" +
+                (if (transfers.size > 1) " · ${transfers.size - 1} more" else "") +
+                " · ${device ?: "Mac"}"
+            hotspotSetup != null -> hotspotSetupMessage ?: ""
+            transport != null -> listOfNotNull(if (lastEvent != null) device ?: "Mac" else "Connected",
+                battery?.let { "Mac $it%${if (charging) " ⚡" else ""}" }).joinToString(" · ")
+            connecting -> "Connecting…"
+            else -> "Not connected"
         }
 
     val activityLine: String
         get() = when {
-            paused -> "Resume when you're ready"
-            phoneAlert -> "Find phone alert active"
+            paused -> "Sync paused"
+            phoneAlert -> "Ringing your phone"
             consents.isNotEmpty() -> "${consents.first().sender} wants to share files"
             transfers.isNotEmpty() -> transfers.first().let {
                 "${if (it.sending) "Sending" else "Receiving"} ${it.name} · ${it.percent}%" +
@@ -64,9 +102,9 @@ data class SyncDashboardState(
 
     val hotspotSetupMessage: String?
         get() = when (hotspotSetup) {
-            "dataSaver" -> "Hotspot needs Data Saver turned off · Tap Data Saver"
-            "permission" -> "Hotspot needs Modify system settings access · Tap Allow hotspot"
-            "hotspot" -> "Hotspot setup · Tap Hotspot settings"
+            "dataSaver" -> "Data Saver is on"
+            "permission" -> "Let androp turn it on next time"
+            "hotspot" -> "Your Mac is waiting for it"
             else -> null
         }
 
@@ -84,6 +122,10 @@ data class SyncDashboardState(
         return copy(transfers = updated,
             lastEvent = null, receivedFile = null)
     }
+
+    fun finished(id: String, name: String, success: Boolean, sending: Boolean, uri: String?, now: Long): SyncDashboardState =
+        copy(recent = (listOf(DashboardRecentTransfer(id, name, sending, success, uri?.takeIf { success }, now)) +
+            recent.filterNot { it.id == id && it.sending == sending }).take(10))
 
     fun cancelTransfer(id: String, sending: Boolean): SyncDashboardState = copy(
         transfers = transfers.filterNot { it.id == id && it.sending == sending },

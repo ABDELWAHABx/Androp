@@ -60,7 +60,13 @@ class BleGattServer(private val context: Context) {
     private val _connectionState = MutableStateFlow(BleConnectionState.DISCONNECTED)
     val connectionState = _connectionState.asStateFlow()
 
+    // Every LE link the phone has: watches, earbuds and cars show up here too, because
+    // Android reports all LE connections to every GATT server. Only a central that uses
+    // androp's GATT service ([gattPeers]) and authenticates is treated as the Mac.
     private val connectedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>()
+    private val gattPeers = ConcurrentHashMap.newKeySet<String>()
+    private val mtus = ConcurrentHashMap<String, Int>()
+    @Volatile private var authCandidate: BluetoothDevice? = null
     private val notificationSubscriptions = ConcurrentHashMap<String, MutableSet<UUID>>()
     private val reassemblers = ConcurrentHashMap<UUID, BleChunkUtil.Reassembler>()
     private val legacyAuthChunks = BleChunkUtil.Reassembler(256)
@@ -122,7 +128,8 @@ class BleGattServer(private val context: Context) {
     @Volatile
     var isAuthenticated = false
         private set
-    @Volatile private var negotiatedMtu = 23
+    private val negotiatedMtu: Int
+        get() = (authenticatedDevice ?: authCandidate)?.let { mtus[it.address] } ?: 23
     @Volatile private var isAdvertisingPaused = false
 
     enum class BleConnectionState {
@@ -175,9 +182,11 @@ class BleGattServer(private val context: Context) {
         runCatching { server?.clearServices() }.onFailure { Log.w(TAG, "Unable to clear Bluetooth services", it) }
         runCatching { server?.close() }.onFailure { Log.w(TAG, "Unable to close Bluetooth server", it) }
         connectedDevices.clear()
+        gattPeers.clear()
+        mtus.clear()
+        authCandidate = null
         notificationSubscriptions.clear()
         authenticatedDevice = null
-        negotiatedMtu = 23
         reassemblers.clear()
         legacyAuthChunks.clear()
         clearSendQueue()
@@ -199,6 +208,16 @@ class BleGattServer(private val context: Context) {
     private fun setupGattServer() {
         gattServer = bluetoothManager.openGattServer(context, gattServerCallback) ?: return
         val generation = ++serverGeneration
+        scope.launch {
+            dataStoreManager.getLastConnectedDevice().collect { device ->
+                val token = device?.symmetricKey?.takeIf { it.isNotBlank() }
+                    ?.let { BleTransportBridge.deriveAuthToken(it) }?.takeIf { it.isNotEmpty() }
+                if (generation == serverGeneration && token != advertisingToken) {
+                    advertisingToken = token
+                    restartAdvertisingIfIdle()
+                }
+            }
+        }
 
         pendingServices.clear()
 
@@ -277,10 +296,22 @@ class BleGattServer(private val context: Context) {
     }
 
     private var currentAdvertiseCallback: AdvertiseCallback? = null
+    /** Pairing token used only to derive the rotating advertisement proof; never advertised itself. */
+    @Volatile private var advertisingToken: String? = null
+    @Volatile private var advertiseProof = true
+    private var proofRotation: Job? = null
+
+    private fun restartAdvertisingIfIdle() {
+        if (authenticatedDevice != null || currentAdvertiseCallback == null) return
+        stopAdvertising()
+        startAdvertising()
+    }
 
     private fun startAdvertising() {
         if (app.androp.android.utils.BackgroundWorkController.isPaused) return
-        if (gattServer == null || !servicesReady || isAdvertisingPaused || connectedDevices.isNotEmpty()) return
+        // Keep advertising until the Mac has authenticated: an unrelated LE link
+        // (watch, earbuds) must never hide the phone from the Mac.
+        if (gattServer == null || !servicesReady || isAdvertisingPaused || authenticatedDevice != null) return
         if (currentAdvertiseCallback != null) return
 
         val advertiser = try { adapter.bluetoothLeAdvertiser } catch (failure: RuntimeException) {
@@ -295,10 +326,24 @@ class BleGattServer(private val context: Context) {
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
             .build()
 
+        val token = advertisingToken
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(ParcelUuid(BleConstants.SERVICE_SYSTEM))
+            .apply {
+                // 3 (flags) + 18 (service UUID) + 9 (proof) = 30 of 31 legacy bytes.
+                if (token != null && advertiseProof) addManufacturerData(BleAdvertisementProof.MANUFACTURER_ID,
+                    BleAdvertisementProof.proof(token, BleAdvertisementProof.window()))
+            }
             .build()
+        proofRotation?.cancel()
+        if (token != null && advertiseProof) {
+            val generation = serverGeneration
+            proofRotation = scope.launch {
+                delay(BleAdvertisementProof.millisUntilNextWindow() + 1_000)
+                if (generation == serverGeneration) restartAdvertisingIfIdle()
+            }
+        }
 
         // Only the adapter name lives in the scan response. A long name makes the whole
         // advertisement fail with ADVERTISE_FAILED_DATA_TOO_LARGE, and it is never retried.
@@ -320,6 +365,13 @@ class BleGattServer(private val context: Context) {
                 if (errorCode == ADVERTISE_FAILED_ALREADY_STARTED) {
                     Log.d(TAG, "BLE Advertising already started, treating as success")
                     _connectionState.value = BleConnectionState.ADVERTISING
+                } else if (errorCode == ADVERTISE_FAILED_DATA_TOO_LARGE && advertiseProof) {
+                    // Some stacks add fields of their own; advertise without the proof
+                    // rather than not at all (the Mac then falls back to its saved pin).
+                    Log.w(TAG, "Advertisement too large with proof; retrying without it")
+                    currentAdvertiseCallback = null
+                    advertiseProof = false
+                    startAdvertising()
                 } else {
                     Log.e(TAG, "BLE Advertising failed: $errorCode")
                     currentAdvertiseCallback = null
@@ -338,6 +390,8 @@ class BleGattServer(private val context: Context) {
     }
 
     private fun stopAdvertising() {
+        proofRotation?.cancel()
+        proofRotation = null
         val callback = currentAdvertiseCallback ?: return
         currentAdvertiseCallback = null
         runCatching { adapter.bluetoothLeAdvertiser?.stopAdvertising(callback) }
@@ -395,37 +449,20 @@ class BleGattServer(private val context: Context) {
 
             if (gattServer == null) return
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.d(TAG, "Device connected: ${device.address}")
-                if (connectedDevices.isNotEmpty() && device !in connectedDevices) {
-                    // Pairing credentials represent one Mac. Do not mix its stream with another central.
-                    gattServer?.cancelConnection(device)
-                    return
-                }
+                // Not necessarily the Mac. It becomes a candidate when it uses our service.
                 connectedDevices.add(device)
-                peerConnectionGeneration++
-                negotiatedMtu = 23
-                stopAdvertising()
-                _connectionState.value = BleConnectionState.CONNECTED
-                authenticationTimeout?.cancel()
-                val generation = serverGeneration
-                authenticationTimeout = scope.launch {
-                    delay(if (pendingPairing != null) 30_000 else 15_000)
-                    if (generation == serverGeneration && device in connectedDevices && authenticatedDevice != device) {
-                        Log.w(TAG, "BLE client authentication timed out")
-                        gattServer?.cancelConnection(device)
-                    }
-                }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.d(TAG, "Device disconnected: ${device.address}")
-                if (!connectedDevices.remove(device)) return
-                peerConnectionGeneration++
+                connectedDevices.remove(device)
+                mtus.remove(device.address)
+                val wasPeer = gattPeers.remove(device.address)
                 notificationSubscriptions.remove(device.address)
-                authenticationTimeout?.cancel()
-                authenticationTimeout = null
-                if (authenticatedDevice == device) {
-                    authenticatedDevice = null
-                    authenticatedPeer = null
-                    app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this@BleGattServer, allowWifiFallback = true)
+                if (!wasPeer && authenticatedDevice != device) return
+                peerConnectionGeneration++
+                if (authCandidate == device) {
+                    authCandidate = null
+                    authenticationTimeout?.cancel()
+                    authenticationTimeout = null
                 }
                 reassemblers.clear()
                 legacyAuthChunks.clear()
@@ -433,14 +470,19 @@ class BleGattServer(private val context: Context) {
                     it.chunks.clear(); it.provedDevice = null; it.requestNonce = null
                     it.replayGuard.disconnected()
                 }
-                clearSendQueue()
-                if (connectedDevices.isEmpty()) {
-                    _connectionState.value =
-                        if (gattServer != null && !isAdvertisingPaused) BleConnectionState.ADVERTISING else BleConnectionState.DISCONNECTED
+                if (authenticatedDevice == device) {
+                    authenticatedDevice = null
+                    authenticatedPeer = null
+                    clearSendQueue()
                     isAuthenticated = false
                     authenticatedFlag.set(false)
+                    app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this@BleGattServer, allowWifiFallback = true)
                     ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
                     if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
+                }
+                if (authenticatedDevice == null) {
+                    _connectionState.value =
+                        if (gattServer != null && !isAdvertisingPaused) BleConnectionState.ADVERTISING else BleConnectionState.DISCONNECTED
                     if (gattServer != null && !isAdvertisingPaused) startAdvertising()
                 }
             }
@@ -448,7 +490,7 @@ class BleGattServer(private val context: Context) {
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             Log.d(TAG, "MTU changed for ${device.address}: $mtu")
-            if (device in connectedDevices) negotiatedMtu = mtu.coerceIn(23, 517)
+            mtus[device.address] = mtu.coerceIn(23, 517)
         }
 
         override fun onCharacteristicReadRequest(
@@ -514,6 +556,13 @@ class BleGattServer(private val context: Context) {
 
             when (characteristic.uuid) {
                 BleConstants.CHAR_AUTH_TOKEN -> {
+                    // One Mac at a time: a second central cannot take over a live session.
+                    if (authenticatedDevice != null && authenticatedDevice != device) {
+                        if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_WRITE_NOT_PERMITTED, offset, null)
+                        return
+                    }
+                    markGattPeer(device)
+                    authCandidate = device
                     val pairing = pendingPairing
                     if (BlePairingProtocol.isPairingChunk(value)) {
                         if (pairing != null) {
@@ -604,6 +653,7 @@ class BleGattServer(private val context: Context) {
                 (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ||
                     value.contentEquals(BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE))
             if (valid) {
+                markGattPeer(device)
                 val subscriptions = notificationSubscriptions.getOrPut(device.address) { ConcurrentHashMap.newKeySet() }
                 if (value.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)) {
                     subscriptions.add(descriptor.characteristic.uuid)
@@ -635,6 +685,23 @@ class BleGattServer(private val context: Context) {
                     sendQueue.addFirst(priority)
                 }
                 drainNotifications()
+            }
+        }
+    }
+
+    /** First use of androp's GATT service by a central: it may be the Mac, so give it time to authenticate. */
+    private fun markGattPeer(device: BluetoothDevice) {
+        if (!gattPeers.add(device.address)) return
+        if (authenticatedDevice != null) return
+        _connectionState.value = BleConnectionState.CONNECTED
+        authenticationTimeout?.cancel()
+        val generation = serverGeneration
+        authenticationTimeout = scope.launch {
+            // Discovery, nine subscriptions and the token write can be slow on a busy radio.
+            delay(if (pendingPairing != null) 45_000 else 30_000)
+            if (generation == serverGeneration && device in connectedDevices && authenticatedDevice != device) {
+                Log.w(TAG, "BLE client authentication timed out")
+                gattServer?.cancelConnection(device)
             }
         }
     }
@@ -680,6 +747,8 @@ class BleGattServer(private val context: Context) {
                     authenticationTimeout?.cancel()
                     authenticationTimeout = null
                     authenticatedDevice = device
+                    authCandidate = null
+                    stopAdvertising()
                     authenticatedPeer = AuthenticatedPeer(storedKey)
                     isAuthenticated = true
                     authenticatedFlag.set(true)
@@ -815,7 +884,7 @@ class BleGattServer(private val context: Context) {
     }
 
     private fun enqueueNotification(uuid: UUID, chunks: List<ByteArray>, stateKey: String? = null): Boolean {
-        val device = if (uuid == BleConstants.CHAR_AUTH_RESULT) connectedDevices.firstOrNull() else authenticatedDevice
+        val device = if (uuid == BleConstants.CHAR_AUTH_RESULT) authenticatedDevice ?: authCandidate else authenticatedDevice
         if (app.androp.android.utils.BackgroundWorkController.isPaused || device == null || device !in connectedDevices ||
             notificationSubscriptions[device.address]?.contains(uuid) != true) return false
         return synchronized(sendLock) {
@@ -974,7 +1043,8 @@ class BleGattServer(private val context: Context) {
         pendingPairing = null
         app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this)
         Log.d(TAG, "Disconnecting all connected BLE devices manually...")
-        val devicesCopy = connectedDevices.toList()
+        // Only androp's own peers; never drop the user's watch or earbuds.
+        val devicesCopy = connectedDevices.filter { it.address in gattPeers || it == authenticatedDevice }
         for (device in devicesCopy) {
             try {
                 gattServer?.cancelConnection(device)
@@ -989,6 +1059,7 @@ class BleGattServer(private val context: Context) {
         if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
         _connectionState.value = if (gattServer != null && !isAdvertisingPaused) BleConnectionState.ADVERTISING else BleConnectionState.DISCONNECTED
         authenticatedDevice = null
+        authCandidate = null
         clearSendQueue()
         reassemblers.clear()
         legacyAuthChunks.clear()

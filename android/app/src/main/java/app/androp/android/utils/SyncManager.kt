@@ -216,8 +216,10 @@ object SyncManager {
                 val deviceId = DeviceInfoUtil.getDeviceId(context)
                 // The QR key may not be persisted until macInfo authenticates this socket.
                 // Never announce the previous Mac's BLE token during a new pairing.
-                val bleAuthToken =
-                    app.androp.android.data.ble.BleTransportBridge.deriveAuthToken(pairingKey.orEmpty())
+                // A blank key derives a valid-looking token the phone would never accept,
+                // which made the Mac retry Bluetooth with it and back off for minutes.
+                val bleAuthToken = pairingKey?.takeIf { it.isNotBlank() }
+                    ?.let { app.androp.android.data.ble.BleTransportBridge.deriveAuthToken(it) }
 
                 val liteDeviceInfoJson = JsonUtil.createDeviceInfoJson(
                     id = deviceId,

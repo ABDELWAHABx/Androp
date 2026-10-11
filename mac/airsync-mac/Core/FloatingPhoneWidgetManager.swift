@@ -87,7 +87,7 @@ private struct FloatingPhoneWidgetView: View {
                         Text(music.title).font(.caption).lineLimit(1)
                     }
                 } else {
-                    Text("Waiting for phone status").font(.caption).foregroundStyle(.secondary)
+                    Text("Connecting…").font(.caption).foregroundStyle(.secondary)
                 }
             } else {
                 Text("Phone offline · open androp on your phone to reconnect")

@@ -58,6 +58,8 @@ class AppState: ObservableObject {
     @Published var isOS26: Bool = true
 
     init() {
+        // Disconnect lasts until the app quits: opening androp means "connect".
+        UserDefaults.standard.isManuallyDisconnected = false
         self.deviceAdbSerials = UserDefaults.standard.dictionary(forKey: "deviceAdbSerials") as? [String: String] ?? [:]
         self.selectedWiredSerial = UserDefaults.standard.string(forKey: "selectedWiredSerial")
 
@@ -712,7 +714,10 @@ class AppState: ObservableObject {
         didSet {
             UserDefaults.standard.set(isBLEEnabled, forKey: "isBLEEnabled")
             if isBLEEnabled && !isSyncPaused {
+                // Turning Bluetooth on is a request to connect, so it also lifts
+                // an earlier manual disconnect instead of silently doing nothing.
                 BLECentralManager.shared.isManuallyDisconnected = false
+                UserDefaults.standard.isManuallyDisconnected = false
                 BLECentralManager.shared.startScanning()
             } else {
                 BLECentralManager.shared.stopScanning()
