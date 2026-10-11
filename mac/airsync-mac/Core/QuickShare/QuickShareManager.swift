@@ -355,8 +355,14 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
                 // The coordinator can complete immediately on existing Wi-Fi.
                 // Defer until its lease has been assigned, and consume once.
                 Task { @MainActor in
-                    guard let self, self.fileSendGeneration == generation,
-                          case .connectingNetwork = self.transferState else { return }
+                    guard let self, self.fileSendGeneration == generation else { return }
+                    guard case .connectingNetwork = self.transferState else {
+                        // A disconnect resets the UI without releasing this lease. Release
+                        // the coordinator's reference so stale state cannot block later
+                        // Quick Share consent, and so any connected Wi-Fi is torn down.
+                        self.releaseTransferNetwork()
+                        return
+                    }
                     switch result {
                     case .success:
                         guard self.canStreamPreparedFiles else {

@@ -96,8 +96,9 @@ nonisolated enum HotspotWiFiWorker {
         if release.disconnect { wifi?.disassociate() }
         guard !attempt.isCancelled, let previousSSID = release.restoreSSID,
               HotspotWiFiPolicy.validSSID(previousSSID) else { return }
-        // Reuse the coordinator's token: Pause or a new transfer also cancels
+        // Reuse the coordinator's token: Pause or a pairing change cancels
         // restoration work already queued behind a synchronous CoreWLAN call.
+        // A new transfer does not cancel it, so the user's Wi-Fi is still restored.
         _ = join(ssid: previousSSID, attempt: attempt, onlyWhileUnassociated: true)
     }
 

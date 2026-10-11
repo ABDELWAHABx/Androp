@@ -81,10 +81,8 @@ final class TransferNetworkCoordinator: NSObject, ObservableObject, CLLocationMa
         }
         let value = Session(id: id, deviceID: deviceID, pairingToken: pairingToken, key: key,
                             bluetoothPeer: PhoneHotspotTransport.bluetoothPeer, remote: remote, completion: completion)
-        cleanupAttempt?.cancel()
-        cleanupAttempt = nil
-        cleanupKey = nil
-        cleanupPairingToken = nil
+        // A previous transfer's queued cleanup still restores the user's Wi-Fi.
+        // Only Pause, manual disconnect, or a pairing change may cancel it.
         value.originalSocket = WebSocketServer.shared.authenticatedSessionIdentity
         session = value
         isBusy = true
@@ -340,7 +338,10 @@ final class TransferNetworkCoordinator: NSObject, ObservableObject, CLLocationMa
         isBusy = false
         statusMessage = failure
         if value.temporarySSID != nil {
-            let cleanup = HotspotWiFiAttempt()
+            // Queued restorations share a live token, so Pause or a pairing change
+            // cancels every release still waiting behind a CoreWLAN call.
+            let cleanup: HotspotWiFiAttempt
+            if let previous = cleanupAttempt, !previous.isCancelled { cleanup = previous } else { cleanup = HotspotWiFiAttempt() }
             if AppState.shared.isSyncPaused || UserDefaults.standard.isManuallyDisconnected ||
                 UserDefaults.standard.string(forKey: "bleAuthToken") != value.pairingToken ||
                 UserDefaults.standard.string(forKey: "encryptionKey").flatMap({ Data(base64Encoded: $0) }) != value.key {
