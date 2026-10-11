@@ -30,6 +30,8 @@ class UdpDiscoveryBackend : DiscoveryBackend {
     companion object {
         private const val TAG = "UdpDiscoveryBackend"
         private const val BROADCAST_PORT = 8890
+        // WakeupService HTTP port, also advertised in the mDNS TXT record. Macs probe and wake the phone here.
+        private const val WAKEUP_HTTP_PORT = 8891
         private const val PRUNE_INTERVAL_MS = 10000L
         private const val DEVICE_TIMEOUT_MS = 25000L
     }
@@ -285,26 +287,19 @@ class UdpDiscoveryBackend : DiscoveryBackend {
                 discoverySource = DiscoverySource.UDP
             )
 
-            updateDeviceList(device, validIps)
+            updateDeviceList(device)
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing discovery message: ${e.message}")
         }
     }
 
-    private fun updateDeviceList(device: DiscoveredDevice, newIps: Set<String>) {
+    private fun updateDeviceList(device: DiscoveredDevice) {
         val currentList = _discoveredDevices.value.toMutableList()
         val index = currentList.indexOfFirst { it.id == device.id }
-
+        // Each presence lists the Mac's current adapters and port. Unioning older
+        // addresses keeps dead endpoints that auto-connect would try first.
         if (index != -1) {
-            val existing = currentList[index]
-            val updatedIps = existing.ips.toMutableSet()
-            updatedIps.addAll(newIps)
-            currentList[index] = existing.copy(
-                ips = updatedIps,
-                lastSeen = System.currentTimeMillis(),
-                name = device.name,
-                discoverySource = DiscoverySource.UDP
-            )
+            currentList[index] = device
         } else {
             currentList.add(device)
         }
@@ -365,6 +360,8 @@ class UdpDiscoveryBackend : DiscoveryBackend {
         json.put("id", deviceId)
         json.put("name", deviceName)
         json.put("ips", FilteredIpArray(filteredLocalIps))
+        // The Mac drops presence packets without a valid port, and probes this port for reachability.
+        json.put("port", WAKEUP_HTTP_PORT)
         val payload = json.toString()
         val data = payload.toByteArray()
 
@@ -407,7 +404,8 @@ class UdpDiscoveryBackend : DiscoveryBackend {
         val payload = json.toString()
         val data = payload.toByteArray()
 
-        scope.launch {
+        // stop() cancels `scope` right after calling this, so the goodbye needs its own scope.
+        CoroutineScope(Dispatchers.IO).launch {
             repeat(3) {
                 if (app.androp.android.utils.BackgroundWorkController.isPaused) return@launch
                 for (bindIp in allIps) {

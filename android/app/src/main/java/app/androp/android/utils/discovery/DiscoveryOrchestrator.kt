@@ -155,11 +155,6 @@ object DiscoveryOrchestrator {
         backendUpdateJob = CoroutineScope(Dispatchers.IO).launch {
             val ds = DataStoreManager.getInstance(context)
             if (ds.isAppPaused().first()) return@launch
-            val expandNetworkingEnabled = try {
-                ds.getExpandNetworkingEnabled().first()
-            } catch (e: Exception) {
-                true
-            }
 
             withContext(Dispatchers.Main) {
                 if (!isRunning || !isDiscoveryEnabled || app.androp.android.utils.BackgroundWorkController.isPaused) return@withContext
@@ -176,12 +171,9 @@ object DiscoveryOrchestrator {
                     mdnsBackend.start(context)
                 }
 
-                // UDP runs if expand networking is enabled
-                if (expandNetworkingEnabled) {
-                    udpBackend.start(context)
-                } else {
-                    udpBackend.stop(context)
-                }
+                // UDP is the LAN presence and wake-up channel, so it always runs. Expand networking
+                // only decides whether Tailscale (100.x) addresses are advertised or accepted.
+                udpBackend.start(context)
             }
         }
     }

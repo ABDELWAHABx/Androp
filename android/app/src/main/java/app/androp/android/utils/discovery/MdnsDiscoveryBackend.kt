@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +33,10 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
     companion object {
         private const val TAG = "MdnsDiscoveryBackend"
         private const val SERVICE_TYPE = "_androp._tcp."
+        private const val MAX_RESOLVE_ATTEMPTS = 3
+        private const val RESOLVE_RETRY_DELAY_MS = 2000L
+        private const val MAX_REGISTRATION_ATTEMPTS = 3
+        private const val REGISTRATION_RETRY_DELAY_MS = 5000L
     }
 
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
@@ -42,10 +47,12 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
     private val serviceNameToId = ConcurrentHashMap<String, String>()
+    private val foundServiceNames = ConcurrentHashMap.newKeySet<String>()
     private val resolveMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var isRunning = false
     private var currentMode = DiscoveryMode.ACTIVE
+    private var registrationRetries = 0
 
     override fun start(context: Context) {
         if (!PermissionUtil.isLocalNetworkPermissionGranted(context)) {
@@ -58,6 +65,8 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
 
         nsdManager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
         serviceNameToId.clear()
+        foundServiceNames.clear()
+        registrationRetries = 0
         _discoveredDevices.value = emptyList()
 
         startBrowsing()
@@ -74,6 +83,7 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
         unregisterService()
         nsdManager = null
         serviceNameToId.clear()
+        foundServiceNames.clear()
         _discoveredDevices.value = emptyList()
     }
 
@@ -125,14 +135,23 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
             setAttribute("type", "android")
         }
 
+        val appContext = context.applicationContext
         registrationListener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(info: NsdServiceInfo) {
                 Log.d(TAG, "Successfully registered mDNS service: ${info.serviceName}")
+                registrationRetries = 0
             }
 
             override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
                 Log.e(TAG, "mDNS registration failed for ${info.serviceName}: $errorCode")
                 registrationListener = null
+                // Nothing re-registers until the next mode change, so a transient failure would hide the phone from Macs.
+                if (registrationRetries++ < MAX_REGISTRATION_ATTEMPTS) {
+                    scope.launch {
+                        delay(REGISTRATION_RETRY_DELAY_MS)
+                        if (isRunning && registrationListener == null) registerService(appContext)
+                    }
+                }
             }
 
             override fun onServiceUnregistered(info: NsdServiceInfo) {
@@ -177,12 +196,14 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
                 if (!isRunning) return
                 Log.d(TAG, "Service found: ${serviceInfo.serviceName}")
                 if (serviceInfo.serviceType.contains("androp")) {
+                    foundServiceNames.add(serviceInfo.serviceName)
                     resolveService(serviceInfo)
                 }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
                 Log.d(TAG, "Service lost: ${serviceInfo.serviceName}")
+                foundServiceNames.remove(serviceInfo.serviceName)
                 val id = serviceNameToId.remove(serviceInfo.serviceName)
                 if (id != null) {
                     val currentList = _discoveredDevices.value.filter { it.id != id }
@@ -224,7 +245,7 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
         discoveryListener = null
     }
 
-    private fun resolveService(serviceInfo: NsdServiceInfo) {
+    private fun resolveService(serviceInfo: NsdServiceInfo, attempt: Int = 0) {
         val manager = nsdManager ?: return
         scope.launch {
             resolveMutex.withLock {
@@ -253,7 +274,17 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
                 if (resolved != null && isRunning) {
                     handleResolvedService(resolved)
                 } else {
-                    Log.w(TAG, "Resolve timed out for ${serviceInfo.serviceName}")
+                    Log.w(TAG, "Resolve failed or timed out for ${serviceInfo.serviceName} (attempt ${attempt + 1})")
+                    // NSD reports a service once, so a failed resolve would hide the Mac until it re-appears.
+                    if (attempt + 1 < MAX_RESOLVE_ATTEMPTS) {
+                        scope.launch {
+                            // Pre-API 34 rejects a resolve while an earlier one is still pending, so wait before retrying.
+                            delay(RESOLVE_RETRY_DELAY_MS)
+                            if (isRunning && foundServiceNames.contains(serviceInfo.serviceName)) {
+                                resolveService(serviceInfo, attempt + 1)
+                            }
+                        }
+                    }
                 }
             }
         }

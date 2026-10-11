@@ -354,8 +354,9 @@ class QuickConnectManager: ObservableObject {
     private func sendUDPWakeUpRequest(to device: Device, message: String) async {
         print("[quick-connect] Trying UDP wake-up to \(device.ipAddress):\(Self.ANDROID_UDP_WAKEUP_PORT) as fallback")
         
-        // Simple UDP wake-up attempt (fire and forget)
-        let udpMessage = "AIRSYNC_WAKEUP:\(message)"
+        // Fire-and-forget fallback. Android's UDP listener parses raw JSON "wakeUpRequest" packets,
+        // so a text prefix here made every fallback packet unparseable.
+        let udpMessage = message
         
         guard !Task.isCancelled, !AppState.shared.isSyncPaused else { return }
         DispatchQueue.global(qos: .background).async {

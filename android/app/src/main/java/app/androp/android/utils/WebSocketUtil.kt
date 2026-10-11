@@ -1138,7 +1138,9 @@ object WebSocketUtil {
 
                         if (targetConnection != null) {
                             val ips = discoveryMatch.ips.joinToString(",")
-                            val port = targetConnection.port.toIntOrNull() ?: 6997
+                            // The Mac advertises its live listening port; the stored one goes stale after a port change.
+                            val port = discoveryMatch.port.takeIf { it in 1..65535 }
+                                ?: targetConnection.port.toIntOrNull() ?: 6997
 
                             connect(
                                 context = context,
