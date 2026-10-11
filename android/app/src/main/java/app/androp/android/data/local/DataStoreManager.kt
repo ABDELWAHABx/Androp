@@ -3,6 +3,7 @@ package app.androp.android.data.local
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -421,28 +422,47 @@ class DataStoreManager(private val context: Context) {
     }
 
     suspend fun saveLastConnectedDevice(device: ConnectedDevice) {
+        context.dataStore.edit { preferences -> writeLastConnectedDevice(preferences, device) }
+    }
+
+    /** Recheck the live QR window inside the serialized transaction, after any suspension. */
+    internal suspend fun savePairedDeviceIfCurrent(
+        device: ConnectedDevice,
+        previousPairingKey: String?,
+        isCurrent: () -> Boolean
+    ): Boolean {
+        var saved = false
         context.dataStore.edit { preferences ->
-            preferences[LAST_CONNECTED_PC_NAME] = device.name
-            preferences[LAST_CONNECTED_PC_IP] = device.ipAddress
-            preferences[LAST_CONNECTED_PC_PORT] = device.port
-            preferences[LAST_CONNECTED_TIMESTAMP] = device.lastConnected.toString()
-            preferences[LAST_CONNECTED_PC_PLUS] = device.isPlus
-            device.symmetricKey?.let {
-                preferences[LAST_CONNECTED_SYMMETRIC_KEY] = it
-            }
-            device.model?.let {
-                preferences[LAST_CONNECTED_MODEL] = it
-            }
-            device.deviceType?.let {
-                preferences[LAST_CONNECTED_DEVICE_TYPE] = it
-            }
-            preferences[ICON_SYNC_COUNT] = device.iconSyncCount.toString()
-            device.lastIconSyncDate?.let {
-                preferences[LAST_ICON_SYNC_DATE] = it
-            }
-            device.lastSyncTime?.let {
-                preferences[LAST_SYNC_TIME] = it.toString()
-            }
+            if (preferences[APP_PAUSED] == true || preferences[USER_MANUALLY_DISCONNECTED] == true ||
+                preferences[LAST_CONNECTED_SYMMETRIC_KEY] != previousPairingKey || !isCurrent()) return@edit
+            // No suspend point between authorization and mutating this transaction.
+            writeLastConnectedDevice(preferences, device)
+            saved = true
+        }
+        return saved
+    }
+
+    private fun writeLastConnectedDevice(preferences: MutablePreferences, device: ConnectedDevice) {
+        preferences[LAST_CONNECTED_PC_NAME] = device.name
+        preferences[LAST_CONNECTED_PC_IP] = device.ipAddress
+        preferences[LAST_CONNECTED_PC_PORT] = device.port
+        preferences[LAST_CONNECTED_TIMESTAMP] = device.lastConnected.toString()
+        preferences[LAST_CONNECTED_PC_PLUS] = device.isPlus
+        device.symmetricKey?.let {
+            preferences[LAST_CONNECTED_SYMMETRIC_KEY] = it
+        }
+        device.model?.let {
+            preferences[LAST_CONNECTED_MODEL] = it
+        }
+        device.deviceType?.let {
+            preferences[LAST_CONNECTED_DEVICE_TYPE] = it
+        }
+        preferences[ICON_SYNC_COUNT] = device.iconSyncCount.toString()
+        device.lastIconSyncDate?.let {
+            preferences[LAST_ICON_SYNC_DATE] = it
+        }
+        device.lastSyncTime?.let {
+            preferences[LAST_SYNC_TIME] = it.toString()
         }
     }
 

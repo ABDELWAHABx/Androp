@@ -1577,7 +1577,7 @@ fun AirSyncMainScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text("Files", style = MaterialTheme.typography.headlineSmall)
-                    Text("Files received from your Mac are saved in Downloads. To send phone files, connect both devices to Wi-Fi and enable Quick Share in androp on your Mac.")
+                    Text("Files received from your Mac are saved in Downloads. Enable Quick Share in androp on your Mac to receive phone files. Send uses your paired Wi-Fi connection or prepares temporary Wi-Fi over Bluetooth automatically.")
                     if (uiState.isAppPaused) Text("Resume androp before sending files.")
                     else if (uiState.lastConnectedDevice == null) Text("Pair your Mac before sending files.")
                     Button(

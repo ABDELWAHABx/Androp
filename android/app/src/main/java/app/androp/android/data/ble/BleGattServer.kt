@@ -80,7 +80,7 @@ class BleGattServer(private val context: Context) {
     private var notificationRetry: Job? = null
     private var authenticationTimeout: Job? = null
     private val maxQueuedBytes = 512 * 1024
-    private class PendingPairing(val key: String, val session: String, val macName: String) {
+    private class PendingPairing(val key: String, val session: String, val macName: String, val previousPairingKey: String?) {
         val deadline = android.os.SystemClock.elapsedRealtime() + BlePairingProtocol.WINDOW_MS
         val completion = CompletableDeferred<Boolean>()
         val chunks = BleChunkUtil.Reassembler(BlePairingProtocol.MAX_ENVELOPE_BYTES)
@@ -96,8 +96,9 @@ class BleGattServer(private val context: Context) {
     internal suspend fun pairFromQr(key: String, session: String, macName: String): Boolean {
         if (!BlePairingProtocol.validKey(key) || !BlePairingProtocol.validId(session) ||
             app.androp.android.utils.BackgroundWorkController.isPaused) return false
+        val previousPairingKey = dataStoreManager.getLastConnectedDevice().first()?.symmetricKey
         stop()
-        val pending = PendingPairing(key, session, macName.take(128).ifBlank { "Mac" })
+        val pending = PendingPairing(key, session, macName.take(128).ifBlank { "Mac" }, previousPairingKey)
         pendingPairing = pending
         try {
             start()
@@ -635,10 +636,16 @@ class BleGattServer(private val context: Context) {
                     if (pairing != null) {
                         if (pendingPairing !== pairing) return@launch
                         app.androp.android.utils.WebSocketUtil.disconnectIfDifferentPairing(context, pairing.key)
-                        dataStoreManager.saveLastConnectedDevice(app.androp.android.domain.model.ConnectedDevice(
+                        val saved = dataStoreManager.savePairedDeviceIfCurrent(app.androp.android.domain.model.ConnectedDevice(
                             name = pairing.macName, ipAddress = "", port = "6997",
-                            lastConnected = System.currentTimeMillis(), symmetricKey = pairing.key, deviceType = "mac"))
-                        if (generation != serverGeneration || connectionGeneration != peerConnectionGeneration || pendingPairing !== pairing ||
+                            lastConnected = System.currentTimeMillis(), symmetricKey = pairing.key, deviceType = "mac"),
+                            pairing.previousPairingKey) {
+                            generation == serverGeneration && connectionGeneration == peerConnectionGeneration &&
+                                pendingPairing === pairing && pairing.provedDevice == device &&
+                                device in connectedDevices && !app.androp.android.utils.BackgroundWorkController.isPaused &&
+                                android.os.SystemClock.elapsedRealtime() < pairing.deadline
+                        }
+                        if (!saved || generation != serverGeneration || connectionGeneration != peerConnectionGeneration || pendingPairing !== pairing ||
                             app.androp.android.utils.BackgroundWorkController.isPaused || device !in connectedDevices) return@launch
                     }
                     Log.i(TAG, "BLE Auth Success!")
