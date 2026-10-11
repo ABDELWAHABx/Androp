@@ -1,6 +1,6 @@
 # Bluetooth feature coverage
 
-Both peers must run the updated androp build. Pair over Wi-Fi once to establish the shared device identity, enable Bluetooth sync on both peers, and keep Bluetooth enabled. Once paired, these features work without a shared Wi-Fi network. When a network socket exists, androp uses it for higher throughput; otherwise small commands use authenticated BLE.
+Both peers must run the updated androp build. Preview 6 can establish the shared identity directly over Bluetooth: reveal the Bluetooth QR code on Mac, scan it inside Android and allow Nearby devices. Wi-Fi pairing remains an explicit alternative. Keep Bluetooth sync enabled on both peers. Once paired, these features work without a shared Wi-Fi network. When a network socket exists, androp uses it for higher throughput; otherwise small commands use authenticated BLE.
 
 | Feature | BLE | Notes |
 | --- | --- | --- |

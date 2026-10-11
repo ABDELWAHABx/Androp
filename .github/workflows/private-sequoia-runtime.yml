@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: androp-v0.1.0-preview.5
+      RELEASE_TAG: androp-v0.1.0-preview.6
     steps:
       - name: Require private repository and Apple Silicon
         run: |
@@ -63,7 +63,7 @@ jobs:
           for bundle, identity, minimum in [(app, 'app.androp.mac', '14.5'), (app / 'Contents/PlugIns/andropWidget.appex', 'app.androp.mac.widget', '15.0')]:
               info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
               assert info['CFBundleIdentifier'] == identity
-              assert info['CFBundleVersion'] == '36' and info['CFBundleShortVersionString'] == '4.1.4'
+              assert info['CFBundleVersion'] == '37' and info['CFBundleShortVersionString'] == '4.1.5'
               assert info['LSMinimumSystemVersion'] == minimum
               binary = bundle / 'Contents/MacOS' / info['CFBundleExecutable']
               assert subprocess.check_output(['lipo', '-archs', str(binary)], text=True).strip() == 'arm64'
@@ -74,5 +74,5 @@ jobs:
           subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
           subprocess.run(['bash', 'mac/Tests/run-app-lifecycle-tests.sh', str(app)], check=True)
           print('VERIFIED_MAC_METADATA ' + json.dumps(metadata, sort_keys=True))
-          print('Packaged arm64 app: signatures, source, hashes and real Pause/Resume passed on macOS 15.')
+          print('Packaged arm64 app: signatures, source, hashes, encrypted IPv4 pairing and real Pause/Resume passed on macOS 15.')
           PY
