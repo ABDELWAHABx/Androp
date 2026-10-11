@@ -19,6 +19,7 @@ bash "$test_root/Tests/run-network-recovery-tests.sh"
 bash "$test_root/Tests/run-clipboard-delivery-tests.sh"
 bash "$test_root/Tests/run-floating-widget-tests.sh"
 bash "$test_root/Tests/run-notification-policy-tests.sh"
+bash "$test_root/Tests/run-notification-open-tests.sh"
 swiftc "$test_root/airsync-mac/Model/NowPlayingInfo.swift" \
     "$test_root/Tests/NowPlayingInfoRegression.swift" -o "$test_dir/media-tests"
 "$test_dir/media-tests"

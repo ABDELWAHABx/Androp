@@ -369,7 +369,9 @@ extension WebSocketServer {
             let progressMax = dict["progressMax"] as? Int
             let progressIndeterminate = dict["progressIndeterminate"] as? Bool
             let ongoing = dict["ongoing"] as? Bool
-            
+            let url = NotificationOpenPolicy.sanitizedLink(dict["url"] as? String)?.absoluteString
+            let canOpenOnPhone = dict["canOpenOnPhone"] as? Bool
+
             let notif = Notification(
                 title: title,
                 body: body,
@@ -381,7 +383,9 @@ extension WebSocketServer {
                 progress: progress,
                 progressMax: progressMax,
                 progressIndeterminate: progressIndeterminate,
-                ongoing: ongoing
+                ongoing: ongoing,
+                url: url,
+                canOpenOnPhone: canOpenOnPhone
             )
             DispatchQueue.main.async {
                 AppState.shared.addNotification(notif)

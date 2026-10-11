@@ -147,6 +147,22 @@ struct NotificationCardView: View {
                 )
             }
 
+            if let link = NotificationOpenPolicy.sanitizedLink(notification.url) {
+                Button {
+                    NSWorkspace.shared.open(link)
+                } label: {
+                    Label("Open Link", systemImage: "link")
+                }
+            }
+
+            if notification.canOpenOnPhone == true {
+                Button {
+                    MacAppLaunchManager.openOnPhone(nid: notification.nid)
+                } label: {
+                    Label("Open on Phone", systemImage: "iphone.and.arrow.forward")
+                }
+            }
+
             Divider()
 
             Button {

@@ -27,6 +27,10 @@ struct Notification: Codable, Identifiable, Equatable {
     let progressMax: Int?
     let progressIndeterminate: Bool?
     let ongoing: Bool?
+    /// Optional link to the exact content, when the phone could find one.
+    let url: String?
+    /// The phone can fire the notification's own tap intent (newer phones only).
+    let canOpenOnPhone: Bool?
 
     init(
         title: String,
@@ -39,7 +43,9 @@ struct Notification: Codable, Identifiable, Equatable {
         progress: Int? = nil,
         progressMax: Int? = nil,
         progressIndeterminate: Bool? = nil,
-        ongoing: Bool? = nil
+        ongoing: Bool? = nil,
+        url: String? = nil,
+        canOpenOnPhone: Bool? = nil
     ) {
         self.title = title
         self.body = body
@@ -52,10 +58,13 @@ struct Notification: Codable, Identifiable, Equatable {
         self.progressMax = progressMax
         self.progressIndeterminate = progressIndeterminate
         self.ongoing = ongoing
+        self.url = url
+        self.canOpenOnPhone = canOpenOnPhone
     }
 
     private enum CodingKeys: String, CodingKey {
         case title, body, app, nid, package, priority, actions
         case progress, progressMax, progressIndeterminate, ongoing
+        case url, canOpenOnPhone
     }
 }

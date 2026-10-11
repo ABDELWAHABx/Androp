@@ -76,11 +76,21 @@ class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                 print("[notification-delegate] Missing device details or package for scrcpy.")
             }
         }
+        // Open the exact content on the phone by firing the notification's own tap intent
+        else if response.actionIdentifier == "OPEN_ON_PHONE" {
+            let nid = userInfo["nid"] as? String ?? response.notification.request.identifier
+            MacAppLaunchManager.openOnPhone(nid: nid)
+        }
         // Handle body tap (user clicked the notification itself, not an action button)
         else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
             if AppState.shared.openAppOnNotificationClick,
                let package = userInfo["package"] as? String {
-                let opened = MacAppLaunchManager.open(package: package)
+                let opened = MacAppLaunchManager.open(
+                    package: package,
+                    nid: userInfo["nid"] as? String,
+                    link: userInfo["deepLink"] as? String,
+                    canOpenOnPhone: userInfo["canOpenOnPhone"] as? Bool ?? false
+                )
                 if !opened {
                     print("[notification-delegate] No launch preference configured for package: \(package)")
                 }

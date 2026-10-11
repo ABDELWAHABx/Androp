@@ -115,7 +115,9 @@ object JsonUtil {
         progress: Int? = null,
         progressMax: Int? = null,
         progressIndeterminate: Boolean? = null,
-        ongoing: Boolean? = null
+        ongoing: Boolean? = null,
+        url: String? = null,
+        canOpenOnPhone: Boolean? = null
     ): String {
         val actionsJson = if (actions.isNotEmpty()) {
             val items = actions.joinToString(",") { (name, type) ->
@@ -129,11 +131,14 @@ object JsonUtil {
         val progressMaxJson = if (progressMax != null) ",\"progressMax\":$progressMax" else ""
         val progressIndeterminateJson = if (progressIndeterminate != null) ",\"progressIndeterminate\":$progressIndeterminate" else ""
         val ongoingJson = if (ongoing != null) ",\"ongoing\":$ongoing" else ""
+        // Optional click targets; older Macs ignore unknown fields.
+        val urlJson = if (url != null) ",\"url\":\"${escape(url)}\"" else ""
+        val canOpenJson = if (canOpenOnPhone != null) ",\"canOpenOnPhone\":$canOpenOnPhone" else ""
         return """{"type":"notification","data":{"id":"${escape(id)}","title":"${escape(title)}","body":"${
             escape(
                 body
             )
-        }","app":"${escape(app)}","package":"${escape(packageName)}","priority":"${escape(priority)}"$actionsJson$progressJson$progressMaxJson$progressIndeterminateJson$ongoingJson}}"""
+        }","app":"${escape(app)}","package":"${escape(packageName)}","priority":"${escape(priority)}"$actionsJson$progressJson$progressMaxJson$progressIndeterminateJson$ongoingJson$urlJson$canOpenJson}}"""
     }
 
     /**

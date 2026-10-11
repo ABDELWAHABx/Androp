@@ -10,28 +10,55 @@ import Foundation
 /// when a mirrored Android notification is clicked.
 struct MacAppLaunchManager {
 
-    /// Open the configured target for the given Android package name.
-    /// - Returns: `true` if a preference was found and the launch was attempted.
+    /// Open what a click on a mirrored notification should show: the exact content when
+    /// the phone sent a link for it, otherwise the configured target for the package.
+    /// - Returns: `true` if something was opened or requested from the phone.
     @discardableResult
-    static func open(package: String) -> Bool {
-        // 1. Check user-saved preference (overrides defaults)
-        if let pref = AppState.shared.notificationLaunchPreferences[package] {
-            switch pref.target {
-            case .disabled:
-                return false    // user explicitly disabled
-            case .macApp, .webURL:
-                break    // handled below
-            }
-            return launch(target: pref.target, package: package)
+    static func open(package: String, nid: String? = nil, link: String? = nil, canOpenOnPhone: Bool = false) -> Bool {
+        let target = configuredTarget(for: package)
+        let policyTarget: NotificationOpenPolicy.Target
+        switch target {
+        case nil: policyTarget = .none
+        case .disabled: policyTarget = .disabled
+        case .macApp: policyTarget = .macApp
+        case .webURL(let urlString): policyTarget = .web(urlString)
         }
-
-        // 2. Fall back to pre-configured default (resolved at runtime)
-        if let entry = NotificationLaunchDefaults.findDefault(for: package) {
-            let target = NotificationLaunchDefaults.resolveTarget(for: entry)
+        let destination = NotificationOpenPolicy.clickDestination(
+            link: link,
+            canOpenOnPhone: canOpenOnPhone && nid != nil,
+            target: policyTarget,
+            openOnPhoneWithoutLink: AppState.shared.openNotificationOnPhoneWithoutLink
+        )
+        switch destination {
+        case .link(let url):
+            NSWorkspace.shared.open(url)
+            return true
+        case .phone:
+            guard let nid else { return false }
+            openOnPhone(nid: nid)
+            return true
+        case .launchTarget:
+            guard let target else { return false }
             return launch(target: target, package: package)
+        case .nothing:
+            return false
         }
+    }
 
-        return false
+    /// Ask the phone to fire the notification's own tap intent, opening the exact content there.
+    static func openOnPhone(nid: String) {
+        WebSocketServer.shared.sendNotificationAction(id: nid, name: NotificationOpenPolicy.openOnPhoneAction)
+    }
+
+    /// User-saved preference first (it overrides defaults), then the pre-configured default.
+    private static func configuredTarget(for package: String) -> MacAppLaunchPreference.LaunchTarget? {
+        if let pref = AppState.shared.notificationLaunchPreferences[package] {
+            return pref.target
+        }
+        if let entry = NotificationLaunchDefaults.findDefault(for: package) {
+            return NotificationLaunchDefaults.resolveTarget(for: entry)
+        }
+        return nil
     }
 
     private static func launch(target: MacAppLaunchPreference.LaunchTarget, package: String) -> Bool {

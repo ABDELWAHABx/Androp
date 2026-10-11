@@ -10,17 +10,21 @@ import android.media.Rating
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.MediaSession
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.media.session.PlaybackState
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.text.Spanned
+import android.text.style.URLSpan
 import android.util.Log
 import app.androp.android.data.local.DataStoreManager
 import app.androp.android.domain.model.MediaInfo
 import app.androp.android.utils.JsonUtil
 import app.androp.android.utils.NotificationActionPolicy
 import app.androp.android.utils.NotificationDismissalUtil
+import app.androp.android.utils.NotificationLinkPolicy
 import app.androp.android.utils.SyncManager
 import app.androp.android.utils.WebSocketUtil
 import kotlinx.coroutines.CoroutineScope
@@ -780,7 +784,9 @@ class MediaNotificationListener : NotificationListenerService() {
                             progress = progress,
                             progressMax = progressMax,
                             progressIndeterminate = progressIndeterminate,
-                            ongoing = ongoing
+                            ongoing = ongoing,
+                            url = notificationLink(sbn),
+                            canOpenOnPhone = notification.contentIntent != null
                         )
                     )
 
@@ -807,6 +813,33 @@ class MediaNotificationListener : NotificationListenerService() {
             }
             }
         }
+    }
+
+    /**
+     * The contentIntent target is opaque to listeners, so only links visible in the
+     * notification itself can be forwarded. The phone can still open the exact
+     * content through [NotificationLinkPolicy.OPEN_ON_PHONE_ACTION].
+     */
+    private fun notificationLink(sbn: StatusBarNotification): String? = try {
+        val extras = sbn.notification.extras
+        val texts = mutableListOf<CharSequence?>()
+        for (key in listOf(Notification.EXTRA_TITLE, Notification.EXTRA_TEXT, Notification.EXTRA_BIG_TEXT,
+            Notification.EXTRA_SUB_TEXT, Notification.EXTRA_SUMMARY_TEXT, Notification.EXTRA_TITLE_BIG)) {
+            texts += extras.getCharSequence(key)
+        }
+        extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.let { texts += it }
+        // MessagingStyle keeps each message as a Bundle; the newest message is last.
+        @Suppress("DEPRECATION")
+        extras.getParcelableArray(Notification.EXTRA_MESSAGES)?.reversed()?.forEach { message ->
+            texts += (message as? Bundle)?.getCharSequence("text")
+        }
+        val spanUrls = texts.flatMap { text ->
+            (text as? Spanned)?.getSpans(0, text.length, URLSpan::class.java)?.mapNotNull { it.url }.orEmpty()
+        }
+        NotificationLinkPolicy.extract(sbn.packageName, spanUrls, texts.map { it?.toString() })
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not read notification link: ${e.message}")
+        null
     }
 
     private fun scheduleMediaRefresh() {

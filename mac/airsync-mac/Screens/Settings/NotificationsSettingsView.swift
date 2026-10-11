@@ -49,6 +49,16 @@ struct NotificationsSettingsView: View {
                             .toggleStyle(.switch)
                     }
 
+                    if appState.openAppOnNotificationClick {
+                        HStack {
+                            Label("Open on phone when there is no direct link", systemImage: "iphone.and.arrow.forward")
+                            Spacer()
+                            Toggle("", isOn: $appState.openNotificationOnPhoneWithoutLink)
+                                .toggleStyle(.switch)
+                        }
+                        .help("Posts, threads and chats open at the exact item on your phone instead of the app's home page on this Mac.")
+                    }
+
                     HStack {
                         Label(L("settings.notifications.system"), systemImage: "bell.badge")
                         Spacer()

@@ -1,7 +1,10 @@
 package app.androp.android.utils
 
+import android.app.ActivityOptions
+import android.app.Notification
 import android.app.RemoteInput
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -87,6 +90,9 @@ object NotificationDismissalUtil {
         return try {
             val service = MediaNotificationListener.getInstance() ?: return false
             val sbn = resolveNotification(notificationId) ?: return false
+            if (actionName == NotificationLinkPolicy.OPEN_ON_PHONE_ACTION && replyText.isNullOrEmpty()) {
+                return openOnPhone(service, sbn)
+            }
             val actions = sbn.notification.actions ?: return false
             val index = NotificationActionPolicy.selectAction(actionDescriptors(actions), actionName, replyText)
                 ?: return false
@@ -109,6 +115,27 @@ object NotificationDismissalUtil {
             Log.w(TAG, "Could not perform notification action", e)
             false
         }
+    }
+
+    /** Fires the notification's own contentIntent, exactly as tapping it on the phone would. */
+    private fun openOnPhone(service: MediaNotificationListener, sbn: StatusBarNotification): Boolean {
+        val contentIntent = sbn.notification.contentIntent ?: return false
+        // Lets the target activity start while this app is in the background when Android
+        // grants us that privilege (e.g. an enabled accessibility service); otherwise the
+        // system may block the launch even though send() succeeds.
+        val options = when {
+            Build.VERSION.SDK_INT >= 36 -> ActivityOptions.makeBasic().setPendingIntentBackgroundActivityStartMode(
+                ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOW_ALWAYS).toBundle()
+            Build.VERSION.SDK_INT >= 34 -> @Suppress("DEPRECATION") ActivityOptions.makeBasic()
+                .setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED).toBundle()
+            else -> null
+        }
+        contentIntent.send(service, 0, null, null, null, null, options)
+        // System UI cancels auto-cancel notifications on tap; the removal callback updates the Mac.
+        if (sbn.notification.flags and Notification.FLAG_AUTO_CANCEL != 0 && sbn.isClearable) {
+            try { service.cancelNotification(sbn.key) } catch (e: Exception) { Log.w(TAG, "Could not auto-cancel", e) }
+        }
+        return true
     }
 
     fun getIdBySystemKey(systemKey: String): String? = keyToId[systemKey]

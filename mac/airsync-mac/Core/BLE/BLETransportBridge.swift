@@ -140,6 +140,8 @@ class BLETransportBridge {
         let id: String
         let actions: [NotificationAction]
         let priority: String?
+        let url: String?
+        let canOpenOnPhone: Bool?
     }
 
     private func handleNotification(_ components: [String]) {
@@ -165,6 +167,8 @@ class BLETransportBridge {
         var notificationID = UUID().uuidString
         var actions: [NotificationAction] = []
         var priority = ""
+        var url: String?
+        var canOpenOnPhone: Bool?
         if components.count >= 5, components[4].utf8.count <= 16 * 1024,
            let data = components[4].data(using: .utf8),
            let metadata = try? JSONDecoder().decode(NotificationMetadata.self, from: data),
@@ -172,6 +176,8 @@ class BLETransportBridge {
             notificationID = metadata.id
             priority = metadata.priority == "silent" ? "silent" : "alerting"
             actions = Array(metadata.actions.prefix(8)).filter { !$0.name.isEmpty && $0.name.count <= 128 }
+            url = NotificationOpenPolicy.sanitizedLink(metadata.url)?.absoluteString
+            canOpenOnPhone = metadata.canOpenOnPhone
         }
         let notif = Notification(
             title: title,
@@ -180,7 +186,9 @@ class BLETransportBridge {
             nid: notificationID,
             package: pkg,
             priority: priority,
-            actions: actions
+            actions: actions,
+            url: url,
+            canOpenOnPhone: canOpenOnPhone
         )
         
         let generation = BLECentralManager.shared.sessionGeneration

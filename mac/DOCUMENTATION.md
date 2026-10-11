@@ -335,10 +335,20 @@ This message must be sent immediately after connection establishment. The server
         "name": "dismiss",
         "type": "button"
       }
-    ]
+    ],
+    "url": "https://www.reddit.com/r/androiddev",
+    "canOpenOnPhone": true
   }
 }
 ```
+
+`url` and `canOpenOnPhone` are optional and only sent by newer phones. Android hides
+where another app's notification tap leads, so `url` is only a link visible in the
+notification (a link span or URL in its text, or a Reddit `r/`/`u/` reference); a
+click opens it when it is on the same site as the package's configured web page (or
+no target is configured). `canOpenOnPhone` means the notification has a tap intent
+the phone can fire on request (see `androp.openOnPhone` below). Over BLE both fields
+travel in the optional JSON metadata field of the notification payload.
 
 ---
 
@@ -370,6 +380,11 @@ For button-only actions without reply text:
   }
 }
 ```
+
+To open the exact content on the phone, the Mac sends the reserved name
+`androp.openOnPhone` (only to notifications that advertised `canOpenOnPhone`); the
+phone fires the notification's own tap intent, as tapping it on the phone would.
+Older phones find no such action and answer with `success: false`.
 
 ---
 

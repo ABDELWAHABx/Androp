@@ -132,6 +132,7 @@ class AppState: ObservableObject {
         self.sendNowPlayingStatus = UserDefaults.standard.object(forKey: "sendNowPlayingStatus") == nil ? true : UserDefaults.standard.bool(forKey: "sendNowPlayingStatus")
         self.autoOpenLinks = UserDefaults.standard.bool(forKey: "autoOpenLinks")
         self.openAppOnNotificationClick = UserDefaults.standard.bool(forKey: "openAppOnNotificationClick")
+        self.openNotificationOnPhoneWithoutLink = UserDefaults.standard.bool(forKey: "openNotificationOnPhoneWithoutLink")
 
         var bRate = UserDefaults.standard.integer(forKey: "scrcpyBitrate")
         if bRate == 0 { bRate = 4 }
@@ -794,6 +795,13 @@ class AppState: ObservableObject {
     @Published var openAppOnNotificationClick: Bool {
         didSet {
             UserDefaults.standard.set(openAppOnNotificationClick, forKey: "openAppOnNotificationClick")
+        }
+    }
+
+    /// Clicking a mirrored notification without a direct link opens it on the phone.
+    @Published var openNotificationOnPhoneWithoutLink: Bool {
+        didSet {
+            UserDefaults.standard.set(openNotificationOnPhoneWithoutLink, forKey: "openNotificationOnPhoneWithoutLink")
         }
     }
 
@@ -1481,10 +1489,21 @@ class AppState: ObservableObject {
                     body: notif.body,
                     appIcon: appIcon,
                     package: notif.package,
-                    actions: notif.actions
+                    actions: notif.actions,
+                    extraActions: notif.canOpenOnPhone == true ? [UNNotificationAction(
+                        identifier: "OPEN_ON_PHONE", title: "Open on Phone", options: [])] : [],
+                    extraUserInfo: Self.openUserInfo(for: notif)
                 )
             }
         }
+    }
+
+    /// Click targets for a mirrored notification; absent keys keep the old behavior.
+    private static func openUserInfo(for notif: Notification) -> [String: Any] {
+        var info: [String: Any] = [:]
+        if let url = notif.url { info["deepLink"] = url }
+        if notif.canOpenOnPhone == true { info["canOpenOnPhone"] = true }
+        return info
     }
 
     func postNativeNotification(
@@ -1855,7 +1874,8 @@ class AppState: ObservableObject {
 
     func handleNotificationTap(_ notif: Notification) {
         // Try opening configured Mac app or web fallback first
-        let openedOnMac = MacAppLaunchManager.open(package: notif.package)
+        let openedOnMac = MacAppLaunchManager.open(package: notif.package, nid: notif.nid,
+                                                   link: notif.url, canOpenOnPhone: notif.canOpenOnPhone == true)
         
         // If not opened on Mac, fall back to scrcpy mirroring if available
         if !openedOnMac {

@@ -4,6 +4,7 @@ import android.util.Log
 import app.androp.android.domain.model.AudioInfo
 import app.androp.android.domain.model.BatteryInfo
 import app.androp.android.utils.CallControlUtil
+import app.androp.android.utils.NotificationLinkPolicy
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
@@ -75,8 +76,12 @@ object BleTransportBridge {
                     actions.put(JSONObject().put("name", name).put("type", type))
                 }
             }
-            fields.add(JSONObject().put("id", id).put("actions", actions)
-                .put("priority", field(data.optString("priority", "alerting"), 32)).toString())
+            val metadata = JSONObject().put("id", id).put("actions", actions)
+                .put("priority", field(data.optString("priority", "alerting"), 32))
+            // Optional click targets; links are already bounded and never truncated.
+            NotificationLinkPolicy.sanitize(data.optString("url"))?.let { metadata.put("url", it) }
+            if (data.optBoolean("canOpenOnPhone")) metadata.put("canOpenOnPhone", true)
+            fields.add(metadata.toString())
         }
         return gattServer?.sendChunkedNotification(BleConstants.CHAR_NOTIFICATION_DATA, fields.joinToString(BleConstants.DELIMITER)) ?: false
     }
