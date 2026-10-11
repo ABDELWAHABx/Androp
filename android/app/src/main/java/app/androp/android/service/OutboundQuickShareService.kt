@@ -160,6 +160,7 @@ class OutboundQuickShareService : Service() {
                 return@launch
             }
 
+            if (sendFastIfSupported(pairedDevice.name, files)) return@launch
             updateNotification("Looking for ${pairedDevice.name}...")
             findAndSend(pairedDevice.name, ourName, files)
             } catch (error: Exception) {
@@ -171,6 +172,45 @@ class OutboundQuickShareService : Service() {
         }
 
         return START_NOT_STICKY
+    }
+
+    /**
+     * Direct encrypted stream to the paired Mac on the same network (see BulkFileTransfer).
+     * Returns false when the Mac does not offer it, so Quick Share takes over unchanged.
+     */
+    private suspend fun sendFastIfSupported(
+        macName: String, files: List<OutboundQuickShareConnection.PendingFile>
+    ): Boolean {
+        val key = expectedPairingKey ?: return false
+        val host = WebSocketUtil.authenticatedPeerAddress(key) ?: return false
+        if (!WebSocketUtil.isWifiConnected()) return false
+        files.forEachIndexed { index, file ->
+            val notifId = ("bulk-out:" + file.uri).hashCode()
+            var lastPercent = -1
+            updateNotification("Sending to $macName…")
+            val outcome = app.androp.android.utils.BulkFileTransfer.sendToMac(this, file.uri, file.name, file.size,
+                file.mimeType, host) { sent ->
+                val percent = if (file.size > 0) (sent * 100 / file.size).toInt() else 0
+                if (percent != lastPercent) {
+                    lastPercent = percent
+                    app.androp.android.utils.NotificationUtil.showFileProgress(this, notifId, file.name, percent,
+                        notifId.toString(), isSending = true)
+                }
+            }
+            if (outcome == null && index == 0) return false
+            val ok = outcome?.first == true
+            app.androp.android.utils.NotificationUtil.showFileComplete(this, notifId, file.name, ok, isSending = true)
+            if (!ok) {
+                updateNotification(outcome?.second ?: "Couldn't send ${file.name}")
+                delay(2000)
+                stopSelf()
+                return true
+            }
+        }
+        updateNotification("Sent to $macName")
+        delay(1500)
+        stopSelf()
+        return true
     }
 
     private suspend fun findAndSend(
@@ -383,6 +423,7 @@ class OutboundQuickShareService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        app.androp.android.utils.BulkFileTransfer.cancelOutgoing()
         serviceScope.cancel()
         networkLease?.let(TransferNetworkManager::stop)
         networkLease = null

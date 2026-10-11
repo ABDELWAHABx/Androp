@@ -80,6 +80,7 @@ object WebSocketMessageHandler {
                 "clipboardAck" -> ClipboardSyncManager.handleAcknowledgement(data)
                 "macPowerControlResponse" -> MacPowerCommandResults.handle(data)
                 "remoteControlStatus" -> MacRemoteStatus.handle(data)
+                "fileBulkAccept", "fileBulkReject", "fileBulkResult" -> BulkFileTransfer.handleControl(type, data)
                 "volumeControl" -> handleVolumeControl(context, data)
                 "mediaControl" -> handleMediaControl(context, data)
                 "findPhone" -> when (data.optString("action", "start")) {

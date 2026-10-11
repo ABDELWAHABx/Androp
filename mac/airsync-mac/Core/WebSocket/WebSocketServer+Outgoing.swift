@@ -32,6 +32,14 @@ extension WebSocketServer {
         _ = sendPowerProtocol(type: "remoteControlStatus", data: ["inputAllowed": inputAllowed])
     }
 
+    /// Fast-path control messages go only over the paired, encrypted Wi-Fi session.
+    @discardableResult
+    func sendBulkFileMessage(type: String, data: [String: Any]) -> Bool {
+        guard !AppState.shared.isSyncPaused,
+              let bytes = try? JSONSerialization.data(withJSONObject: ["type": type, "data": data]) else { return false }
+        return sendDataToFirstAvailable(bytes)
+    }
+
     func broadcast(message: String) {
         lock.lock()
         let sessions = primarySessionID == nil ? [] : activeSessions

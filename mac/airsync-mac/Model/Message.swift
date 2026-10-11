@@ -34,6 +34,8 @@ enum MessageType: String, Codable {
     case fileChunkAck
     case transferVerified
     case fileTransferCancel
+    // fast path: phone offers a file, Mac answers with a one-time port and key
+    case fileBulkOffer
     // wake up / quick connect
     case wakeUpRequest
     // sent by Android right before it closes the socket for a user-initiated disconnect

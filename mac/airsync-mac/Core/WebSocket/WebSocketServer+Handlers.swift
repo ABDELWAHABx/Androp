@@ -65,6 +65,10 @@ extension WebSocketServer {
             handleTransferVerified(message)
         case .fileTransferCancel:
             handleFileTransferCancel(message)
+        case .fileBulkOffer:
+            if let data = message.data.value as? [String: Any] {
+                DispatchQueue.main.async { BulkFileReceiver.handleOffer(data) }
+            }
         case .macMediaControl:
             handleMacMediaControlRequest(message)
         case .macPowerControl:

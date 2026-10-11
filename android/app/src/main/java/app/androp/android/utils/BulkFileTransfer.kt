@@ -35,6 +35,56 @@ object BulkFileTransfer {
     private const val TAG = "BulkFileTransfer"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val active = ConcurrentHashMap<String, Pair<Job, Socket>>()
+    private val outgoing = ConcurrentHashMap.newKeySet<String>()
+
+    /** Stops every phone → Mac stream (the share was cancelled or the service stopped). */
+    fun cancelOutgoing() = outgoing.toList().forEach(::cancel)
+
+    /** Mac answers to an offer (accept with port/key, or reject), then its final result. */
+    private val replies = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<JSONObject>>()
+
+    fun handleControl(type: String, data: JSONObject) {
+        val id = data.optString("id")
+        val key = if (type == "fileBulkResult") "result:$id" else "offer:$id"
+        replies[key]?.complete(data.put("type", type))
+    }
+
+    /**
+     * Phone → Mac fast path for one file. Returns null when the Mac does not offer it
+     * (older version: use Quick Share), otherwise the outcome and an error message.
+     */
+    suspend fun sendToMac(context: Context, uri: Uri, name: String, size: Long, mime: String, host: String,
+                          onProgress: (Long) -> Unit): Pair<Boolean, String?>? {
+        val id = java.util.UUID.randomUUID().toString()
+        val offer = kotlinx.coroutines.CompletableDeferred<JSONObject>()
+        val result = kotlinx.coroutines.CompletableDeferred<JSONObject>()
+        replies["offer:$id"] = offer
+        replies["result:$id"] = result
+        outgoing.add(id)
+        try {
+            val sent = WebSocketUtil.sendMessage(JSONObject().put("type", "fileBulkOffer").put("data",
+                JSONObject().put("id", id).put("name", name).put("size", size).put("mime", mime)).toString())
+            if (!sent) return null
+            val answer = kotlinx.coroutines.withTimeoutOrNull(3_000) { offer.await() } ?: return null
+            if (answer.optString("type") == "fileBulkReject") return false to answer.optString("error").ifBlank { null }
+            val port = answer.optInt("port", 0)
+            val key = runCatching { Base64.decode(answer.optString("key"), Base64.NO_WRAP) }.getOrNull()
+            if (port !in 1..65535 || key?.size != 32) return false to "Your Mac sent an invalid transfer endpoint."
+            kotlinx.coroutines.withContext(Dispatchers.IO) { send(context, id, uri, size, host, port, key, onProgress) }
+            val outcome = kotlinx.coroutines.withTimeoutOrNull(120_000) { result.await() }
+                ?: return false to "Your Mac didn't confirm the file."
+            return outcome.optBoolean("ok") to outcome.optString("error").takeIf { it.isNotBlank() && it != "null" }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            cancel(id); throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Fast send failed", e)
+            return false to "The connection to your Mac dropped. Try again."
+        } finally {
+            outgoing.remove(id)
+            replies.remove("offer:$id")
+            replies.remove("result:$id")
+        }
+    }
 
     /** Closes the stream; the coroutine notices and cleans up. */
     fun cancel(id: String) {

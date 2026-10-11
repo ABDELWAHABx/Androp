@@ -624,6 +624,24 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         }
     }
     
+    /// Fast-path receive from the paired phone: shown on the phone card's transfer pill
+    /// without taking over a send or Quick Share exchange already on screen.
+    public func bulkReceiveProgress(id: String, progress: Double) {
+        switch transferState {
+        case .idle, .finished, .failed: transferState = .receiving(id)
+        case .receiving(let current) where current == id: break
+        default: return
+        }
+        transferProgress = progress
+    }
+
+    public func bulkReceiveFinished(id: String, success: Bool, error: String?) {
+        guard case .receiving(let current) = transferState, current == id else { return }
+        transferProgress = success ? 1 : transferProgress
+        transferState = success ? .finished : .failed(error ?? "Transfer failed")
+        resetTransfer(after: success ? 2 : 4)
+    }
+
     public func incomingTransferProgress(id: String, progress: Double) {
         guard !suspended && !AppState.shared.isSyncPaused, activeIncomingTransfers[id] != nil else { return }
         self.transferProgress = progress
