@@ -1,0 +1,91 @@
+name: Public androp builds
+
+on:
+  push:
+    branches: [main]
+    paths: ['mac/**', 'android/**', '.github/workflows/public-builds.yml', '.github/build-recipient.txt']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-builds-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: androp-v0.1.0-preview.6
+
+jobs:
+  mac-build:
+    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require the public encryption recipient
+        run: test -s .github/build-recipient.txt
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.3'
+      - name: Build and verify on macOS
+        run: bash mac/Tools/Release/build-mac.sh "$RELEASE_TAG" arm64
+      - name: Verify the final package on macOS 15
+        run: python3 mac/Tools/Release/verify-package.py mac/dist --tag "$RELEASE_TAG" --expected-source "$GITHUB_SHA"
+      - name: Encrypt installers before uploading
+        run: |
+          set -euo pipefail
+          command -v age >/dev/null || brew install age
+          prefix="${RELEASE_TAG}-arm64"
+          tar -czf "$RUNNER_TEMP/packages.tar.gz" -C mac/dist \
+            "$prefix.zip" "$prefix.dmg" "$prefix-BUILD.json" "$prefix-SHA256SUMS.txt"
+          age -R .github/build-recipient.txt -o "$RUNNER_TEMP/androp-mac.age" "$RUNNER_TEMP/packages.tar.gz"
+          rm -f "$RUNNER_TEMP/packages.tar.gz"
+      - name: Upload encrypted installers only
+        uses: actions/upload-artifact@v4
+        with:
+          name: androp-mac-encrypted
+          path: ${{ runner.temp }}/androp-mac.age
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  android:
+    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-disabled: true
+      - name: Install SDK
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Build and verify
+        run: bash ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug --no-daemon --console=plain --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process
+      - name: Upload test reports only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: |
+            android/app/build/reports/lint-results-debug.xml
+            android/app/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: ignore
+          retention-days: 1

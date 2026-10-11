@@ -65,10 +65,10 @@ class BonjourServiceAdvertiser: NSObject, NetServiceDelegate {
         }
         let info = AppState.shared.myDevice
         let port = Int32(endpoint.port)
-        let name = info?.name ?? Host.current().localizedName ?? "Mac"
+        let name = DiscoveryMetadataPolicy.txtName(info?.name ?? Host.current().localizedName)
         let uuid = getStableUUID()
         
-        let serviceName = "androp-\(name)"
+        let serviceName = DiscoveryMetadataPolicy.serviceName(info?.name ?? Host.current().localizedName, stableID: uuid)
         // One DNS-SD TXT entry (including "ips=") must stay below 256 bytes.
         let ips = endpoint.adapters.map(\.address).sorted().prefix(15).joined(separator: ",")
         let signature = "\(serviceName)|\(port)|\(ips)"

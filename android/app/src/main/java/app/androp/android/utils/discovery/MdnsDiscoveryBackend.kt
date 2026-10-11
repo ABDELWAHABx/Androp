@@ -116,10 +116,10 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
 
         val serviceInfo = NsdServiceInfo().apply {
             serviceType = SERVICE_TYPE
-            serviceName = "androp-$deviceName"
+            serviceName = DiscoveryMetadataPolicy.serviceName(deviceName, deviceId)
             port = 8891 // Wakeup service port
             setAttribute("id", deviceId)
-            setAttribute("name", deviceName)
+            setAttribute("name", DiscoveryMetadataPolicy.txtName(deviceName))
             setAttribute("port", "8891")
             setAttribute("ver", "1")
             setAttribute("type", "android")
@@ -284,17 +284,17 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
             
             serviceNameToId[resolvedInfo.serviceName] = id
 
-            val device = DiscoveredDevice(
-                id = id,
-                name = name,
-                ips = addresses,
-                port = port,
-                type = "mac", // Mac side is server
-                lastSeen = System.currentTimeMillis(),
-                discoverySource = DiscoverySource.MDNS
+            updateDeviceList(
+                DiscoveredDevice(
+                    id = id,
+                    name = name,
+                    ips = addresses,
+                    port = port,
+                    type = "mac",
+                    lastSeen = System.currentTimeMillis(),
+                    discoverySource = DiscoverySource.MDNS,
+                )
             )
-
-            updateDeviceList(device)
         } catch (e: Exception) {
             Log.e(TAG, "Error handling resolved service: ${e.message}")
         }
