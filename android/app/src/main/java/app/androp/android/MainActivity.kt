@@ -239,12 +239,7 @@ class MainActivity : ComponentActivity() {
         if (intent?.data?.scheme == "androp" && pairing == null) {
             Toast.makeText(this, "Invalid pairing link", Toast.LENGTH_SHORT).show()
         }
-        val ip = pairing?.host
-        val port = pairing?.port?.toString()
-        val pcName = pairing?.name
-        val isPlus = pairing?.plus ?: false
-        val symmetricKey = pairing?.key
-        val isFromQrScan = pairing != null
+
 
         setContent {
             val viewModel: app.androp.android.presentation.viewmodel.AirSyncViewModel =
@@ -274,12 +269,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         composable("main") {
                             AirSyncMainScreen(
-                                initialIp = ip,
-                                initialPort = port,
-                                showConnectionDialog = isFromQrScan,
-                                pcName = pcName,
-                                isPlus = isPlus,
-                                symmetricKey = symmetricKey,
+                                initialPairing = pairing,
                                 requestedDestination = requestedDestination,
                                 navigationRequestId = navigationRequestId
                             )
@@ -311,7 +301,7 @@ class MainActivity : ComponentActivity() {
             startActivity(mainIntent)
             finish()
         } catch (e: Exception) {
-            Log.e("MainActivity", "Error handling QR code result: ${e.message}", e)
+            Log.e("MainActivity", "Unable to open scanned pairing link")
             Toast.makeText(
                 this,
                 "Invalid QR code format",

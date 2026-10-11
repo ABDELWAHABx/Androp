@@ -31,6 +31,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
@@ -57,6 +59,7 @@ class BleGattServer(private val context: Context) {
     private val connectedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>()
     private val notificationSubscriptions = ConcurrentHashMap<String, MutableSet<UUID>>()
     private val reassemblers = ConcurrentHashMap<UUID, BleChunkUtil.Reassembler>()
+    private val legacyAuthChunks = BleChunkUtil.Reassembler(256)
     @Volatile private var authenticatedDevice: BluetoothDevice? = null
     internal class AuthenticatedPeer(val pairingKey: String)
     @Volatile private var authenticatedPeer: AuthenticatedPeer? = null
@@ -66,6 +69,7 @@ class BleGattServer(private val context: Context) {
         isAuthenticated && authenticatedDevice != null && authenticatedPeer === peer
 
     @Volatile private var serverGeneration = 0L
+    @Volatile private var peerConnectionGeneration = 0L
     private val sendLock = Any()
     private data class OutboundMessage(val device: BluetoothDevice, val uuid: UUID, val chunks: List<ByteArray>,
         val stateKey: String? = null, var index: Int = 0, var retries: Int = 0)
@@ -76,6 +80,36 @@ class BleGattServer(private val context: Context) {
     private var notificationRetry: Job? = null
     private var authenticationTimeout: Job? = null
     private val maxQueuedBytes = 512 * 1024
+    private class PendingPairing(val key: String, val session: String, val macName: String) {
+        val deadline = android.os.SystemClock.elapsedRealtime() + BlePairingProtocol.WINDOW_MS
+        val completion = CompletableDeferred<Boolean>()
+        val chunks = BleChunkUtil.Reassembler(BlePairingProtocol.MAX_ENVELOPE_BYTES)
+        var provedDevice: BluetoothDevice? = null
+        var requestNonce: String? = null
+        val replayGuard = BlePairingReplayGuard()
+    }
+    @Volatile private var pendingPairing: PendingPairing? = null
+    internal fun acceptsPairingKeyChange(key: String?): Boolean =
+        key != null && (pendingPairing?.key == key || authenticatedPeer?.pairingKey == key)
+
+    /** Only invoked for a scanned QR, with permission granted. Never persists an unproved key. */
+    internal suspend fun pairFromQr(key: String, session: String, macName: String): Boolean {
+        if (!BlePairingProtocol.validKey(key) || !BlePairingProtocol.validId(session) ||
+            app.androp.android.utils.BackgroundWorkController.isPaused) return false
+        stop()
+        val pending = PendingPairing(key, session, macName.take(128).ifBlank { "Mac" })
+        pendingPairing = pending
+        try {
+            start()
+            if (gattServer == null) return false
+            return withTimeoutOrNull(BlePairingProtocol.WINDOW_MS) { pending.completion.await() } == true
+        } finally {
+            if (pendingPairing === pending) {
+                pendingPairing = null
+                if (!pending.completion.isCompleted || !isAuthenticated) stop()
+            }
+        }
+    }
     private val priorityCharacteristics = setOf(BleConstants.CHAR_AUTH_RESULT, BleConstants.CHAR_MAC_CONTROL, BleConstants.CHAR_NOTIFICATION_DISMISS_NOTIFY)
     private val stateCharacteristics = setOf(BleConstants.CHAR_BATTERY_LEVEL, BleConstants.CHAR_SYSTEM_STATE, BleConstants.CHAR_MEDIA_STATE)
 
@@ -123,6 +157,8 @@ class BleGattServer(private val context: Context) {
      * Stop the GATT server and advertising
      */
     fun stop() {
+        pendingPairing?.completion?.complete(false)
+        pendingPairing = null
         app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this)
         serverGeneration++
         scope.coroutineContext.cancelChildren()
@@ -138,6 +174,7 @@ class BleGattServer(private val context: Context) {
         authenticatedDevice = null
         negotiatedMtu = 23
         reassemblers.clear()
+        legacyAuthChunks.clear()
         clearSendQueue()
         pendingServices.clear()
         _connectionState.value = BleConnectionState.DISCONNECTED
@@ -336,13 +373,14 @@ class BleGattServer(private val context: Context) {
                     return
                 }
                 connectedDevices.add(device)
+                peerConnectionGeneration++
                 negotiatedMtu = 23
                 stopAdvertising()
                 _connectionState.value = BleConnectionState.CONNECTED
                 authenticationTimeout?.cancel()
                 val generation = serverGeneration
                 authenticationTimeout = scope.launch {
-                    delay(15_000)
+                    delay(if (pendingPairing != null) 30_000 else 15_000)
                     if (generation == serverGeneration && device in connectedDevices && authenticatedDevice != device) {
                         Log.w(TAG, "BLE client authentication timed out")
                         gattServer?.cancelConnection(device)
@@ -351,6 +389,7 @@ class BleGattServer(private val context: Context) {
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.d(TAG, "Device disconnected: ${device.address}")
                 if (!connectedDevices.remove(device)) return
+                peerConnectionGeneration++
                 notificationSubscriptions.remove(device.address)
                 authenticationTimeout?.cancel()
                 authenticationTimeout = null
@@ -360,6 +399,11 @@ class BleGattServer(private val context: Context) {
                     app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this@BleGattServer, allowWifiFallback = true)
                 }
                 reassemblers.clear()
+                legacyAuthChunks.clear()
+                pendingPairing?.let {
+                    it.chunks.clear(); it.provedDevice = null; it.requestNonce = null
+                    it.replayGuard.disconnected()
+                }
                 clearSendQueue()
                 if (connectedDevices.isEmpty()) {
                     _connectionState.value =
@@ -440,7 +484,16 @@ class BleGattServer(private val context: Context) {
             }
 
             when (characteristic.uuid) {
-                BleConstants.CHAR_AUTH_TOKEN -> handleAuthRequest(device, value)
+                BleConstants.CHAR_AUTH_TOKEN -> {
+                    val pairing = pendingPairing
+                    if (BlePairingProtocol.isPairingChunk(value)) {
+                        if (pairing != null) {
+                            pairing.chunks.addChunk(value)?.let { handlePairingRequest(device, pairing, it) }
+                        } else {
+                            legacyAuthChunks.addChunk(value)?.let { handleAuthRequest(device, it.toByteArray(Charsets.UTF_8)) }
+                        }
+                    } else handleAuthRequest(device, value)
+                }
                 BleConstants.CHAR_MAC_BATTERY -> handleMacBattery(value)
                 BleConstants.CHAR_NOTIFICATION_ACTION -> handleChunkedWrite(
                     characteristic.uuid,
@@ -557,21 +610,37 @@ class BleGattServer(private val context: Context) {
         }
     }
 
-    private fun handleAuthRequest(device: BluetoothDevice, token: ByteArray) {
+    private fun handleAuthRequest(device: BluetoothDevice, token: ByteArray, confirmation: PendingPairing? = null) {
         val generation = serverGeneration
+        val connectionGeneration = peerConnectionGeneration
         scope.launch {
             val deviceData = dataStoreManager.getLastConnectedDevice().first()
-            val storedKey = deviceData?.symmetricKey
+            val pairing = pendingPairing
+            val storedKey = pairing?.key ?: deviceData?.symmetricKey
             Log.d(
                 TAG,
                 "Handling auth request from ${device.address}. Device in DB: ${deviceData?.name}, hasKey: ${storedKey != null}"
             )
 
-            if (generation != serverGeneration || device !in connectedDevices ||
+            if (generation != serverGeneration || connectionGeneration != peerConnectionGeneration || device !in connectedDevices ||
                 app.androp.android.utils.BackgroundWorkController.isPaused) return@launch
+            // The raw reconnect token cannot authorize first pairing until this
+            // central has proved the freshly scanned QR secret over AES-GCM.
+            if (confirmation != null && pairing !== confirmation) return@launch
+            if (pairing != null && (confirmation !== pairing || pairing.provedDevice != device || pairing.requestNonce == null ||
+                    android.os.SystemClock.elapsedRealtime() >= pairing.deadline)) return@launch
             if (storedKey != null) {
                 val expectedToken = BleTransportBridge.deriveAuthToken(storedKey)
                 if (expectedToken.isNotEmpty() && MessageDigest.isEqual(token, expectedToken.toByteArray(Charsets.UTF_8))) {
+                    if (pairing != null) {
+                        if (pendingPairing !== pairing) return@launch
+                        app.androp.android.utils.WebSocketUtil.disconnectIfDifferentPairing(context, pairing.key)
+                        dataStoreManager.saveLastConnectedDevice(app.androp.android.domain.model.ConnectedDevice(
+                            name = pairing.macName, ipAddress = "", port = "6997",
+                            lastConnected = System.currentTimeMillis(), symmetricKey = pairing.key, deviceType = "mac"))
+                        if (generation != serverGeneration || connectionGeneration != peerConnectionGeneration || pendingPairing !== pairing ||
+                            app.androp.android.utils.BackgroundWorkController.isPaused || device !in connectedDevices) return@launch
+                    }
                     Log.i(TAG, "BLE Auth Success!")
                     authenticationTimeout?.cancel()
                     authenticationTimeout = null
@@ -587,6 +656,7 @@ class BleGattServer(private val context: Context) {
                         byteArrayOf(BleConstants.AUTH_SUCCESS)
                     )
                     BleTransportBridge.sendDeviceName()
+                    pairing?.completion?.complete(true)
                     dataStoreManager.setUserManuallyDisconnected(false)
                     if (generation != serverGeneration || !isAuthenticated || authenticatedDevice != device ||
                         app.androp.android.utils.BackgroundWorkController.isPaused) return@launch
@@ -595,7 +665,7 @@ class BleGattServer(private val context: Context) {
                     app.androp.android.utils.SyncManager.checkAndSyncDeviceStatus(context, forceSync = true)
                     // Retain the existing connected-device foreground service
                     // when Bluetooth is the first/only transport to authenticate.
-                    app.androp.android.service.AirSyncService.start(context, deviceData?.name)
+                    app.androp.android.service.AirSyncService.start(context, pairing?.macName ?: deviceData?.name)
                 } else {
                     Log.w(TAG, "BLE Auth Failed! Token mismatch.")
                     sendNotification(
@@ -609,6 +679,37 @@ class BleGattServer(private val context: Context) {
                     BleConstants.CHAR_AUTH_RESULT,
                     byteArrayOf(BleConstants.AUTH_FAILED)
                 )
+            }
+        }
+    }
+
+    private fun handlePairingRequest(device: BluetoothDevice, pairing: PendingPairing, envelope: String) {
+        val generation = serverGeneration
+        val connectionGeneration = peerConnectionGeneration
+        scope.launch {
+            if (generation != serverGeneration || connectionGeneration != peerConnectionGeneration || pendingPairing !== pairing || device !in connectedDevices ||
+                isAuthenticated || app.androp.android.utils.BackgroundWorkController.isPaused ||
+                android.os.SystemClock.elapsedRealtime() >= pairing.deadline) return@launch
+            val confirmation = BlePairingProtocol.confirmation(envelope, pairing.key, pairing.session)
+            if (confirmation != null) {
+                if (pairing.provedDevice == device && pairing.requestNonce == confirmation.nonce)
+                    handleAuthRequest(device, confirmation.token.toByteArray(Charsets.UTF_8), pairing)
+                return@launch
+            }
+            val request = BlePairingProtocol.request(envelope, pairing.key, pairing.session) ?: return@launch
+            // One central/nonce owns this window; a replay cannot replace its proof.
+            if (pairing.provedDevice != null &&
+                (pairing.provedDevice != device || pairing.requestNonce != request.nonce)) return@launch
+            if (!pairing.replayGuard.accepts(request.nonce)) return@launch
+            val name = app.androp.android.utils.DeviceInfoUtil.getDeviceName(context)
+                .take(64).ifBlank { "Android" }
+            val response = BlePairingProtocol.response(request, pairing.key,
+                BleTransportBridge.deriveAuthToken(pairing.key),
+                app.androp.android.utils.DeviceInfoUtil.getDeviceId(context), name) ?: return@launch
+            if (sendChunkedNotification(BleConstants.CHAR_AUTH_RESULT, response)) {
+                pairing.provedDevice = device
+                pairing.requestNonce = request.nonce
+                pairing.replayGuard.record(request.nonce)
             }
         }
     }
@@ -834,6 +935,8 @@ class BleGattServer(private val context: Context) {
     }
 
     fun disconnectAllConnectedDevices() {
+        pendingPairing?.completion?.complete(false)
+        pendingPairing = null
         app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this)
         Log.d(TAG, "Disconnecting all connected BLE devices manually...")
         val devicesCopy = connectedDevices.toList()
@@ -853,6 +956,7 @@ class BleGattServer(private val context: Context) {
         authenticatedDevice = null
         clearSendQueue()
         reassemblers.clear()
+        legacyAuthChunks.clear()
         if (gattServer != null && !isAdvertisingPaused) {
             startAdvertising()
         }

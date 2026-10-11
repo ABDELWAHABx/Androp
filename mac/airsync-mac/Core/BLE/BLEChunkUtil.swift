@@ -61,10 +61,15 @@ struct BLEChunkUtil {
         return Data(data.dropFirst(BLEConstants.chunkHeaderSize))
     }
     final class Reassembler {
+        private let maximumMessageBytes: Int
         private var chunks: [Int: Data] = [:]
         private var totalChunks = 0
         private var byteCount = 0
         private var lastChunkTime = Date.distantPast
+
+        init(maximumMessageBytes: Int = BLEChunkUtil.maxMessageBytes) {
+            self.maximumMessageBytes = maximumMessageBytes
+        }
 
         func add(_ packet: Data, now: Date = Date()) -> String? {
             guard let (index, total) = BLEChunkUtil.parseHeader(from: packet) else { clear(); return nil }
@@ -75,7 +80,7 @@ struct BLEChunkUtil {
             }
             guard total == totalChunks, index == chunks.count else { clear(); return nil }
             let payload = BLEChunkUtil.getPayload(from: packet)
-            guard byteCount + payload.count <= BLEChunkUtil.maxMessageBytes else { clear(); return nil }
+            guard total <= maximumMessageBytes, byteCount + payload.count <= maximumMessageBytes else { clear(); return nil }
             chunks[index] = payload
             byteCount += payload.count
             lastChunkTime = now

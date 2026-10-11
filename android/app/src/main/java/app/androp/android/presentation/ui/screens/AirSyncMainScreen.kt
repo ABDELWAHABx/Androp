@@ -101,7 +101,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import androidx.core.net.toUri
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
@@ -128,6 +127,7 @@ import app.androp.android.presentation.ui.components.cards.LastConnectedDeviceCa
 import app.androp.android.presentation.ui.components.cards.RateAppCard
 import app.androp.android.presentation.ui.components.cards.RemoteFunctionsCard
 import app.androp.android.presentation.ui.components.dialogs.ConnectionDialog
+import app.androp.android.presentation.ui.components.dialogs.BluetoothQrPairingDialog
 import app.androp.android.presentation.ui.components.dialogs.PermissionExplanationDialog
 import app.androp.android.presentation.ui.components.dialogs.PermissionType
 import app.androp.android.presentation.ui.components.sheets.HelpSupportBottomSheet
@@ -143,6 +143,7 @@ import app.androp.android.utils.SyncDashboardController
 import app.androp.android.utils.ClipboardSyncManager
 import app.androp.android.utils.HapticUtil
 import app.androp.android.utils.JsonUtil
+import app.androp.android.utils.PairingLink
 import app.androp.android.utils.MacDeviceStatusManager
 import app.androp.android.utils.WebSocketMessageHandler
 import app.androp.android.utils.WebSocketUtil
@@ -154,7 +155,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.net.URLDecoder
 
 @OptIn(
     ExperimentalMaterial3Api::class,
@@ -170,6 +170,7 @@ fun AirSyncMainScreen(
     pcName: String? = null,
     isPlus: Boolean = false,
     symmetricKey: String? = null,
+    initialPairing: PairingLink? = null,
     initialPage: Int = 0,
     requestedDestination: String? = null,
     navigationRequestId: Int = 0,
@@ -184,6 +185,8 @@ fun AirSyncMainScreen(
         AirSyncViewModel.create(context)
     }
     val uiState by viewModel.uiState.collectAsState()
+    var pendingBluetoothPairing by remember { mutableStateOf<PairingLink?>(null) }
+    var handledInitialPairing by remember(initialPairing) { mutableStateOf(false) }
     val deviceInfo by viewModel.deviceInfo.collectAsState()
     val versionName = try {
         context.packageManager
@@ -365,10 +368,12 @@ fun AirSyncMainScreen(
         deviceId: String? = null,
         ipAddress: String = uiState.ipAddress,
         port: String = uiState.port,
-        symmetricKey: String? = uiState.symmetricKey
+        symmetricKey: String? = uiState.symmetricKey,
+        deviceName: String? = uiState.manualPcName.takeIf { it.isNotBlank() } ?: pcName,
+        deviceIsPlus: Boolean = uiState.manualIsPlus
     ) {
-        if (uiState.isConnecting) return
-        if (uiState.isAppPaused) {
+        if (viewModel.uiState.value.isConnecting) return
+        if (viewModel.uiState.value.isAppPaused) {
             Toast.makeText(context, "Resume androp before connecting", Toast.LENGTH_SHORT).show()
             return
         }
@@ -445,8 +450,14 @@ fun AirSyncMainScreen(
                 viewModel.setConnectionStatus(isConnected = connected, isConnecting = false)
                 if (connected) {
                     viewModel.setResponse("Connected successfully!")
-                    val plusStatus = uiState.lastConnectedDevice?.isPlus ?: isPlus
-                    viewModel.saveLastConnectedDevice(pcName, plusStatus, symmetricKey)
+                    // Persist the exact successful attempt, even if the form changed while connecting.
+                    viewModel.saveLastConnectedDevice(
+                        pcName = deviceName,
+                        isPlus = deviceIsPlus,
+                        symmetricKey = symmetricKey,
+                        ipAddress = ipAddress,
+                        port = port
+                    )
                 } else {
                     viewModel.setResponse("Failed to connect")
                 }
@@ -533,78 +544,75 @@ fun AirSyncMainScreen(
         }
     }
 
-    // QR Scanner launcher
+    fun handlePairing(pairing: PairingLink) {
+        if (viewModel.uiState.value.isAppPaused) {
+            Toast.makeText(context, "Resume androp before pairing", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (pairing.isBluetoothPairing) {
+            // BLE bootstrap must never run the Wi-Fi socket path or save unverified credentials.
+            pendingBluetoothPairing = pairing
+            return
+        }
+        viewModel.updateIpAddress(pairing.host)
+        viewModel.updatePort(pairing.port.toString())
+        viewModel.updateManualPcName(pairing.name.orEmpty())
+        viewModel.updateManualIsPlus(pairing.plus)
+        viewModel.updateSymmetricKey(pairing.key)
+        // Compose's uiState is a snapshot: connect to this scan, not the previous form values.
+        connect(
+            ipAddress = pairing.host,
+            port = pairing.port.toString(),
+            symmetricKey = pairing.key,
+            deviceName = pairing.name,
+            deviceIsPlus = pairing.plus
+        )
+    }
+
+    // Both scanner results and external pairing links use the same transport selection.
     val qrScannerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val qrCode = result.data?.getStringExtra("QR_CODE")
-            if (!qrCode.isNullOrEmpty()) {
-                // Parse the QR code (expected format: androp://ip:port?name=...&plus=...&key=...)
-                try {
-                    val uri = qrCode.toUri()
-
-                    // Handle potential multiple IPs in host part (e.g., ip1,ip2,ip3)
-                    var ip = uri.host ?: ""
-                    var port = uri.port.takeIf { it != -1 }?.toString() ?: ""
-
-                    if (ip.isEmpty() || port.isEmpty()) {
-                        // Fallback manual parsing if URI host is null due to commas
-                        val authority = qrCode.substringAfter("://").substringBefore("?")
-                        if (authority.contains(":")) {
-                            ip = authority.substringBeforeLast(":")
-                            port = authority.substringAfterLast(":")
-                        } else {
-                            ip = authority
-                        }
-                    }
-
-                    // Parse query parameters
-                    var pcName: String? = null
-                    var isPlus = false
-                    var symmetricKey: String? = null
-
-                    val queryPart = uri.toString().substringAfter('?', "")
-                    if (queryPart.isNotEmpty()) {
-                        val params = queryPart.split('?')
-                        val paramMap = params.associate { param ->
-                            val parts = param.split('=', limit = 2)
-                            val key = parts.getOrNull(0) ?: ""
-                            val value = parts.getOrNull(1) ?: ""
-                            key to value
-                        }
-                        pcName = paramMap["name"]?.let { URLDecoder.decode(it, "UTF-8") }
-                        isPlus = paramMap["plus"]?.toBooleanStrictOrNull() ?: false
-                        symmetricKey = paramMap["key"]
-                    }
-
-                    if (ip.isNotEmpty() && port.isNotEmpty()) {
-                        // Update UI state with scanned values
-                        viewModel.updateIpAddress(ip)
-                        viewModel.updatePort(port)
-                        viewModel.updateManualPcName(pcName ?: "")
-                        viewModel.updateManualIsPlus(isPlus)
-                        if (!symmetricKey.isNullOrEmpty()) {
-                            viewModel.updateSymmetricKey(symmetricKey)
-                        }
-
-                        // Trigger connection
-                        scope.launch {
-                            delay(300)  // Brief delay to ensure UI updates
-                            connect()
-                        }
-                    } else {
-                        Toast.makeText(context, "Invalid QR code format", Toast.LENGTH_SHORT).show()
-                    }
-                } catch (e: Exception) {
-                    Toast.makeText(
-                        context,
-                        "Failed to parse QR code: ${e.message}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
+            val pairing = PairingLink.parse(result.data?.getStringExtra("QR_CODE"))
+            if (pairing == null) {
+                Toast.makeText(context, "Invalid pairing QR code. Scan the code shown in androp on your Mac.", Toast.LENGTH_LONG).show()
+            } else {
+                handlePairing(pairing)
             }
         }
+    }
+
+    LaunchedEffect(initialPairing) {
+        if (initialPairing != null && !handledInitialPairing) {
+            handledInitialPairing = true
+            handlePairing(initialPairing)
+        }
+    }
+
+    pendingBluetoothPairing?.let { pairing ->
+        BluetoothQrPairingDialog(
+            pairing = pairing,
+            paused = uiState.isAppPaused,
+            onConnectingChanged = { connecting ->
+                viewModel.setConnectionStatus(
+                    isConnected = WebSocketUtil.isConnected(),
+                    isConnecting = connecting
+                )
+            },
+            onConnected = {
+                viewModel.updateManualPcName(pairing.name.orEmpty())
+                viewModel.updateSymmetricKey(pairing.key)
+                viewModel.setConnectionStatus(isConnected = true, isConnecting = false)
+                viewModel.setResponse("Connected over Bluetooth")
+                pendingBluetoothPairing = null
+            },
+            onDismiss = { pendingBluetoothPairing = null },
+            onScanAgain = {
+                pendingBluetoothPairing = null
+                qrScannerLauncher.launch(Intent(context, QRScannerActivity::class.java))
+            }
+        )
     }
 
 
@@ -976,7 +984,9 @@ fun AirSyncMainScreen(
                                                         connect(
                                                             ipAddress = networkAwareDevice.ipAddress,
                                                             port = networkAwareDevice.port,
-                                                            symmetricKey = networkAwareDevice.symmetricKey
+                                                            symmetricKey = networkAwareDevice.symmetricKey,
+                                                            deviceName = networkAwareDevice.name,
+                                                            deviceIsPlus = networkAwareDevice.isPlus
                                                         )
                                                     } else {
                                                         // Fallback to legacy stored device
@@ -986,7 +996,9 @@ fun AirSyncMainScreen(
                                                         connect(
                                                             ipAddress = device.ipAddress,
                                                             port = device.port,
-                                                            symmetricKey = device.symmetricKey
+                                                            symmetricKey = device.symmetricKey,
+                                                            deviceName = device.name,
+                                                            deviceIsPlus = device.isPlus
                                                         )
                                                     }
                                                 }
@@ -1104,7 +1116,8 @@ fun AirSyncMainScreen(
                                                                             deviceId = device.id,
                                                                             ipAddress = bestIp,
                                                                             port = devicePort,
-                                                                            symmetricKey = savedKey ?: uiState.symmetricKey
+                                                                            symmetricKey = savedKey ?: uiState.symmetricKey,
+                                                                            deviceName = deviceName
                                                                         )
                                                                     }
                                                                     .padding(

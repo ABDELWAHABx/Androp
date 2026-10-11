@@ -6,6 +6,7 @@ trap 'rm -rf "$test_dir"' EXIT
 bash "$test_root/Tests/run-preference-persistence-tests.sh"
 bash "$test_root/Tests/run-mac-power-policy-tests.sh"
 bash "$test_root/Tests/run-ble-lifecycle-tests.sh"
+bash "$test_root/Tests/run-ble-pairing-tests.sh"
 bash "$test_root/Tests/run-ble-control-tests.sh"
 bash "$test_root/Tests/run-scrcpy-packet-tests.sh"
 bash "$test_root/Tests/run-remote-input-tests.sh"

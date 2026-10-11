@@ -186,7 +186,7 @@ class QuickConnectManager: ObservableObject {
     }
     
     private func getCurrentMacPort() -> UInt16? {
-        return WebSocketServer.shared.localPort
+        return WebSocketServer.shared.getListeningNetworkEndpoint()?.port
     }
     
     private func saveDeviceHistoryToDisk() {
@@ -264,14 +264,14 @@ class QuickConnectManager: ObservableObject {
     /// Selects the best local IP to present to the target device
     /// Prioritizes IPs that match the target's subnet/prefix (e.g. Tailscale 100.x)
     private func getBestLocalIP(for targetIP: String) -> String? {
-        let adapters = WebSocketServer.shared.getAvailableNetworkAdapters()
+        guard let endpoint = WebSocketServer.shared.getListeningNetworkEndpoint() else { return nil }
+        let adapters = endpoint.adapters
         let allIPs = adapters.map { $0.address }
         
         // 1. If user manually selected an adapter, MUST use that
         if let selected = AppState.shared.selectedNetworkAdapterName {
-            if let match = adapters.first(where: { $0.name == selected }) {
-                return match.address
-            }
+            // A changed preference may still be waiting for its listener to bind.
+            return adapters.first(where: { $0.name == selected })?.address
         }
         
         // 2. If valid target IP, try to match prefix

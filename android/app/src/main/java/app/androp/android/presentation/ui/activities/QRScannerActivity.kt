@@ -167,7 +167,7 @@ private fun QRScannerScreen(
                     lastScannedCode = qrData
                     scanned = true
                     scanMessage = "QR Code detected!"
-                    Log.d("QrScanner", "QR detected in screen: $qrData")
+                    Log.d("QrScanner", "QR detected in screen")
 
                     // Trigger 3-step haptic feedback on successful scan
                     HapticUtil.performSuccess(haptics)
@@ -277,7 +277,7 @@ fun QrCodeScannerView(
                             if (result != lastScanned && result.isNotEmpty()) {
                                 lastScanned = result
                                 onActiveScanningChanged(true)
-                                Log.d("QrScanner", "QR scanned, calling callback with: $result")
+                                Log.d("QrScanner", "QR scan completed")
                                 onQrScanned(result)
                             }
                         }
@@ -328,7 +328,7 @@ private fun processQrImage(
                         for (barcode in barcodes) {
                             val rawValue = barcode.rawValue
                             if (rawValue != null && rawValue.isNotEmpty()) {
-                                Log.d("QrScanner", "QR Code detected: $rawValue")
+                                Log.d("QrScanner", "QR code detected")
                                 onResult(rawValue)
                                 return@addOnSuccessListener
                             }

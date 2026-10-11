@@ -11,47 +11,88 @@ import QRCode
 import LocalAuthentication
 
 class QRConnectionManager: ObservableObject {
+    enum PairingTransport: String, CaseIterable { case bluetooth = "Bluetooth", wifi = "Wi-Fi" }
     static let shared = QRConnectionManager()
     
     @Published var qrImage: CGImage?
     @Published var isUnlocked = false
-    @Published var hasValidIP = true
+    @Published var transport: PairingTransport = .bluetooth {
+        didSet {
+            guard transport != oldValue else { return }
+            BLECentralManager.shared.endQRPairing()
+            generateQRAsync()
+        }
+    }
+    @Published var pairingMessage: String?
     @Published var copyStatus: String?
     @Published var showConfirmReset = false
     
     private var unlockTimer: Timer?
+    private var generation = UUID()
+    private var authenticationRequest: UUID?
+    private var pairingKey: Data?
+    private var cancellables = Set<AnyCancellable>()
+
+    private init() {
+        AppState.shared.$isSyncPaused.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] paused in
+            if paused { self?.cleanUpTimer() }
+        }.store(in: &cancellables)
+        AppState.shared.$isBLEEnabled.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] enabled in
+            guard let self = self, self.transport == .bluetooth else { return }
+            if !enabled { self.cleanUpTimer() }
+            else if self.isUnlocked { self.generateQRAsync() }
+        }.store(in: &cancellables)
+        AppState.shared.$webSocketStatus.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in
+            guard let self = self, self.transport == .wifi, self.isUnlocked else { return }
+            self.generateQRAsync()
+        }.store(in: &cancellables)
+        WebSocketServer.shared.$symmetricKey.dropFirst().receive(on: DispatchQueue.main).sink { [weak self] _ in
+            guard let self = self, self.isUnlocked else { return }
+            let currentKey = WebSocketServer.shared.getSymmetricKeyBase64().flatMap { Data(base64Encoded: $0) }
+            if self.pairingKey != currentKey { self.generateQRAsync() }
+        }.store(in: &cancellables)
+    }
     
     func generateQRAsync() {
-        let ip = WebSocketServer.shared
-            .getLocalIPAddress(
-                adapterName: AppState.shared.selectedNetworkAdapterName
-            )
-
-        // Check if we have a valid IP address
-        guard let validIP = ip else {
-            DispatchQueue.main.async {
-                self.hasValidIP = false
-                self.qrImage = nil
-            }
+        guard isUnlocked else { return }
+        generation = UUID()
+        let revision = generation
+        qrImage = nil
+        pairingMessage = nil
+        guard !AppState.shared.isSyncPaused,
+              let encodedKey = WebSocketServer.shared.getSymmetricKeyBase64(), let key = Data(base64Encoded: encodedKey) else {
+            pairingMessage = "Resume androp to pair your phone."
             return
         }
-
-        // If we have a valid IP, proceed with QR generation
-        DispatchQueue.main.async {
-            self.hasValidIP = true
-            self.qrImage = nil // Reset to show progress view
+        let text: String
+        if transport == .bluetooth {
+            guard AppState.shared.isBLEEnabled,
+                  let qr = BLEPairingProtocol.qrText(pairing: revision, key: key, name: AppState.shared.myDevice?.name ?? "My Mac"),
+                  BLECentralManager.shared.beginQRPairing(id: revision, key: key) else {
+                pairingMessage = "Enable Bluetooth in androp to pair your phone."
+                return
+            }
+            text = qr
+        } else {
+            BLECentralManager.shared.endQRPairing()
+            guard case .started = AppState.shared.webSocketStatus,
+                  let endpoint = WebSocketServer.shared.getListeningNetworkEndpoint(),
+                  let qr = generateQRText(ip: endpoint.adapters.map(\.address).prefix(16).joined(separator: ","),
+                      port: endpoint.port, name: AppState.shared.myDevice?.name, key: encodedKey) else {
+                pairingMessage = "Wi-Fi is not ready. Connect your Mac to a network and wait for androp to start."
+                return
+            }
+            text = qr
         }
-
-        let text = generateQRText(
-            ip: validIP,
-            port: UInt16(AppState.shared.myDevice?.port ?? Int(Defaults.serverPort)),
-            name: AppState.shared.myDevice?.name,
-            key: WebSocketServer.shared.getSymmetricKeyBase64() ?? ""
-        ) ?? "That doesn't look right, QR Generation failed"
-
+        pairingKey = key
+        unlockTimer?.invalidate()
+        unlockTimer = Timer.scheduledTimer(withTimeInterval: BLEPairingProtocol.windowDuration, repeats: false) { [weak self] _ in
+            self?.cleanUpTimer()
+        }
         Task {
             if let cgImage = await QRCodeGenerator.generateQRCode(for: text) {
                 DispatchQueue.main.async {
+                    guard self.generation == revision, self.isUnlocked, !AppState.shared.isSyncPaused else { return }
                     self.qrImage = cgImage
                 }
             }
@@ -59,6 +100,8 @@ class QRConnectionManager: ObservableObject {
     }
     
     func authenticateUser() {
+        let request = UUID()
+        authenticationRequest = request
         let context = LAContext()
         var error: NSError?
         
@@ -66,17 +109,13 @@ class QRConnectionManager: ObservableObject {
             let reason = "Authenticate to reveal connection credentials"
             context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { success, authenticationError in
                 DispatchQueue.main.async {
+                    guard self.authenticationRequest == request else { return }
                     if success {
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                             self.isUnlocked = true
                         }
                         
-                        self.unlockTimer?.invalidate()
-                        self.unlockTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: false) { [weak self] _ in
-                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                self?.isUnlocked = false
-                            }
-                        }
+                        self.generateQRAsync()
                     }
                 }
             }
@@ -85,18 +124,20 @@ class QRConnectionManager: ObservableObject {
             withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                 self.isUnlocked = true
             }
-            self.unlockTimer?.invalidate()
-            self.unlockTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: false) { [weak self] _ in
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                    self?.isUnlocked = false
-                }
-            }
+            self.generateQRAsync()
         }
     }
     
     func cleanUpTimer() {
+        authenticationRequest = nil
+        generation = UUID()
         unlockTimer?.invalidate()
         unlockTimer = nil
+        isUnlocked = false
+        qrImage = nil
+        pairingKey = nil
+        pairingMessage = nil
+        BLECentralManager.shared.endQRPairing()
     }
     
     func copyToClipboard(_ text: String) {

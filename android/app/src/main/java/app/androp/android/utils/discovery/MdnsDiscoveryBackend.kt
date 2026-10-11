@@ -268,16 +268,26 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
             }
             val id = txtRecords["id"]?.let { String(it, Charsets.UTF_8) } ?: resolvedInfo.serviceName
             val name = txtRecords["name"]?.let { String(it, Charsets.UTF_8) } ?: resolvedInfo.serviceName
-            val port = txtRecords["port"]?.let { String(it, Charsets.UTF_8).toIntOrNull() } ?: resolvedInfo.port
-
-            val hostAddress = resolvedInfo.host?.hostAddress ?: return
+            val port = if (txtRecords.containsKey("port")) {
+                txtRecords["port"]?.toString(Charsets.UTF_8)?.toIntOrNull() ?: return
+            } else resolvedInfo.port
+            val addresses = MdnsEndpointPolicy.addresses(
+                txtRecords["ips"], txtRecords.containsKey("ips"), resolvedInfo.host?.hostAddress, port
+            )
+            if (addresses.isEmpty()) {
+                // A replacement TXT record can withdraw previously usable endpoints.
+                serviceNameToId.remove(resolvedInfo.serviceName)?.let { previousId ->
+                    _discoveredDevices.value = _discoveredDevices.value.filter { it.id != previousId }
+                }
+                return
+            }
             
             serviceNameToId[resolvedInfo.serviceName] = id
 
             val device = DiscoveredDevice(
                 id = id,
                 name = name,
-                ips = setOf(hostAddress),
+                ips = addresses,
                 port = port,
                 type = "mac", // Mac side is server
                 lastSeen = System.currentTimeMillis(),
@@ -294,15 +304,8 @@ class MdnsDiscoveryBackend : DiscoveryBackend {
         val currentList = _discoveredDevices.value.toMutableList()
         val index = currentList.indexOfFirst { it.id == device.id }
         if (index != -1) {
-            val existing = currentList[index]
-            val updatedIps = existing.ips.toMutableSet()
-            updatedIps.addAll(device.ips)
-            currentList[index] = existing.copy(
-                ips = updatedIps,
-                lastSeen = System.currentTimeMillis(),
-                name = device.name,
-                discoverySource = DiscoverySource.MDNS
-            )
+            // A refreshed listener may bind a different adapter/port. Never retain stale endpoints.
+            currentList[index] = device
         } else {
             currentList.add(device)
         }

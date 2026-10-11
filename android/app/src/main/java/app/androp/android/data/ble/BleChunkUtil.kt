@@ -84,7 +84,7 @@ object BleChunkUtil {
     /**
      * Helper class to reassemble chunks as they arrive.
      */
-    class Reassembler {
+    class Reassembler(private val maxMessageBytes: Int = MAX_MESSAGE_BYTES) {
         private val chunks = mutableMapOf<Int, ByteArray>()
         private var totalChunks = -1
         private var byteCount = 0
@@ -105,7 +105,7 @@ object BleChunkUtil {
                 return null
             }
             val payload = getPayload(packet)
-            if (byteCount + payload.size > MAX_MESSAGE_BYTES) {
+            if (total > maxMessageBytes || byteCount + payload.size > maxMessageBytes) {
                 clear()
                 return null
             }

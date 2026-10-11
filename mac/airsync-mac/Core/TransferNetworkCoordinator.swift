@@ -258,14 +258,22 @@ final class TransferNetworkCoordinator: NSObject, ObservableObject, CLLocationMa
     private func sendEndpoint(_ value: Session) {
         guard session === value, valid(value), !value.connected, let address = value.address,
               value.endpointAttempts < 3 else { return }
-        value.endpointAttempts += 1
-        let port = AppState.shared.myDevice?.port ?? Int(Defaults.serverPort)
-        if (1...65535).contains(port), let data = try? JSONSerialization.data(withJSONObject: ["type": "connectNetwork", "data": ["ip": address, "port": port]]), let text = String(data: data, encoding: .utf8) {
-            _ = BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: text)
+        // Joining a hotspot can trigger a listener rebind. Never send the configured
+        // port before it actually listens, or consume a retry while it is starting.
+        var retryDelay: TimeInterval = 2
+        if let endpoint = WebSocketServer.shared.getListeningNetworkEndpoint(),
+           endpoint.adapters.contains(where: { $0.address == address }),
+           let data = try? JSONSerialization.data(withJSONObject: ["type": "connectNetwork", "data": ["ip": address, "port": Int(endpoint.port)]]),
+           let text = String(data: data, encoding: .utf8),
+           BLECentralManager.shared.writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: text) {
+            value.endpointAttempts += 1
+            retryDelay = 17
         }
+        // The original 120-second setup deadline still bounds these readiness checks.
+        endpointRetry?.cancel()
         let retry = DispatchWorkItem { [weak self] in self?.sendEndpoint(value) }
         endpointRetry = retry
-        DispatchQueue.main.asyncAfter(deadline: .now() + 17, execute: retry)
+        DispatchQueue.main.asyncAfter(deadline: .now() + retryDelay, execute: retry)
     }
 
     @discardableResult

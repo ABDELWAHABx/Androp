@@ -149,9 +149,15 @@ object SyncManager {
         }
     }
 
-    fun performInitialSync(context: Context) {
+    internal fun performInitialSync(
+        context: Context,
+        pairingKey: String?,
+        targetIpAddress: String,
+        isCurrent: () -> Boolean,
+        send: (String) -> Boolean
+    ) {
         scope.launch {
-            if (BackgroundWorkController.isPaused || DataStoreManager.getInstance(context).isAppPaused().first()) return@launch
+            if (!isCurrent() || BackgroundWorkController.isPaused || DataStoreManager.getInstance(context).isAppPaused().first()) return@launch
             Log.d(TAG, "Performing initial sync sequence")
 
             try {
@@ -162,7 +168,6 @@ object SyncManager {
                     val activity = context as? app.androp.android.MainActivity
                     activity?.initializeAdbDiscovery()
                     Log.d(TAG, "ADB discovery is running")
-                    delay(1000)
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not access ADB discovery: ${e.message}")
                 }
@@ -209,10 +214,10 @@ object SyncManager {
                 Log.d(TAG, "Discovered ADB ports: $adbPorts")
 
                 val deviceId = DeviceInfoUtil.getDeviceId(context)
-                val symmetricKey =
-                    dataStoreManager.getLastConnectedDevice().first()?.symmetricKey ?: ""
+                // The QR key may not be persisted until macInfo authenticates this socket.
+                // Never announce the previous Mac's BLE token during a new pairing.
                 val bleAuthToken =
-                    app.androp.android.data.ble.BleTransportBridge.deriveAuthToken(symmetricKey)
+                    app.androp.android.data.ble.BleTransportBridge.deriveAuthToken(pairingKey.orEmpty())
 
                 val liteDeviceInfoJson = JsonUtil.createDeviceInfoJson(
                     id = deviceId,
@@ -223,9 +228,9 @@ object SyncManager {
                     wallpaperBase64 = null,
                     adbPorts = adbPorts,
                     bleAuthToken = bleAuthToken,
-                    targetIpAddress = WebSocketUtil.currentIpAddress
+                    targetIpAddress = targetIpAddress
                 )
-                if (WebSocketUtil.sendMessage(liteDeviceInfoJson)) {
+                if (send(liteDeviceInfoJson)) {
                     Log.d(TAG, "Lite device info sent to trigger macInfo (BLE token included)")
                 } else {
                     Log.e(TAG, "Failed to send lite device info")
@@ -233,9 +238,10 @@ object SyncManager {
 
                 // Optionally send full device info with wallpaper a bit later, but don't block handshake
                 launch {
-                    if (BackgroundWorkController.isPaused) return@launch
+                    if (!isCurrent() || BackgroundWorkController.isPaused) return@launch
                     try {
                         delay(1500)
+                        if (!isCurrent() || BackgroundWorkController.isPaused) return@launch
                         val wallpaperBase64 = try {
                             WallpaperUtil.getWallpaperAsBase64(context)
                         } catch (_: Exception) {
@@ -256,9 +262,9 @@ object SyncManager {
                             wallpaperBase64 = wallpaperBase64,
                             adbPorts = currentAdbPorts,
                             bleAuthToken = bleAuthToken,
-                            targetIpAddress = WebSocketUtil.currentIpAddress
+                            targetIpAddress = targetIpAddress
                         )
-                        if (WebSocketUtil.sendMessage(fullDeviceInfoJson)) {
+                        if (send(fullDeviceInfoJson)) {
                             Log.d(
                                 TAG,
                                 "Full device info sent with wallpaper: ${if (wallpaperBase64 != null) "included" else "not available"}"
@@ -274,7 +280,7 @@ object SyncManager {
                 // 2. Send device status (respect now playing setting)
                 val includeNowPlaying = dataStoreManager.getSendNowPlayingEnabled().first()
                 val statusJson = DeviceInfoUtil.generateDeviceStatusJson(context)
-                if (WebSocketUtil.sendMessage(statusJson)) {
+                if (send(statusJson)) {
                     Log.d(TAG, "Device status sent")
                     // Update cache
                     lastAudioInfo = DeviceInfoUtil.getAudioInfo(context, includeNowPlaying)

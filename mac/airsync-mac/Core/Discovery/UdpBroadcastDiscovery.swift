@@ -83,6 +83,13 @@ class UdpBroadcastDiscovery: ObservableObject {
     
     private func startMonitoring() {
         setupNetworkPathMonitor()
+        AppState.shared.$webSocketStatus
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                guard case .started = status else { return }
+                self?.broadcastBurst()
+            }
+            .store(in: &cancellables)
     }
     
     private func setupNetworkPathMonitor() {
@@ -105,6 +112,7 @@ class UdpBroadcastDiscovery: ObservableObject {
     }
     
     private func stopMonitoring() {
+        cancellables.removeAll()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         networkMonitor?.cancel()
         networkMonitor = nil
@@ -113,7 +121,8 @@ class UdpBroadcastDiscovery: ObservableObject {
     // MARK: - Broadcasting
     
     func broadcastBurst() {
-        guard isListening, !AppState.shared.isSyncPaused else { return }
+        guard isListening, !AppState.shared.isSyncPaused,
+              WebSocketServer.shared.getListeningNetworkEndpoint() != nil else { return }
         print("[Discovery] Triggering broadcast burst")
         lastBroadcastTime = Date()
         
@@ -126,14 +135,14 @@ class UdpBroadcastDiscovery: ObservableObject {
     
     func broadcastPresence() {
         guard isListening, !AppState.shared.isSyncPaused else { return }
-        let adapters = WebSocketServer.shared.getAvailableNetworkAdapters()
-        guard !adapters.isEmpty else { return }
+        guard let endpoint = WebSocketServer.shared.getListeningNetworkEndpoint() else { return }
+        let adapters = endpoint.adapters
         
         let knownPeerIPs = Set(QuickConnectManager.shared.lastConnectedDevices.values.map { $0.ipAddress })
         let allIPs = adapters.map { $0.address }
         
         let info = AppState.shared.myDevice
-        let port = info?.port ?? Int(Defaults.serverPort)
+        let port = Int(endpoint.port)
         let name = info?.name ?? Host.current().localizedName ?? "Mac"
         let uuid = getStableUUID()
         
@@ -149,7 +158,7 @@ class UdpBroadcastDiscovery: ObservableObject {
         if let data = try? JSONSerialization.data(withJSONObject: payload),
            let jsonString = String(data: data, encoding: .utf8) {
             for adapter in adapters {
-                sendBroadcast(message: jsonString, sourceIP: adapter.address)
+                sendBroadcast(message: jsonString, sourceIP: adapter.address, endpointPort: endpoint.port, advertisedIPs: allIPs)
             }
         }
         
@@ -158,12 +167,12 @@ class UdpBroadcastDiscovery: ObservableObject {
             for peerIP in knownPeerIPs {
                 if allIPs.contains(peerIP) { continue }
                 guard DiscoveryManager.shared.isIPOnLocalNetwork(peerIP) else { continue }
-                sendUnicast(message: jsonString, targetIP: peerIP)
+                sendUnicast(message: jsonString, targetIP: peerIP, endpointPort: endpoint.port, advertisedIPs: allIPs)
             }
         }
     }
     
-    private func sendBroadcast(message: String, sourceIP: String) {
+    private func sendBroadcast(message: String, sourceIP: String, endpointPort: UInt16, advertisedIPs: [String]) {
         let host = NWEndpoint.Host("255.255.255.255")
         let port = broadcastPort
         
@@ -174,10 +183,17 @@ class UdpBroadcastDiscovery: ObservableObject {
         
         let connection = NWConnection(host: host, port: port, using: parameters)
         
-        connection.stateUpdateHandler = { [weak connection] state in
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let connection = connection else { return }
             switch state {
             case .ready:
+                guard let self, self.isListening, !AppState.shared.isSyncPaused,
+                      let current = WebSocketServer.shared.getListeningNetworkEndpoint(),
+                      current.port == endpointPort,
+                      Set(advertisedIPs).isSubset(of: Set(current.adapters.map(\.address))) else {
+                    connection.cancel()
+                    return
+                }
                 connection.send(content: message.data(using: .utf8), completion: .contentProcessed({ _ in
                     connection.cancel()
                 }))
@@ -194,16 +210,23 @@ class UdpBroadcastDiscovery: ObservableObject {
         queue.asyncAfter(deadline: .now() + 2) { [weak connection] in connection?.cancel() }
     }
     
-    private func sendUnicast(message: String, targetIP: String) {
+    private func sendUnicast(message: String, targetIP: String, endpointPort: UInt16, advertisedIPs: [String]) {
         let host = NWEndpoint.Host(targetIP)
         let port = broadcastPort
         let parameters = NWParameters.udp
         let connection = NWConnection(host: host, port: port, using: parameters)
         
-        connection.stateUpdateHandler = { [weak connection] state in
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let connection = connection else { return }
             switch state {
             case .ready:
+                guard let self, self.isListening, !AppState.shared.isSyncPaused,
+                      let current = WebSocketServer.shared.getListeningNetworkEndpoint(),
+                      current.port == endpointPort,
+                      Set(advertisedIPs).isSubset(of: Set(current.adapters.map(\.address))) else {
+                    connection.cancel()
+                    return
+                }
                 connection.send(content: message.data(using: .utf8), completion: .contentProcessed({ _ in
                     connection.cancel()
                 }))

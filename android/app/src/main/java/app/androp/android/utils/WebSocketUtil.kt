@@ -142,6 +142,12 @@ object WebSocketUtil {
         // Cache application context for future cleanup even if callers don't pass context on disconnect
         appContext = context.applicationContext
 
+        val decodedKey = try {
+            symmetricKey?.let { CryptoUtil.decodeKey(it) }
+        } catch (_: IllegalArgumentException) {
+            onConnectionStatus?.invoke(false)
+            return
+        }
         val epoch = synchronized(connectionLock) {
             if (BackgroundWorkController.isPaused || authorization?.invoke() == false || isConnected.get() || isConnecting.get()) {
                 Log.d(TAG, "Already connected, connecting, or authorization expired")
@@ -150,6 +156,7 @@ object WebSocketUtil {
             if (manualAttempt) manualReconnectSuppressed.set(false)
             else if (manualReconnectSuppressed.get()) return
             isConnecting.set(true)
+            currentSymmetricKey = decodedKey
             val epoch = connectionEpoch.advance()
             mutableQuickShareAdvertisement.value = quickShareEndpointCache.begin(epoch)
             epoch
@@ -179,8 +186,12 @@ object WebSocketUtil {
 
             if (ipList.isEmpty()) {
                 Log.e(TAG, "No valid IP addresses provided")
-                isConnecting.set(false)
-                onConnectionStatus?.invoke(false)
+                synchronized(connectionLock) {
+                    if (connectionEpoch.isCurrent(epoch)) {
+                        isConnecting.set(false)
+                        onConnectionStatus?.invoke(false)
+                    }
+                }
                 return@launch
             }
 
@@ -188,8 +199,12 @@ object WebSocketUtil {
             val localIps = ipList.filter { isLocalNetwork(context, it) }
             if (localIps.isEmpty()) {
                 Log.e(TAG, "None of the provided IP addresses are in the local network: $ipAddress")
-                isConnecting.set(false)
-                onConnectionStatus?.invoke(false)
+                synchronized(connectionLock) {
+                    if (connectionEpoch.isCurrent(epoch)) {
+                        isConnecting.set(false)
+                        onConnectionStatus?.invoke(false)
+                    }
+                }
                 return@launch
             }
 
@@ -197,9 +212,6 @@ object WebSocketUtil {
                 if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
                 return@launch
             }
-            handshakeCompleted.set(false)
-            notifyConnectionStatusListeners(false)
-
             // Reset manual disconnect flag on manual attempt
             if (manualAttempt) {
                 try {
@@ -225,388 +237,413 @@ object WebSocketUtil {
                     }
                 }
             }
-            currentIpAddress = ipAddress
-            currentPort = port
-            currentSymmetricKey = try {
-                symmetricKey?.let { CryptoUtil.decodeKey(it) }
-            } catch (_: IllegalArgumentException) {
-                isConnecting.set(false)
-                onConnectionStatus?.invoke(false)
+            synchronized(connectionLock) {
+                // DataStore reads/writes above can suspend across a manual Stop or a newer attempt.
+                if (!isActive || !connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) return@launch
+                handshakeCompleted.set(false)
                 notifyConnectionStatusListeners(false)
-                return@launch
-            }
-            onConnectionStatusChanged = onConnectionStatus
-            onMessageReceived = onMessage
+                currentIpAddress = ipAddress
+                currentPort = port
+                onConnectionStatusChanged = onConnectionStatus
+                onMessageReceived = onMessage
 
-            try {
-                if (client == null) {
-                    client = createClient()
-                }
+                try {
+                    if (client == null) {
+                        client = createClient()
+                    }
 
-                connectionAttemptJob?.cancel()
-                connectionStarted.set(false)
-                failedAttempts.set(0)
+                    connectionAttemptJob?.cancel()
+                    connectionStarted.set(false)
+                    failedAttempts.set(0)
 
-                // Overall timeout for all parallel connection attempts
-                connectionAttemptJob = scope.launch {
-                    delay(15000) // 15 seconds global timeout
-                    if (connectionEpoch.isCurrent(epoch) && isConnecting.get() && !isSocketOpen.get()) {
-                        connectionEpoch.advance()
-                        pendingSockets.forEach { it.cancel() }
-                        pendingSockets.clear()
-                        Log.w(TAG, "All connection attempts timed out")
-                        isConnecting.set(false)
-                        onConnectionStatusChanged?.invoke(false)
-                        notifyConnectionStatusListeners(false)
-                        tryStartAutoReconnect(context)
-                        try {
-                            AirSyncWidgetProvider.updateAllWidgets(context)
-                        } catch (_: Exception) {
+                    // Overall timeout for all parallel connection attempts
+                    connectionAttemptJob = scope.launch {
+                        delay(15000) // 15 seconds global timeout
+                        synchronized(connectionLock) {
+                            if (connectionEpoch.isCurrent(epoch) && isConnecting.get() && !isSocketOpen.get()) {
+                                connectionEpoch.advance()
+                                pendingSockets.forEach { it.cancel() }
+                                pendingSockets.clear()
+                                Log.w(TAG, "All connection attempts timed out")
+                                isConnecting.set(false)
+                                onConnectionStatusChanged?.invoke(false)
+                                notifyConnectionStatusListeners(false)
+                                tryStartAutoReconnect(context)
+                                try {
+                                    AirSyncWidgetProvider.updateAllWidgets(context)
+                                } catch (_: Exception) {
+                                }
+                            }
                         }
                     }
-                }
 
-                // Try each IP in parallel
-                localIps.forEach { ip ->
-                    // Handle IPv6 addresses, wrapping them in brackets for URI parsing.
-                    // Also handle link-local scope zones (e.g. fe80::18cd:e714:19a7:2c21%wlan0 -> [fe80::18cd:e714:19a7:2c21])
-                    val formattedIp = if (ip.contains(":")) {
-                        var cleanIp = ip
-                        if (cleanIp.contains("%")) {
-                            cleanIp = cleanIp.substringBefore("%")
-                        }
-                        if (!cleanIp.startsWith("[")) {
-                            "[$cleanIp]"
+                    // Try each IP in parallel
+                    localIps.forEach { ip ->
+                        // Handle IPv6 addresses, wrapping them in brackets for URI parsing.
+                        // Also handle link-local scope zones (e.g. fe80::18cd:e714:19a7:2c21%wlan0 -> [fe80::18cd:e714:19a7:2c21])
+                        val formattedIp = if (ip.contains(":")) {
+                            var cleanIp = ip
+                            if (cleanIp.contains("%")) {
+                                cleanIp = cleanIp.substringBefore("%")
+                            }
+                            if (!cleanIp.startsWith("[")) {
+                                "[$cleanIp]"
+                            } else {
+                                cleanIp
+                            }
                         } else {
-                            cleanIp
+                            ip
                         }
-                    } else {
-                        ip
-                    }
-                    val url = "ws://$formattedIp:$port/socket"
-                    Log.d(TAG, "Attempting connection to $url")
+                        val url = "ws://$formattedIp:$port/socket"
+                        Log.d(TAG, "Attempting connection to $url")
 
-                    run {
-                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false || isConnected.get() || connectionStarted.get()) return@run
+                        run {
+                            if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false || isConnected.get() || connectionStarted.get()) return@run
 
-                        val request = Request.Builder()
-                            .url(url)
-                            .build()
+                            val request = Request.Builder()
+                                .url(url)
+                                .build()
 
-                        val perAttemptClient = client!!.newBuilder()
-                            .connectTimeout(5, TimeUnit.SECONDS)
-                            .readTimeout(
-                                0,
-                                TimeUnit.MILLISECONDS
-                            ) // websockets should have no read timeout
-                            .build()
-
-                        val listener = object : WebSocketListener() {
-                            override fun onOpen(webSocket: WebSocket, response: Response) {
-                                synchronized(connectionLock) {
-                                    if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) {
-                                        pendingSockets.remove(webSocket)
-                                        webSocket.cancel()
-                                        return
+                            val perAttemptClient = client!!.newBuilder()
+                                .apply {
+                                    LocalSocketNetwork.forAddress(context, ip)?.let { network ->
+                                        socketFactory(network.socketFactory)
                                     }
-                                    if (isConnected.get() || !connectionStarted.compareAndSet(
-                                            false,
-                                            true
-                                        )
-                                    ) {
-                                        pendingSockets.remove(webSocket)
-                                        webSocket.cancel()
-                                        return
-                                    }
-                                    Log.d(TAG, "WebSocket connected to $url")
+                                }
+                                .connectTimeout(5, TimeUnit.SECONDS)
+                                .readTimeout(
+                                    0,
+                                    TimeUnit.MILLISECONDS
+                                ) // websockets should have no read timeout
+                                .build()
 
-                                    connectionAttemptJob?.cancel()
-                                    WebSocketUtil.webSocket = webSocket
-                                    pendingSockets.filter { it != webSocket }.forEach { it.cancel() }
-                                    pendingSockets.clear()
-                                    currentIpAddress = ip // Store the successful IP
-                                    isSocketOpen.set(true)
-                                    updateConnectedStatus(false)
-                                    isConnecting.set(true)
+                            val listener = object : WebSocketListener() {
+                                override fun onOpen(webSocket: WebSocket, response: Response) {
+                                    synchronized(connectionLock) {
+                                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) {
+                                            pendingSockets.remove(webSocket)
+                                            webSocket.cancel()
+                                            return
+                                        }
+                                        if (isConnected.get() || !connectionStarted.compareAndSet(
+                                                false,
+                                                true
+                                            )
+                                        ) {
+                                            pendingSockets.remove(webSocket)
+                                            webSocket.cancel()
+                                            return
+                                        }
+                                        Log.d(TAG, "WebSocket connected to $url")
 
-                                    try {
-                                        SyncManager.performInitialSync(context)
-                                    } catch (_: Exception) {
-                                    }
+                                        connectionAttemptJob?.cancel()
+                                        WebSocketUtil.webSocket = webSocket
+                                        pendingSockets.filter { it != webSocket }.forEach { it.cancel() }
+                                        pendingSockets.clear()
+                                        currentIpAddress = ip // Store the successful IP
+                                        isSocketOpen.set(true)
+                                        updateConnectedStatus(false)
+                                        isConnecting.set(true)
 
-                                    handshakeTimeoutJob?.cancel()
-                                    handshakeTimeoutJob = scope.launch {
                                         try {
-                                            delay(HANDSHAKE_TIMEOUT_MS)
-                                            if (connectionEpoch.isCurrent(epoch) && !handshakeCompleted.get()) {
-                                                Log.w(TAG, "Handshake timed out")
-                                                updateConnectedStatus(false)
-                                                isConnecting.set(false)
-                                                try {
-                                                    webSocket.close(4001, "Handshake timeout")
-                                                } catch (_: Exception) {
-                                                }
-                                                if (manualAttempt) {
-                                                    try {
-                                                        val ds =
-                                                            app.androp.android.data.local.DataStoreManager(
-                                                                context
-                                                            )
-                                                        ds.setUserManuallyDisconnected(true)
-                                                    } catch (_: Exception) {
+                                            SyncManager.performInitialSync(
+                                                context, symmetricKey, ip,
+                                                isCurrent = {
+                                                    connectionEpoch.isCurrent(epoch) && !BackgroundWorkController.isPaused
+                                                },
+                                                send = { message ->
+                                                    // Initial sync is asynchronous: never send an old handshake
+                                                    // through a replacement socket or the BLE fallback.
+                                                    synchronized(connectionLock) {
+                                                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused ||
+                                                            WebSocketUtil.webSocket !== webSocket || !isSocketOpen.get()) false
+                                                        else {
+                                                            val payload = currentSymmetricKey?.let { CryptoUtil.encryptMessage(message, it) }
+                                                                ?: if (currentSymmetricKey == null) message else null
+                                                            payload != null && webSocket.send(payload)
+                                                        }
                                                     }
                                                 }
-                                                onConnectionStatusChanged?.invoke(false)
-                                                notifyConnectionStatusListeners(false)
-                                                onHandshakeTimeout?.invoke()
+                                            )
+                                        } catch (_: Exception) {
+                                        }
+
+                                        handshakeTimeoutJob?.cancel()
+                                        handshakeTimeoutJob = scope.launch {
+                                            try {
+                                                delay(HANDSHAKE_TIMEOUT_MS)
+                                                synchronized(connectionLock) {
+                                                    if (!connectionEpoch.isCurrent(epoch) || handshakeCompleted.get() ||
+                                                        WebSocketUtil.webSocket !== webSocket) return@synchronized
+                                                    Log.w(TAG, "Handshake timed out")
+                                                    connectionEpoch.advance()
+                                                    WebSocketUtil.webSocket = null
+                                                    webSocket.cancel()
+                                                    pendingSockets.forEach { it.cancel() }
+                                                    pendingSockets.clear()
+                                                    isSocketOpen.set(false)
+                                                    connectionStarted.set(false)
+                                                    updateConnectedStatus(false)
+                                                    isConnecting.set(false)
+                                                    currentIpAddress = null
+                                                    if (!app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) SyncManager.stopPeriodicSync()
+                                                    // A failed handshake is not a user pressing Disconnect.
+                                                    onConnectionStatusChanged?.invoke(false)
+                                                    onHandshakeTimeout?.invoke()
+                                                    try { ServiceManager.updateServiceState(context) } catch (_: Exception) { }
+                                                    tryStartAutoReconnect(context)
+                                                    try { AirSyncWidgetProvider.updateAllWidgets(context) } catch (_: Exception) { }
+                                                }
+                                            } catch (_: Exception) {
+                                            }
+                                        }
+                                    }
+                                }
+
+                                override fun onMessage(webSocket: WebSocket, text: String) {
+                                    synchronized(connectionLock) {
+                                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || webSocket != WebSocketUtil.webSocket) return
+                                        Log.d(TAG, "WebSocket message received (${text.length} characters)")
+                                        val key = currentSymmetricKey
+                                        val decryptedMessage = if (key != null) {
+                                            CryptoUtil.decryptMessage(text, key) ?: return
+                                        } else text
+
+                                        if (!handshakeCompleted.get()) {
+                                            val handshakeOk = try {
+                                                val json = org.json.JSONObject(decryptedMessage)
+                                                json.optString("type") == "macInfo"
+                                            } catch (_: Exception) {
+                                                false
+                                            }
+                                            if (handshakeOk) {
+                                                handshakeCompleted.set(true)
+                                                ClipboardSyncManager.onPeerChanged(symmetricKey)
+                                                try {
+                                                    AirSyncWidgetProvider.updateAllWidgets(context)
+                                                } catch (_: Exception) {
+                                                }
+                                                updateConnectedStatus(true)
+                                                isConnecting.set(false)
+                                                handshakeTimeoutJob?.cancel()
+                                                scope.launch {
+                                                     try {
+                                                         val ds =
+                                                             app.androp.android.data.local.DataStoreManager.getInstance(
+                                                                 context
+                                                             )
+                                                         if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || manualReconnectSuppressed.get()) return@launch
+                                                         val lastDevice = ds.getLastConnectedDevice().first()
+                                                         if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || manualReconnectSuppressed.get()) return@launch
+                                                         app.androp.android.service.AirSyncService.start(
+                                                             context,
+                                                             lastDevice?.name
+                                                         )
+                                                     } catch (e: Exception) {
+                                                         Log.e(
+                                                             TAG,
+                                                             "Error starting AirSyncService: ${e.message}"
+                                                         )
+                                                     }
+                                                 }
+                                                try {
+                                                    SyncManager.startPeriodicSync(context)
+                                                } catch (_: Exception) {
+                                                }
+
+                                                onConnectionStatusChanged?.invoke(true)
+                                                notifyConnectionStatusListeners(true)
+                                                cancelAutoReconnect()
                                                 try {
                                                     AirSyncWidgetProvider.updateAllWidgets(context)
                                                 } catch (_: Exception) {
                                                 }
                                             }
-                                        } catch (_: Exception) {
+                                            if (!handshakeCompleted.get()) return
                                         }
+
+                                        // Capture only decrypted messages on this exact live socket.
+                                        // BLE macInfo and asynchronous UI handlers cannot replace the endpoint.
+                                        if (key != null) {
+                                            val info = runCatching { org.json.JSONObject(decryptedMessage) }.getOrNull()
+                                            if (info?.optString("type") == "macInfo") {
+                                                val details = info.optJSONObject("data")
+                                                quickShareEndpointCache.update(epoch,
+                                                    details?.opt("quickShareEndpointSupported") == true,
+                                                    details?.opt("quickSharePort"))?.let { mutableQuickShareAdvertisement.value = it }
+                                            }
+                                        }
+
+                                        WebSocketMessageHandler.handleIncomingMessage(
+                                            context,
+                                            decryptedMessage
+                                        )
+                                        updateLastSyncTime(context)
+                                        onMessageReceived?.invoke(decryptedMessage)
                                     }
                                 }
-                            }
 
-                            override fun onMessage(webSocket: WebSocket, text: String) {
-                                synchronized(connectionLock) {
-                                    if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || webSocket != WebSocketUtil.webSocket) return
-                                    Log.d(TAG, "WebSocket message received (${text.length} characters)")
-                                    val key = currentSymmetricKey
-                                    val decryptedMessage = if (key != null) {
-                                        CryptoUtil.decryptMessage(text, key) ?: return
-                                    } else text
-
-                                    if (!handshakeCompleted.get()) {
-                                        val handshakeOk = try {
-                                            val json = org.json.JSONObject(decryptedMessage)
-                                            json.optString("type") == "macInfo"
-                                        } catch (_: Exception) {
-                                            false
-                                        }
-                                        if (handshakeOk) {
-                                            handshakeCompleted.set(true)
-                                            ClipboardSyncManager.onPeerChanged(symmetricKey)
-                                            try {
-                                                AirSyncWidgetProvider.updateAllWidgets(context)
-                                            } catch (_: Exception) {
-                                            }
-                                            updateConnectedStatus(true)
-                                            isConnecting.set(false)
-                                            handshakeTimeoutJob?.cancel()
-                                            scope.launch {
-                                                 try {
-                                                     val ds =
-                                                         app.androp.android.data.local.DataStoreManager.getInstance(
-                                                             context
-                                                         )
-                                                     if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || manualReconnectSuppressed.get()) return@launch
-                                                     val lastDevice = ds.getLastConnectedDevice().first()
-                                                     if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || manualReconnectSuppressed.get()) return@launch
-                                                     app.androp.android.service.AirSyncService.start(
-                                                         context,
-                                                         lastDevice?.name
-                                                     )
-                                                 } catch (e: Exception) {
-                                                     Log.e(
-                                                         TAG,
-                                                         "Error starting AirSyncService: ${e.message}"
-                                                     )
-                                                 }
-                                             }
-                                            try {
-                                                SyncManager.startPeriodicSync(context)
-                                            } catch (_: Exception) {
-                                            }
-
-                                            onConnectionStatusChanged?.invoke(true)
-                                            notifyConnectionStatusListeners(true)
-                                            cancelAutoReconnect()
-                                            try {
-                                                AirSyncWidgetProvider.updateAllWidgets(context)
-                                            } catch (_: Exception) {
-                                            }
-                                        }
-                                        if (!handshakeCompleted.get()) return
-                                    }
-
-                                    // Capture only decrypted messages on this exact live socket.
-                                    // BLE macInfo and asynchronous UI handlers cannot replace the endpoint.
-                                    if (key != null) {
-                                        val info = runCatching { org.json.JSONObject(decryptedMessage) }.getOrNull()
-                                        if (info?.optString("type") == "macInfo") {
-                                            val details = info.optJSONObject("data")
-                                            quickShareEndpointCache.update(epoch,
-                                                details?.opt("quickShareEndpointSupported") == true,
-                                                details?.opt("quickSharePort"))?.let { mutableQuickShareAdvertisement.value = it }
-                                        }
-                                    }
-
-                                    WebSocketMessageHandler.handleIncomingMessage(
-                                        context,
-                                        decryptedMessage
-                                    )
-                                    updateLastSyncTime(context)
-                                    onMessageReceived?.invoke(decryptedMessage)
-                                }
-                            }
-
-                            override fun onClosing(
-                                webSocket: WebSocket,
-                                code: Int,
-                                reason: String
-                            ) {
-                                synchronized(connectionLock) {
-                                    if (!connectionEpoch.isCurrent(epoch)) return
-                                    webSocket.close(code, reason)
-                                    if (webSocket == WebSocketUtil.webSocket) {
-                                        WebSocketFileTransfer.cancelAll()
-                                        if (!app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) SyncManager.stopPeriodicSync()
-                                        if (code != 1000 || reason != "Manual disconnection") {
-                                            if (app.androp.android.AirSyncApp.isAppForeground()) {
-                                                CoroutineScope(Dispatchers.Main).launch {
-                                                    val msg =
-                                                        reason.ifEmpty { "Unknown Server Disconnect" }
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "Disconnected: $msg",
-                                                        android.widget.Toast.LENGTH_SHORT
-                                                    ).show()
-                                                }
-                                            }
-                                        }
-                                        updateConnectedStatus(false)
-                                        isSocketOpen.set(false)
-                                        isConnecting.set(false)
-                                        handshakeCompleted.set(false)
-                                        handshakeTimeoutJob?.cancel()
-                                        currentIpAddress = null
-                                        try {
-                                            ServiceManager.updateServiceState(context)
-                                        } catch (_: Exception) {
-                                        }
-                                        if (!isConnected()) {
-                                            try {
-                                                app.androp.android.utils.MacDeviceStatusManager.cleanup(context)
-                                            } catch (_: Exception) {
-                                            }
-                                        }
-                                        onConnectionStatusChanged?.invoke(false)
-                                        notifyConnectionStatusListeners(false)
-
-                                        // Only auto-reconnect if it wasn't a manual close
-                                        if (code != 1000 || reason != "Manual disconnection") {
-                                            tryStartAutoReconnect(context)
-                                        }
-
-                                        try {
-                                            AirSyncWidgetProvider.updateAllWidgets(context)
-                                        } catch (_: Exception) {
-                                        }
-                                    }
-                                }
-                            }
-
-                            override fun onFailure(
-                                webSocket: WebSocket,
-                                t: Throwable,
-                                response: Response?
-                            ) {
-                                synchronized(connectionLock) {
-                                    pendingSockets.remove(webSocket)
-                                    if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused) return
-                                    val totalToTry = localIps.size
-                                    val failedCount = failedAttempts.incrementAndGet()
-                                    val wasActive = webSocket == WebSocketUtil.webSocket
-                                    val isFinalManualAttempt =
-                                        !connectionStarted.get() && failedCount >= totalToTry
-
-                                    if (wasActive || isFinalManualAttempt) {
-                                        WebSocketFileTransfer.cancelAll()
-                                        if (!app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) SyncManager.stopPeriodicSync()
-                                        if (manualAttempt || isSocketOpen.get()) {
-                                            if (app.androp.android.AirSyncApp.isAppForeground()) {
-                                                CoroutineScope(Dispatchers.Main).launch {
-                                                    val msg = when (t) {
-                                                        is java.net.ConnectException -> "Connection Refused (Is androp Mac running?)"
-                                                        is java.net.SocketTimeoutException -> "Could not discover your mac"
-                                                        is java.net.UnknownHostException -> "Could not reach your mac"
-                                                        is java.io.EOFException, is java.net.SocketException -> "Lost connection to your mac"
-                                                        else -> t.message ?: "Unknown connection error"
+                                override fun onClosing(
+                                    webSocket: WebSocket,
+                                    code: Int,
+                                    reason: String
+                                ) {
+                                    synchronized(connectionLock) {
+                                        if (!connectionEpoch.isCurrent(epoch)) return
+                                        webSocket.close(code, reason)
+                                        if (webSocket == WebSocketUtil.webSocket) {
+                                            connectionEpoch.advance()
+                                            WebSocketUtil.webSocket = null
+                                            WebSocketFileTransfer.cancelAll()
+                                            if (!app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) SyncManager.stopPeriodicSync()
+                                            if (code != 1000 || reason != "Manual disconnection") {
+                                                if (app.androp.android.AirSyncApp.isAppForeground()) {
+                                                    CoroutineScope(Dispatchers.Main).launch {
+                                                        val msg =
+                                                            reason.ifEmpty { "Unknown Server Disconnect" }
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            "Disconnected: $msg",
+                                                            android.widget.Toast.LENGTH_SHORT
+                                                        ).show()
                                                     }
-                                                    android.widget.Toast.makeText(
-                                                        context,
-                                                        "androp: $msg",
-                                                        android.widget.Toast.LENGTH_LONG
-                                                    ).show()
                                                 }
                                             }
-                                        }
-                                        updateConnectedStatus(false)
-                                        isConnecting.set(false)
-                                        isSocketOpen.set(false)
-                                        handshakeCompleted.set(false)
-                                        handshakeTimeoutJob?.cancel()
-                                        connectionAttemptJob?.cancel()
-                                        currentIpAddress = null
-                                        try {
-                                            ServiceManager.updateServiceState(context)
-                                        } catch (_: Exception) {
-                                        }
-                                        if (!isConnected()) {
+                                            updateConnectedStatus(false)
+                                            isSocketOpen.set(false)
+                                            isConnecting.set(false)
+                                            handshakeCompleted.set(false)
+                                            handshakeTimeoutJob?.cancel()
+                                            currentIpAddress = null
                                             try {
-                                                app.androp.android.utils.MacDeviceStatusManager.cleanup(context)
+                                                ServiceManager.updateServiceState(context)
+                                            } catch (_: Exception) {
+                                            }
+                                            if (!isConnected()) {
+                                                try {
+                                                    app.androp.android.utils.MacDeviceStatusManager.cleanup(context)
+                                                } catch (_: Exception) {
+                                                }
+                                            }
+                                            onConnectionStatusChanged?.invoke(false)
+                                            notifyConnectionStatusListeners(false)
+
+                                            // Only auto-reconnect if it wasn't a manual close
+                                            if (code != 1000 || reason != "Manual disconnection") {
+                                                tryStartAutoReconnect(context)
+                                            }
+
+                                            try {
+                                                AirSyncWidgetProvider.updateAllWidgets(context)
                                             } catch (_: Exception) {
                                             }
                                         }
-                                        onConnectionStatusChanged?.invoke(false)
-                                        notifyConnectionStatusListeners(false)
+                                    }
+                                }
 
-                                        // Check manual disconnect flag before auto-reconnecting on failure
-                                        scope.launch {
-                                            try {
-                                                val ds =
-                                                    app.androp.android.data.local.DataStoreManager.getInstance(
-                                                        context
-                                                    )
-                                                val manual = ds.getUserManuallyDisconnected().first()
-                                                if (!manual && connectionEpoch.isCurrent(epoch)) {
-                                                    tryStartAutoReconnect(context)
+                                override fun onFailure(
+                                    webSocket: WebSocket,
+                                    t: Throwable,
+                                    response: Response?
+                                ) {
+                                    synchronized(connectionLock) {
+                                        pendingSockets.remove(webSocket)
+                                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused) return
+                                        val totalToTry = localIps.size
+                                        val failedCount = failedAttempts.incrementAndGet()
+                                        val wasActive = webSocket == WebSocketUtil.webSocket
+                                        val isFinalManualAttempt =
+                                            !connectionStarted.get() && failedCount >= totalToTry
+
+                                        if (wasActive || isFinalManualAttempt) {
+                                            val terminalEpoch = connectionEpoch.advance()
+                                            WebSocketUtil.webSocket = null
+                                            pendingSockets.forEach { it.cancel() }
+                                            pendingSockets.clear()
+                                            WebSocketFileTransfer.cancelAll()
+                                            if (!app.androp.android.data.ble.BleGattServer.isAnyAuthenticated()) SyncManager.stopPeriodicSync()
+                                            if (manualAttempt || isSocketOpen.get()) {
+                                                if (app.androp.android.AirSyncApp.isAppForeground()) {
+                                                    CoroutineScope(Dispatchers.Main).launch {
+                                                        val msg = when (t) {
+                                                            is java.net.ConnectException -> "The Mac refused this Wi-Fi connection. Open androp on the Mac, resume it if paused, then scan its current QR code."
+                                                            is java.net.SocketTimeoutException -> "Wi-Fi connection timed out. Keep androp open on your Mac and connect both devices to the same Wi-Fi, or pair using Bluetooth."
+                                                            is java.net.UnknownHostException -> "Could not reach your mac"
+                                                            is java.io.EOFException, is java.net.SocketException -> "Lost connection to your mac"
+                                                            else -> t.message ?: "Unknown connection error"
+                                                        }
+                                                        android.widget.Toast.makeText(
+                                                            context,
+                                                            "androp: $msg",
+                                                            android.widget.Toast.LENGTH_LONG
+                                                        ).show()
+                                                    }
                                                 }
-                                            } catch (_: Exception) {
-                                                // Unknown persisted user intent must not restart work.
                                             }
-                                        }
+                                            updateConnectedStatus(false)
+                                            isConnecting.set(false)
+                                            isSocketOpen.set(false)
+                                            handshakeCompleted.set(false)
+                                            handshakeTimeoutJob?.cancel()
+                                            connectionAttemptJob?.cancel()
+                                            currentIpAddress = null
+                                            try {
+                                                ServiceManager.updateServiceState(context)
+                                            } catch (_: Exception) {
+                                            }
+                                            if (!isConnected()) {
+                                                try {
+                                                    app.androp.android.utils.MacDeviceStatusManager.cleanup(context)
+                                                } catch (_: Exception) {
+                                                }
+                                            }
+                                            onConnectionStatusChanged?.invoke(false)
+                                            notifyConnectionStatusListeners(false)
 
-                                        try {
-                                            AirSyncWidgetProvider.updateAllWidgets(context)
-                                        } catch (_: Exception) {
+                                            // Check manual disconnect flag before auto-reconnecting on failure
+                                            scope.launch {
+                                                try {
+                                                    val ds =
+                                                        app.androp.android.data.local.DataStoreManager.getInstance(
+                                                            context
+                                                        )
+                                                    val manual = ds.getUserManuallyDisconnected().first()
+                                                    if (!manual && connectionEpoch.isCurrent(terminalEpoch)) {
+                                                        tryStartAutoReconnect(context)
+                                                    }
+                                                } catch (_: Exception) {
+                                                    // Unknown persisted user intent must not restart work.
+                                                }
+                                            }
+
+                                            try {
+                                                AirSyncWidgetProvider.updateAllWidgets(context)
+                                            } catch (_: Exception) {
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        val candidate = perAttemptClient.newWebSocket(request, listener)
-                        pendingSockets.add(candidate)
-                        if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused ||
-                            (connectionStarted.get() && candidate != WebSocketUtil.webSocket)) {
-                            pendingSockets.remove(candidate)
-                            candidate.cancel()
+                            val candidate = perAttemptClient.newWebSocket(request, listener)
+                            pendingSockets.add(candidate)
+                            if (!connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused ||
+                                (connectionStarted.get() && candidate != WebSocketUtil.webSocket)) {
+                                pendingSockets.remove(candidate)
+                                candidate.cancel()
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    if (!connectionEpoch.isCurrent(epoch)) return@launch
+                    Log.e(TAG, "Failed to create WebSocket: ${e.message}")
+                    connectionEpoch.advance()
+                    pendingSockets.forEach { it.cancel() }
+                    pendingSockets.clear()
+                    connectionAttemptJob?.cancel()
+                    isConnecting.set(false)
+                    handshakeCompleted.set(false)
+                    onConnectionStatusChanged?.invoke(false)
                 }
-            } catch (e: Exception) {
-                if (!connectionEpoch.isCurrent(epoch)) return@launch
-                Log.e(TAG, "Failed to create WebSocket: ${e.message}")
-                connectionEpoch.advance()
-                pendingSockets.forEach { it.cancel() }
-                pendingSockets.clear()
-                connectionAttemptJob?.cancel()
-                isConnecting.set(false)
-                handshakeCompleted.set(false)
-                onConnectionStatusChanged?.invoke(false)
             }
         }
     }
@@ -618,6 +655,9 @@ object WebSocketUtil {
         if (expandNetworkingEnabled) {
             return true
         }
+
+        // A directly attached subnet is local even when the router assigns global IPv6.
+        if (LocalSocketNetwork.forAddress(context, ipAddress) != null) return true
 
         // Handle IPv6 address checks
         if (ipAddress.contains(":")) {
@@ -904,6 +944,17 @@ object WebSocketUtil {
         appContext = null
     }
 
+    /** A newly authenticated BLE QR must not leave a previous Mac's Wi-Fi socket active. */
+    fun disconnectIfDifferentPairing(context: Context, pairingKey: String) = synchronized(connectionLock) {
+        val expected = runCatching { CryptoUtil.decodeKey(pairingKey).encoded }.getOrNull()
+            ?: return@synchronized
+        val active = currentSymmetricKey?.encoded
+        if ((isConnected.get() || isConnecting.get()) &&
+            (active == null || !java.security.MessageDigest.isEqual(expected, active))) {
+            disconnect(context, manual = false)
+        }
+    }
+
     /** A network route is usable only after the encrypted handshake for this exact pairing. */
     internal fun authenticatedPeerAddress(pairingKey: String): String? = synchronized(connectionLock) {
         if (BackgroundWorkController.isPaused || manualReconnectSuppressed.get() ||
@@ -1025,12 +1076,7 @@ object WebSocketUtil {
                         }
 
                         // Check network capabilities before attempting Wi-Fi socket reconnect
-                        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-                        val activeNetwork = cm?.activeNetwork
-                        val caps = cm?.getNetworkCapabilities(activeNetwork)
-                        val hasWifiOrVpn = caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) == true ||
-                                caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true ||
-                                caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) == true
+                        val hasWifiOrVpn = LocalSocketNetwork.hasLocalNetwork(context)
 
                         val expandNetworking = ds.getExpandNetworkingEnabled().first()
                         val canAttemptWifiSocket = hasWifiOrVpn || expandNetworking

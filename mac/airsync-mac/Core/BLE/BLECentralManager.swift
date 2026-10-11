@@ -28,6 +28,8 @@ class BLECentralManager: NSObject, ObservableObject {
     
     @Published var connectionStatus: BLEConnectionStatus = .disconnected
     @Published var connectedDeviceName: String? = nil
+    @Published private(set) var bluetoothStatusMessage: String? = "Starting Bluetooth…"
+    @Published private(set) var bluetoothPermissionDenied = false
     struct BLEDiscoveryRecord {
         let peripheral: CBPeripheral
         var lastSeen: Date
@@ -59,6 +61,16 @@ class BLECentralManager: NSObject, ObservableObject {
     private var failureBackoffStep = 0
     private var rejectedPeers: [String: Date] = [:]
     private var authenticationTokenFingerprint: String?
+    private struct QRPairingSession {
+        let id: UUID
+        let key: Data
+        let deadline: Date
+    }
+    private var qrPairingSession: QRPairingSession?
+    private var qrPairingTimer: Timer?
+    private var qrPairingNonce: UUID?
+    private var qrPairingResponse: BLEPairingProtocol.Payload?
+    private let qrPairingChunks = BLEChunkUtil.Reassembler(maximumMessageBytes: BLEPairingProtocol.maximumEnvelopeBytes)
     private let scanWindow: TimeInterval = 10
     private var scanRestartWorkItem: DispatchWorkItem?
     private var scanRestartGeneration = 0
@@ -84,6 +96,7 @@ class BLECentralManager: NSObject, ObservableObject {
     private(set) var scheduledScanDelayForTesting: TimeInterval?
     var hasPendingScanRestartForTesting: Bool { scanRestartWorkItem != nil }
     var automaticConnectionAllowedForTesting: Bool { automaticConnectionAllowed }
+    var hasQRPairingWindowForTesting: Bool { activeQRPairingSession != nil }
     func finishDiscoveryWindowForTesting() { finishDiscoveryWindow() }
     func retryTransportFailureForTesting() { retryAfterTransportFailure() }
     func rememberPeerForTesting(_ uuid: String) { rememberAuthenticatedPeer(uuid) }
@@ -110,10 +123,55 @@ class BLECentralManager: NSObject, ObservableObject {
     }
 
     private var automaticConnectionAllowed: Bool {
-        AppState.shared.isBLEEnabled && AppState.shared.isBLEAutoConnectEnabled &&
+        AppState.shared.isBLEEnabled &&
         !AppState.shared.isSyncPaused && !isManuallyDisconnected && !isTearingDown &&
         !UserDefaults.standard.bool(forKey: "isManuallyDisconnected") &&
-        !(UserDefaults.standard.string(forKey: "bleAuthToken") ?? "").isEmpty
+        (activeQRPairingSession != nil || (AppState.shared.isBLEAutoConnectEnabled &&
+        !(UserDefaults.standard.string(forKey: "bleAuthToken") ?? "").isEmpty))
+    }
+
+    private var activeQRPairingSession: QRPairingSession? {
+        guard let session = qrPairingSession, Date() < session.deadline,
+              let encoded = UserDefaults.standard.string(forKey: "encryptionKey"),
+              Data(base64Encoded: encoded) == session.key else { return nil }
+        return session
+    }
+
+    /// Only revealing the authenticated QR enables first contact with unknown advertisers.
+    @discardableResult
+    func beginQRPairing(id: UUID, key: Data) -> Bool {
+        guard Thread.isMainThread, !AppState.shared.isSyncPaused, AppState.shared.isBLEEnabled,
+              !isAuthenticated, key.count == 32 else { return false }
+        endQRPairing()
+        if discoveredPeripheral != nil { tearDownConnection(cancelPeripheral: true) }
+        qrPairingSession = QRPairingSession(id: id, key: key,
+            deadline: Date().addingTimeInterval(BLEPairingProtocol.windowDuration))
+        qrPairingTimer = Timer.scheduledTimer(withTimeInterval: BLEPairingProtocol.windowDuration, repeats: false) { [weak self] _ in
+            self?.endQRPairing()
+        }
+        isManuallyDisconnected = false
+        UserDefaults.standard.set(false, forKey: "isManuallyDisconnected")
+        discoveryBackoffStep = 0
+        failureBackoffStep = 0
+        rejectedPeers.removeAll()
+        cancelPendingScanRestart()
+        startScanning()
+        return true
+    }
+
+    func endQRPairing() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.endQRPairing() }
+            return
+        }
+        let wasPairing = qrPairingSession != nil
+        qrPairingSession = nil
+        qrPairingTimer?.invalidate()
+        qrPairingTimer = nil
+        qrPairingNonce = nil
+        qrPairingResponse = nil
+        qrPairingChunks.clear()
+        if wasPairing && !isAuthenticated { tearDownConnection(cancelPeripheral: true) }
     }
 
     private func tokenFingerprint() -> String? {
@@ -129,6 +187,7 @@ class BLECentralManager: NSObject, ObservableObject {
 
     private func mayAutomaticallyConnect(to uuid: String, now: Date = Date()) -> Bool {
         if let deadline = rejectedPeers[uuid], deadline > now { return false }
+        if activeQRPairingSession != nil { return true }
         guard let fingerprint = tokenFingerprint() else { return false }
         // A newly paired phone has a different token, so its first BLE contact
         // can establish a new pin. Never send the existing token to other
@@ -154,6 +213,11 @@ class BLECentralManager: NSObject, ObservableObject {
     }
 
     private func retryAfterTransportFailure() {
+        if activeQRPairingSession != nil, let peer = discoveredPeripheral {
+            // The phone may not have scanned yet; revisit it after a short rest,
+            // while giving other nearby candidates an opportunity to prove the QR key.
+            rejectedPeers[peer.identifier.uuidString] = Date().addingTimeInterval(10)
+        }
         tearDownConnection(cancelPeripheral: true)
         let delay = min(60, 3 * pow(2, Double(failureBackoffStep)))
         failureBackoffStep = min(failureBackoffStep + 1, 5)
@@ -168,7 +232,7 @@ class BLECentralManager: NSObject, ObservableObject {
         if rejectedPeers.count >= 64, let oldest = rejectedPeers.min(by: { $0.value < $1.value })?.key {
             rejectedPeers.removeValue(forKey: oldest)
         }
-        rejectedPeers[peerUUID] = Date().addingTimeInterval(300)
+        rejectedPeers[peerUUID] = Date().addingTimeInterval(activeQRPairingSession == nil ? 300 : 10)
         retryAfterTransportFailure()
     }
 
@@ -219,6 +283,7 @@ class BLECentralManager: NSObject, ObservableObject {
             return
         }
         guard !isTearingDown else { return }
+        if !restartScanning { endQRPairing() }
         isManuallyDisconnected = !restartScanning
         tearDownConnection(cancelPeripheral: true)
         if restartScanning {
@@ -290,6 +355,9 @@ class BLECentralManager: NSObject, ObservableObject {
         responseWriteInFlight = false
         hasAttemptedAuth = false
         authenticationTokenFingerprint = nil
+        qrPairingNonce = nil
+        qrPairingResponse = nil
+        qrPairingChunks.clear()
     }
 
     func write(characteristicUUID: CBUUID, data: Data) {
@@ -417,6 +485,15 @@ class BLECentralManager: NSObject, ObservableObject {
 
 extension BLECentralManager: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        bluetoothPermissionDenied = central.state == .unauthorized
+        switch central.state {
+        case .poweredOn: bluetoothStatusMessage = nil
+        case .poweredOff: bluetoothStatusMessage = "Turn on Bluetooth on your Mac."
+        case .unauthorized: bluetoothStatusMessage = "Allow androp in System Settings → Privacy & Security → Bluetooth."
+        case .unsupported: bluetoothStatusMessage = "Bluetooth is unavailable. Pair over Wi-Fi instead."
+        case .resetting, .unknown: bluetoothStatusMessage = "Starting Bluetooth…"
+        @unknown default: bluetoothStatusMessage = "Bluetooth is unavailable. Pair over Wi-Fi instead."
+        }
         if central.state == .poweredOn {
             if AppState.shared.isBLEEnabled {
                 print("[BLE] Bluetooth powered on, starting scan")
@@ -561,15 +638,49 @@ extension BLECentralManager: CBPeripheralDelegate {
 
     private func attemptAuthentication() {
         guard connectionStatus == .connected, !AppState.shared.isSyncPaused else { return }
+        if let session = activeQRPairingSession {
+            let nonce = UUID()
+            let request = BLEPairingProtocol.Payload(v: 1, action: "request", pairing: session.id.uuidString.lowercased(), nonce: nonce.uuidString.lowercased())
+            qrPairingNonce = nonce
+            qrPairingResponse = nil
+            qrPairingChunks.clear()
+            // Authentication writes permit chunked proofs, but never a bearer token to an unknown peer.
+            if !sendQRPairingProof(request, key: session.key) { retryAfterTransportFailure() }
+            return
+        }
         let token = UserDefaults.standard.string(forKey: "bleAuthToken") ?? ""
         if !token.isEmpty, let data = token.data(using: .utf8) {
             print("[BLE] Attempting authentication...")
             authenticationTokenFingerprint = tokenFingerprint()
-            write(characteristicUUID: BLEConstants.charAuthToken, data: data)
+            if let peripheral = discoveredPeripheral,
+               data.count > min(peripheral.maximumWriteValueLength(for: .withResponse), peripheral.maximumWriteValueLength(for: .withoutResponse)) {
+                if !sendFramedAuthentication(token) { retryAfterTransportFailure() }
+            } else {
+                write(characteristicUUID: BLEConstants.charAuthToken, data: data)
+            }
         } else {
             print("[BLE] Auth token is empty, skipping auth and disconnecting because they have never paired")
             tearDownConnection(cancelPeripheral: true)
         }
+    }
+
+    private func sendQRPairingProof(_ payload: BLEPairingProtocol.Payload, key: Data) -> Bool {
+        guard let envelope = BLEPairingProtocol.encode(payload, key: key),
+              activeQRPairingSession != nil else { return false }
+        return sendFramedAuthentication(envelope)
+    }
+
+    private func sendFramedAuthentication(_ payload: String) -> Bool {
+        guard payload.utf8.count <= BLEPairingProtocol.maximumEnvelopeBytes, let peripheral = discoveredPeripheral else { return false }
+        // withResponse may advertise 512-byte long writes even at ATT MTU 23.
+        // Android deliberately rejects prepared writes, so fit each packet to the immediate ATT payload.
+        let capacity = min(peripheral.maximumWriteValueLength(for: .withResponse),
+                           peripheral.maximumWriteValueLength(for: .withoutResponse))
+        let chunks = BLEChunkUtil.splitIntoChunks(payload: payload, mtu: capacity)
+        guard !chunks.isEmpty, pendingWriteBytes + chunks.reduce(0, { $0 + $1.count }) <= maxPendingWriteBytes,
+              pendingWrites.count + chunks.count < 32768 else { return false }
+        for chunk in chunks { write(characteristicUUID: BLEConstants.charAuthToken, data: chunk) }
+        return true
     }
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -582,6 +693,34 @@ extension BLECentralManager: CBPeripheralDelegate {
         
         switch characteristic.uuid {
         case BLEConstants.charAuthResult:
+            if let session = activeQRPairingSession, let nonce = qrPairingNonce, qrPairingResponse == nil {
+                guard connectionStatus == .connected, hasAttemptedAuth else { return }
+                if data.count == 1 { rejectAuthentication(peerUUID: peripheral.identifier.uuidString); return }
+                guard let text = qrPairingChunks.add(data) else { return }
+                guard let response = BLEPairingProtocol.response(text, key: session.key, pairing: session.id, nonce: nonce),
+                      let token = response.token else {
+                    rejectAuthentication(peerUUID: peripheral.identifier.uuidString)
+                    return
+                }
+                qrPairingResponse = response
+                authenticationTokenFingerprint = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+                let confirmation = BLEPairingProtocol.Payload(v: 1, action: "confirm", pairing: session.id.uuidString.lowercased(),
+                    nonce: nonce.uuidString.lowercased(), token: token)
+                if !sendQRPairingProof(confirmation, key: session.key) { retryAfterTransportFailure() }
+                return
+            }
+            if let response = qrPairingResponse {
+                guard activeQRPairingSession != nil, connectionStatus == .connected, hasAttemptedAuth,
+                      data.count == 1, data.first == BLEConstants.authSuccess,
+                      let token = response.token, let deviceID = response.deviceID else {
+                    rejectAuthentication(peerUUID: peripheral.identifier.uuidString)
+                    return
+                }
+                // Commit credentials and identity only after both peers complete this live handshake.
+                UserDefaults.standard.set(token, forKey: "bleAuthToken")
+                UserDefaults.standard.set(deviceID, forKey: "lastBLEPairedDeviceID")
+                UserDefaults.standard.set(true, forKey: "hasPairedDeviceOnce")
+            }
             guard connectionStatus == .connected, hasAttemptedAuth,
                   let authenticatedToken = authenticationTokenFingerprint,
                   authenticatedToken == tokenFingerprint() else { return }
@@ -594,9 +733,9 @@ extension BLECentralManager: CBPeripheralDelegate {
                 failureBackoffStep = 0
                 rejectedPeers.removeValue(forKey: peripheral.identifier.uuidString)
                 connectionStatus = .authenticated
-                let rawName = discoveredPeripheral?.name
-                let devName = AppState.getPreferredDeviceName(fallback: rawName)
+                let devName = qrPairingResponse?.name ?? AppState.getPreferredDeviceName(fallback: discoveredPeripheral?.name)
                 connectedDeviceName = devName
+                endQRPairing()
                 
                 let bleDeviceId = UserDefaults.standard.string(forKey: "lastBLEPairedDeviceID")
                     ?? discoveredPeripheral?.identifier.uuidString ?? ""

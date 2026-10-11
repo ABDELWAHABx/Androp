@@ -1,10 +1,13 @@
 import Foundation
 import AppKit
 import Darwin
+import CryptoKit
 
 /// Runs the real app lifecycle in a disposable, uniquely identified app copy.
 /// Three independent gates prevent an installed app from entering this mode.
 enum LifecycleSelfTest {
+    @MainActor private static var probeSession: URLSession?
+    @MainActor private static var probeSocket: URLSessionWebSocketTask?
     nonisolated static var isRequested: Bool {
         ProcessInfo.processInfo.arguments.contains("--self-test-lifecycle") &&
         ProcessInfo.processInfo.environment["ANDROP_LIFECYCLE_SELF_TEST"] == "1" &&
@@ -60,6 +63,10 @@ enum LifecycleSelfTest {
         BLECentralManager.shared.connectionStatus = .scanning
         AppState.shared.setSyncPaused(true)
         AppState.shared.setSyncPaused(true) // Repeated pause must be harmless.
+        probeSocket?.cancel(with: .goingAway, reason: nil)
+        probeSocket = nil
+        probeSession?.invalidateAndCancel()
+        probeSession = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             let server = WebSocketServer.shared
             server.lock.lock()
@@ -67,6 +74,7 @@ enum LifecycleSelfTest {
             server.lock.unlock()
             guard AppState.shared.isSyncPaused, AppState.shared.device == nil,
                   BLECentralManager.shared.connectionStatus == .disconnected,
+                  server.getListeningNetworkEndpoint() == nil,
                   !AppState.shared.hasActiveConnectionMonitoring, stopped,
                   !DiscoveryManager.shared.isServiceRunning, !QuickShareManager.shared.isRunning,
                   !MacPowerManager.shared.keepAwakeActive, !MacPowerManager.shared.closedLidOverrideActive else {
@@ -96,17 +104,81 @@ enum LifecycleSelfTest {
                 return
             }
             print("LIFECYCLE resume \(cycle): real WebSocket listener and discovery started")
-            if cycle == 1 {
-                AppState.shared.quickShareEnabled = true
-                awaitQuickShareToggle(deadline: ProcessInfo.processInfo.systemUptime + 3)
-            } else {
-                pause(cycle: cycle + 1)
-            }
+            verifyIPv4Handshake(cycle: cycle)
         } else if ProcessInfo.processInfo.systemUptime >= deadline {
             finish(success: false, message: "Real listener did not resume within four seconds")
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 awaitResume(cycle: cycle, deadline: deadline)
+            }
+        }
+    }
+
+    /// Exercise the advertised address family and encrypted pairing protocol,
+    /// rather than trusting the listener's in-memory started flag.
+    @MainActor private static func verifyIPv4Handshake(cycle: Int) {
+        let server = WebSocketServer.shared
+        guard let port = server.localPort,
+              Int(port) == AppState.shared.myDevice?.port,
+              let key = server.symmetricKey,
+              let url = URL(string: "ws://127.0.0.1:\(port)/socket") else {
+            finish(success: false, message: "Listener port does not match the configured pairing endpoint")
+            return
+        }
+        if let endpoint = server.getListeningNetworkEndpoint(), endpoint.port != port {
+            finish(success: false, message: "Discovery advertised a different port from the running listener")
+            return
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 3
+        configuration.timeoutIntervalForResource = 4
+        configuration.connectionProxyDictionary = [:]
+        let session = URLSession(configuration: configuration)
+        let socket = session.webSocketTask(with: url)
+        probeSession = session
+        probeSocket = socket
+        socket.resume()
+        Task { @MainActor in
+            do {
+                let device: [String: Any] = ["type": "device", "data": [
+                    "id": "lifecycle-test-phone", "name": "Test phone", "ipAddress": "127.0.0.1",
+                    "port": 6997, "version": "1", "adbPorts": [], "targetIpAddress": "127.0.0.1"
+                ]]
+                let json = String(data: try JSONSerialization.data(withJSONObject: device), encoding: .utf8)!
+                guard let wrong = encryptMessage(json, using: SymmetricKey(size: .bits256)),
+                      let valid = encryptMessage(json, using: key) else {
+                    finish(success: false, message: "Unable to prepare encrypted handshake probe")
+                    return
+                }
+                try await socket.send(.string(wrong))
+                try await Task.sleep(nanoseconds: 100_000_000)
+                guard server.authenticatedSessionIdentity == nil else {
+                    finish(success: false, message: "Wrong-key WebSocket handshake was accepted")
+                    return
+                }
+                try await socket.send(.string(valid))
+                var receivedMacInfo = false
+                for _ in 0..<8 {
+                    let message = try await socket.receive()
+                    guard case .string(let encrypted) = message,
+                          let clear = decryptMessageToData(encrypted, using: key),
+                          let payload = try JSONSerialization.jsonObject(with: clear) as? [String: Any] else { continue }
+                    if payload["type"] as? String == "macInfo" { receivedMacInfo = true; break }
+                }
+                guard receivedMacInfo, server.authenticatedSessionIdentity != nil,
+                      AppState.shared.device?.deviceId == "lifecycle-test-phone" else {
+                    finish(success: false, message: "IPv4 WebSocket did not complete the encrypted device/macInfo handshake")
+                    return
+                }
+                print("LIFECYCLE IPv4 handshake \(cycle): configured port reachable; wrong key rejected; encrypted macInfo received")
+                if cycle == 1 {
+                    AppState.shared.quickShareEnabled = true
+                    awaitQuickShareToggle(deadline: ProcessInfo.processInfo.systemUptime + 3)
+                } else {
+                    pause(cycle: cycle + 1)
+                }
+            } catch {
+                finish(success: false, message: "IPv4 pairing probe failed: \(error)")
             }
         }
     }
@@ -148,6 +220,8 @@ enum LifecycleSelfTest {
     @MainActor static func cleanUp() {
         guard isRequested else { return }
         AppState.shared.setSyncPaused(true)
+        probeSocket?.cancel(with: .goingAway, reason: nil)
+        probeSession?.invalidateAndCancel()
         DiscoveryManager.shared.stop()
         QuickShareManager.shared.suspendService()
         BLECentralManager.shared.disconnect(restartScanning: false)

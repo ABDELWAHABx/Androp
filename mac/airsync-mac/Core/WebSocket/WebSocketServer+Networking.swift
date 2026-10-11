@@ -66,6 +66,8 @@ extension WebSocketServer {
             for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
                 let interface = ptr.pointee
                 guard let interfaceAddress = interface.ifa_addr else { continue }
+                guard (interface.ifa_flags & UInt32(IFF_UP)) != 0,
+                      (interface.ifa_flags & UInt32(IFF_LOOPBACK)) == 0 else { continue }
                 let addrFamily = interfaceAddress.pointee.sa_family
 
                 if addrFamily == UInt8(AF_INET),
@@ -157,7 +159,7 @@ extension WebSocketServer {
         )
         lastKnownAdapters = adapters
         lastKnownIP = chosenIP
-        let port = localPort ?? Defaults.serverPort
+        let port = localPort ?? requestedPort
         lock.unlock()
 
         localIPAddress = chosenIP

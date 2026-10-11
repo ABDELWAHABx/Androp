@@ -41,6 +41,10 @@ class WebSocketServer: ObservableObject {
     internal var isRestarting: Bool = false
     internal var restartWorkItem: DispatchWorkItem?
     internal var shouldRun = false
+    internal var requestedPort: UInt16 = Defaults.serverPort
+    // Protected by lock; advertisement uses the bound socket, never form settings.
+    internal var listeningPort: UInt16?
+    internal var listeningAddresses: Set<String>?
     internal var lifecycleGeneration: UInt64 = 0
     internal let lifecycleQueue = DispatchQueue(label: "app.androp.server.lifecycle", qos: .utility)
     internal var networkMonitorTimer: Timer?
@@ -83,16 +87,23 @@ class WebSocketServer: ObservableObject {
 
     /// Starts the WebSocket server on the specified port.
     /// Handles binding to a specific network adapter or all available interfaces if "auto" is selected.
-    func start(port: UInt16 = Defaults.serverPort) {
+    func start(port explicitPort: UInt16? = nil) {
         guard !AppState.shared.isSyncPaused else { return }
+        let configuredPort = AppState.shared.myDevice?.port ?? Int(Defaults.serverPort)
+        let port = explicitPort ?? ((1...65535).contains(configuredPort) ? UInt16(configuredPort) : Defaults.serverPort)
         let adapterName = AppState.shared.selectedNetworkAdapterName
         lock.lock()
         shouldRun = true
+        requestedPort = port
+        listeningPort = nil
+        listeningAddresses = nil
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
         lock.unlock()
         DispatchQueue.main.async {
             guard self.isCurrentLifecycle(generation) else { return }
+            self.localPort = nil
+            self.localIPAddress = nil
             AppState.shared.webSocketStatus = .starting
             self.startNetworkMonitoring()
         }
@@ -106,18 +117,31 @@ class WebSocketServer: ObservableObject {
             self.stopAllServers()
             do {
                 guard port > 0 else { throw NSError(domain: "androp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server port"]) }
-                // Swifter binds all interfaces. One listener is sufficient even when
-                // the Mac has no address yet; NWPathMonitor handles subsequent changes.
+                // QR/discovery/ BLE network upgrades advertise IPv4 addresses.
+                // Bind IPv4 explicitly: an IPv6 wildcard socket is not guaranteed
+                // to accept IPv4 on every macOS network configuration.
                 let server = HttpServer()
                 self.setupWebSocket(for: server, generation: generation)
+                var boundAddresses: Set<String>?
                 if let adapterName = adapterName {
-                    server.listenAddressIPv4 = self.getLocalIPAddress(adapterName: adapterName)
+                    guard let address = self.getLocalIPAddress(adapterName: adapterName) else {
+                        throw NSError(domain: "androp", code: 2, userInfo: [NSLocalizedDescriptionKey: "The selected network adapter has no active IPv4 address. Choose Auto or reconnect that adapter."])
+                    }
+                    server.listenAddressIPv4 = address
+                    boundAddresses = [address]
                 }
-                try server.start(in_port_t(port), forceIPv4: adapterName != nil)
+                try server.start(in_port_t(port), forceIPv4: true)
                 guard self.isCurrentLifecycle(generation) else { server.stop(); return }
                 self.lock.lock()
+                guard self.shouldRun, self.lifecycleGeneration == generation else {
+                    self.lock.unlock()
+                    server.stop()
+                    return
+                }
                 self.servers[adapterName ?? "any"] = server
                 self.isListeningOnAll = adapterName == nil
+                self.listeningPort = port
+                self.listeningAddresses = boundAddresses
                 self.lock.unlock()
                 DispatchQueue.main.async {
                     guard self.isCurrentLifecycle(generation), !AppState.shared.isSyncPaused else { return }
@@ -130,6 +154,8 @@ class WebSocketServer: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     guard self.isCurrentLifecycle(generation) else { return }
+                    self.localPort = nil
+                    self.localIPAddress = nil
                     AppState.shared.webSocketStatus = .failed(error: "\(error)")
                 }
             }
@@ -146,6 +172,8 @@ class WebSocketServer: ObservableObject {
         lock.lock()
         let oldServers = Array(servers.values)
         servers.removeAll()
+        listeningPort = nil
+        listeningAddresses = nil
         lock.unlock()
         // HttpServer.stop waits for handlers; holding their state lock here deadlocks.
         for server in oldServers { server.stop() }
@@ -154,6 +182,8 @@ class WebSocketServer: ObservableObject {
     func stop() {
         lock.lock()
         shouldRun = false
+        listeningPort = nil
+        listeningAddresses = nil
         lifecycleGeneration &+= 1
         let generation = lifecycleGeneration
         restartWorkItem?.cancel()
@@ -172,6 +202,8 @@ class WebSocketServer: ObservableObject {
             let isStopped = !self.shouldRun && self.lifecycleGeneration == generation
             self.lock.unlock()
             guard isStopped else { return }
+            self.localPort = nil
+            self.localIPAddress = nil
             MacRemoteManager.shared.stopVolumeMonitoring()
             AppState.shared.webSocketStatus = .stopped
         }
@@ -337,7 +369,7 @@ class WebSocketServer: ObservableObject {
         guard shouldRun, !isRestarting else { lock.unlock(); return }
         isRestarting = true
         let generation = lifecycleGeneration
-        let port = localPort ?? Defaults.serverPort
+        let port = requestedPort
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.isCurrentLifecycle(generation), !AppState.shared.isSyncPaused else { return }
             if AppState.shared.device?.isRegularConnection == true {

@@ -617,13 +617,15 @@ class AirSyncViewModel(
     fun saveLastConnectedDevice(
         pcName: String? = null,
         isPlus: Boolean = false,
-        symmetricKey: String? = null
+        symmetricKey: String? = null,
+        ipAddress: String = _uiState.value.ipAddress,
+        port: String = _uiState.value.port
     ) {
+        // Capture endpoint arguments before launching; the editable form may change in flight.
         viewModelScope.launch {
-            val deviceName = pcName ?: "My Mac"
+            val deviceName = pcName?.takeIf { it.isNotBlank() } ?: "My Mac"
             val ourIp = _deviceInfo.value.localIp
-            val clientIp = _uiState.value.ipAddress
-            val port = _uiState.value.port
+            val clientIp = ipAddress
 
             // Save using network-aware storage
             repository.saveNetworkDeviceConnection(
@@ -979,7 +981,9 @@ class AirSyncViewModel(
                                                         saveLastConnectedDevice(
                                                             pcName = target.name,
                                                             isPlus = target.isPlus,
-                                                            symmetricKey = target.symmetricKey
+                                                            symmetricKey = target.symmetricKey,
+                                                            ipAddress = target.ipAddress,
+                                                            port = target.port
                                                         )
                                                     } catch (_: Exception) {
                                                     }

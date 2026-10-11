@@ -19,7 +19,10 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 
 class BleConnectionManager(private val context: Context) {
     companion object {
@@ -33,6 +36,7 @@ class BleConnectionManager(private val context: Context) {
     private var observationJob: Job? = null
     private var inputs = BleAvailabilityPolicy.Inputs(false, false, true, false, null)
     private var radioReceiverRegistered = false
+    private var qrPairingActive = false
     private val radioReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
@@ -81,7 +85,7 @@ class BleConnectionManager(private val context: Context) {
             }.distinctUntilChanged().collectLatest { next ->
                 // An IP change for the same Mac does not interrupt Bluetooth;
                 // changing the pairing key must evict its old authenticated peer.
-                if (inputs.pairingKey != next.pairingKey) bleServer?.stop()
+                if (inputs.pairingKey != next.pairingKey && bleServer?.acceptsPairingKeyChange(next.pairingKey) != true) bleServer?.stop()
                 inputs = next
                 updateBleState()
             }
@@ -93,7 +97,8 @@ class BleConnectionManager(private val context: Context) {
     }
 
     private fun updateBleState() {
-        if (!BleAvailabilityPolicy.shouldRun(inputs) || app.androp.android.utils.BackgroundWorkController.isPaused) {
+        val mayPair = qrPairingActive && inputs.enabled && !inputs.manuallyDisconnected && !inputs.paused
+        if ((!BleAvailabilityPolicy.shouldRun(inputs) && !mayPair) || app.androp.android.utils.BackgroundWorkController.isPaused) {
             bleServer?.stop()
             return
         }
@@ -101,6 +106,30 @@ class BleConnectionManager(private val context: Context) {
         // connects and resumes on disconnect; Wi-Fi never disables this link.
         bleServer?.start()
         bleServer?.resumeAdvertising()
+    }
+
+    /** A normal permission-gated QR action temporarily advertises without saved credentials. */
+    suspend fun pairFromQr(symmetricKey: String, pairingSessionId: String, macName: String): Boolean = withContext(Dispatchers.Main) {
+        if (qrPairingActive || !BlePairingProtocol.validKey(symmetricKey) ||
+            !BlePairingProtocol.validId(pairingSessionId) || dataStoreManager.isAppPaused().first() ||
+            app.androp.android.utils.BackgroundWorkController.isPaused ||
+            !app.androp.android.utils.PermissionUtil.isBluetoothPermissionsGranted(context)) return@withContext false
+        dataStoreManager.setBleSyncEnabled(true)
+        dataStoreManager.setUserManuallyDisconnected(false)
+        inputs = BleAvailabilityPolicy.Inputs(true, false, false, WebSocketUtil.isWifiConnected(),
+            dataStoreManager.getLastConnectedDevice().first()?.symmetricKey)
+        qrPairingActive = true
+        try {
+            start()
+            bleServer?.pairFromQr(symmetricKey, pairingSessionId, macName) == true
+        } finally {
+            withContext(NonCancellable) {
+                qrPairingActive = false
+                // Return to the ordinary saved-peer policy, including after Cancel/expiry.
+                inputs = inputs.copy(pairingKey = dataStoreManager.getLastConnectedDevice().first()?.symmetricKey)
+                updateBleState()
+            }
+        }
     }
 
     fun stop() {

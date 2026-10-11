@@ -33,6 +33,31 @@ final class BackgroundWriteProbe: @unchecked Sendable {
 }
 
 let cases: [(String, () throws -> Void)] = [
+    ("Explicit QR permits first BLE contact without a previous Wi-Fi credential", {
+        let manager = makeManager()
+        let key = Data(repeating: 7, count: 32)
+        UserDefaults.standard.removeObject(forKey: "bleAuthToken")
+        UserDefaults.standard.set(key.base64EncodedString(), forKey: "encryptionKey")
+        AppState.shared.isBLEAutoConnectEnabled = false
+        try expect(manager.beginQRPairing(id: UUID(), key: key), "QR pairing window was rejected")
+        try expect(manager.automaticConnectionAllowedForTesting, "first BLE pair incorrectly required Wi-Fi")
+        try expect(manager.mayAutomaticallyConnectForTesting(to: "new-phone"), "new candidate was incorrectly pinned to old phone")
+        manager.endQRPairing()
+        try expect(!manager.hasQRPairingWindowForTesting && !manager.automaticConnectionAllowedForTesting,
+                   "closing QR left unpaired scanning authorized")
+    }),
+    ("Pause and key replacement invalidate QR pairing authorization", {
+        let manager = makeManager()
+        let key = Data(repeating: 8, count: 32)
+        UserDefaults.standard.set(key.base64EncodedString(), forKey: "encryptionKey")
+        try expect(manager.beginQRPairing(id: UUID(), key: key), "QR pairing window was rejected")
+        UserDefaults.standard.set(Data(repeating: 9, count: 32).base64EncodedString(), forKey: "encryptionKey")
+        try expect(!manager.hasQRPairingWindowForTesting, "old key retained pairing authorization")
+        AppState.shared.isSyncPaused = true
+        manager.disconnect()
+        try expect(!manager.hasQRPairingWindowForTesting, "pause retained the pairing window")
+        try expect(!manager.beginQRPairing(id: UUID(), key: key), "paused app started QR pairing")
+    }),
     ("Off-main BLE writes reject synchronously without waiting on main", {
         let probe = BackgroundWriteProbe(makeManager())
         Thread.detachNewThread {

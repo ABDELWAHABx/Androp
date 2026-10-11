@@ -44,4 +44,31 @@ class ConnectionEpochTest {
         assertTrue(connected.get())
         assertTrue(epochs.isCurrent(nextAttempt))
     }
+    @Test
+    fun timedOutHandshakeAndDelayedInitialSyncCannotReviveOrSendToRetry() {
+        val epochs = ConnectionEpoch()
+        val firstSocket = epochs.advance()
+        val lateCallbacksReady = CountDownLatch(2)
+        val deliverCallbacks = CountDownLatch(1)
+        val callbacksFinished = CountDownLatch(2)
+        val connectionRevived = AtomicBoolean(false)
+        val staleInfoSent = AtomicBoolean(false)
+        val callbacks = listOf(connectionRevived, staleInfoSent).map { result ->
+            thread {
+                lateCallbacksReady.countDown()
+                deliverCallbacks.await()
+                if (epochs.isCurrent(firstSocket)) result.set(true)
+                callbacksFinished.countDown()
+            }
+        }
+        assertTrue(lateCallbacksReady.await(2, TimeUnit.SECONDS))
+        epochs.advance() // Handshake deadline retires the socket before closing it.
+        val retrySocket = epochs.advance()
+        deliverCallbacks.countDown()
+        assertTrue(callbacksFinished.await(2, TimeUnit.SECONDS))
+        callbacks.forEach { it.join() }
+        assertFalse(connectionRevived.get())
+        assertFalse(staleInfoSent.get())
+        assertTrue(epochs.isCurrent(retrySocket))
+    }
 }
