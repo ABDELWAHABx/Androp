@@ -6,7 +6,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -51,8 +53,10 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import app.androp.android.MainActivity
 import app.androp.android.ui.theme.AirSyncTheme
 import app.androp.android.utils.HapticUtil
+import app.androp.android.utils.PairingLink
 import java.util.concurrent.Executors
 
 class QRScannerActivity : ComponentActivity() {
@@ -63,7 +67,8 @@ class QRScannerActivity : ComponentActivity() {
         if (isGranted) {
             startScanner()
         } else {
-            // Permission denied, finish the activity
+            // Permission denied: say why the scanner closed instead of vanishing silently.
+            Toast.makeText(this, "Allow camera access to scan the pairing QR code.", Toast.LENGTH_LONG).show()
             setResult(RESULT_CANCELED)
             finish()
         }
@@ -110,6 +115,22 @@ class QRScannerActivity : ComponentActivity() {
             AirSyncTheme(pitchBlackTheme = uiState.isPitchBlackThemeEnabled) {
                 QRScannerScreen(
                     onQrScanned = { qrData ->
+                        // A launcher shortcut or external SCAN_QR intent has no caller to receive QR_CODE,
+                        // so the scanned link goes straight to the same pairing path as a deep link.
+                        if (this@QRScannerActivity.callingActivity == null) {
+                            if (PairingLink.parse(qrData) != null) {
+                                startActivity(Intent(this@QRScannerActivity, MainActivity::class.java).apply {
+                                    data = Uri.parse(qrData)
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                })
+                            } else {
+                                Toast.makeText(
+                                    this@QRScannerActivity,
+                                    "Invalid pairing QR code. Scan the code shown in androp on your Mac.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
                         // Return the scanned QR code data to the caller
                         val intent = Intent().apply {
                             putExtra("QR_CODE", qrData)

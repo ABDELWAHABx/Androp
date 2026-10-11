@@ -205,6 +205,13 @@ class BLECentralManager: NSObject, ObservableObject {
         let now = Date()
         discoveredPeripherals = discoveredPeripherals.filter { now.timeIntervalSince($0.value.lastSeen) <= 120 }
         rejectedPeers = rejectedPeers.filter { $0.value > now }
+        // A visible pairing code is waiting for a phone that may start advertising
+        // at any moment, and the code expires in two minutes. Rest briefly instead
+        // of backing off for up to a minute.
+        if activeQRPairingSession != nil {
+            scheduleAutomaticScanRestart(after: 1)
+            return
+        }
         // Ten seconds of discovery followed by 5, 10, 20, 40, then 60
         // seconds of radio rest. Established BLE connections have no scan timer.
         let delay = min(60, 5 * pow(2, Double(discoveryBackoffStep)))
@@ -219,6 +226,12 @@ class BLECentralManager: NSObject, ObservableObject {
             rejectedPeers[peer.identifier.uuidString] = Date().addingTimeInterval(10)
         }
         tearDownConnection(cancelPeripheral: true)
+        // During a visible pairing window, a phone that is still starting its GATT
+        // server must be revisited within seconds, not after a multi-minute backoff.
+        if activeQRPairingSession != nil {
+            scheduleAutomaticScanRestart(after: 1)
+            return
+        }
         let delay = min(60, 3 * pow(2, Double(failureBackoffStep)))
         failureBackoffStep = min(failureBackoffStep + 1, 5)
         scheduleAutomaticScanRestart(after: delay)

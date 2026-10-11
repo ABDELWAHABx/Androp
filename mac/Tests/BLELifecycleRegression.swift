@@ -257,6 +257,19 @@ let cases: [(String, () throws -> Void)] = [
         withExtendedLifetime(observation) {}
         try expect(manager.connectionStatus == .disconnected, "reentrant teardown did not finish")
         try expect(manager.sessionGeneration == 1, "reentrant teardown reset the session twice")
+    }),
+    ("Visible QR pairing rests briefly between discovery windows instead of backing off", {
+        let manager = makeManager()
+        let key = Data(repeating: 6, count: 32)
+        UserDefaults.standard.set(key.base64EncodedString(), forKey: "encryptionKey")
+        try expect(manager.beginQRPairing(id: UUID(), key: key), "QR pairing window was rejected")
+        for _ in 0..<6 {
+            manager.connectionStatus = .scanning
+            manager.finishDiscoveryWindowForTesting()
+            try expect(manager.hasPendingScanRestartForTesting, "QR window did not arrange rescanning")
+            try expect(manager.scheduledScanDelayForTesting == 1, "QR window backed off while the code was visible")
+        }
+        manager.endQRPairing()
     })
 ]
 

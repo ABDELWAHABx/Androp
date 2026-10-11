@@ -66,10 +66,18 @@ class QRConnectionManager: ObservableObject {
         }
         let text: String
         if transport == .bluetooth {
-            guard AppState.shared.isBLEEnabled,
-                  let qr = BLEPairingProtocol.qrText(pairing: revision, key: key, name: AppState.shared.myDevice?.name ?? "My Mac"),
-                  BLECentralManager.shared.beginQRPairing(id: revision, key: key) else {
+            guard AppState.shared.isBLEEnabled else {
                 pairingMessage = "Enable Bluetooth in androp to pair your phone."
+                return
+            }
+            // beginQRPairing refuses to replace a live phone; say so instead of blaming the Bluetooth toggle.
+            guard !BLECentralManager.shared.isAuthenticated else {
+                pairingMessage = "A Bluetooth phone is already connected. Disconnect it to pair another phone over Bluetooth."
+                return
+            }
+            guard let qr = BLEPairingProtocol.qrText(pairing: revision, key: key, name: AppState.shared.myDevice?.name ?? "My Mac"),
+                  BLECentralManager.shared.beginQRPairing(id: revision, key: key) else {
+                pairingMessage = "Bluetooth is not ready. Check Bluetooth in System Settings and try again."
                 return
             }
             text = qr
