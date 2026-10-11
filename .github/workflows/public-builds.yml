@@ -31,8 +31,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Require the public encryption recipient
-        run: test -s .github/build-recipient.txt
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '26.6'
@@ -40,20 +38,15 @@ jobs:
         run: bash mac/Tools/Release/build-mac.sh "$RELEASE_TAG" arm64
       - name: Verify the final package on macOS 26
         run: python3 mac/Tools/Release/verify-package.py mac/dist --tag "$RELEASE_TAG" --expected-source "$GITHUB_SHA" --runtime-major 26
-      - name: Encrypt installers before uploading
-        run: |
-          set -euo pipefail
-          command -v age >/dev/null || brew install age
-          prefix="${RELEASE_TAG}-arm64"
-          COPYFILE_DISABLE=1 tar -czf "$RUNNER_TEMP/packages.tar.gz" -C mac/dist \
-            "$prefix.zip" "$prefix.dmg" "$prefix-BUILD.json" "$prefix-SHA256SUMS.txt"
-          age -R .github/build-recipient.txt -o "$RUNNER_TEMP/androp-mac.age" "$RUNNER_TEMP/packages.tar.gz"
-          rm -f "$RUNNER_TEMP/packages.tar.gz"
-      - name: Upload encrypted installers only
+      - name: Upload Mac installers
         uses: actions/upload-artifact@v4
         with:
-          name: androp-mac-encrypted
-          path: ${{ runner.temp }}/androp-mac.age
+          name: androp-mac
+          path: |
+            mac/dist/${{ env.RELEASE_TAG }}-arm64.zip
+            mac/dist/${{ env.RELEASE_TAG }}-arm64.dmg
+            mac/dist/${{ env.RELEASE_TAG }}-arm64-BUILD.json
+            mac/dist/${{ env.RELEASE_TAG }}-arm64-SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 1
           compression-level: 0

@@ -12,25 +12,9 @@ Source, workflow definitions, logs and test reports are public. Use synthetic te
 
 The Mac job compiles, runs policy and lifecycle tests, packages, checks hashes/signatures/versions and runs the ZIP's packaged app on macOS 26. The DMG receives integrity and checksum checks. Both packages come from the same staging directory; the DMG's mounted app is not independently runtime-tested.
 
-Before upload, Mac installers are bundled and encrypted with [age](https://age-encryption.org/), using `.github/build-recipient.txt`. Only the public recipient is in this repository. The private identity stays in the release maintainer's local workspace, outside Git, with restrictive permissions. There are no signing credentials or private-repository tokens in the public workflow. Public artifacts contain an encrypted archive, not directly installable downloads. Artifacts expire after one day and can be removed after private release publication.
+The Mac job uploads the ZIP, DMG, BUILD.json and checksums as the `androp-mac` artifact on the run page. It is not encrypted. Artifacts expire after one day. There are no signing credentials or private-repository tokens in the public workflow.
 
-A maintainer downloads the successful run's encrypted artifact, decrypts it locally, checks build metadata against the run's exact source commit, and publishes the original ZIP/DMG and checksums to a dedicated private download branch, linked from the private release page. This final handoff is separate from public CI. The current workspace credential can push repository files but receives HTTP 401 from the release-upload host, so this release uses the private download-branch fallback. Binary files increase that private repository’s size; ordinary release assets are preferable if upload access is restored. If the local identity is lost, generate a new identity, replace the committed public recipient, and rebuild; already published private installers remain available.
-
-Example maintainer commands, run with `age` and `gh` installed:
-
-```sh
-# Keep the generated identity outside the checkout; never commit or upload it.
-age-keygen -o /private/local/path/androp-build-identity.txt
-age-keygen -y /private/local/path/androp-build-identity.txt > .github/build-recipient.txt
-# Commit the PUBLIC recipient, then run the public workflow.
-gh run download RUN_ID --repo ABDELWAHABx/Androp \
-  --name androp-mac-encrypted --dir encrypted-build
-age -d -i /private/local/path/androp-build-identity.txt \
-  -o packages.tar.gz encrypted-build/androp-mac.age
-mkdir packages
-tar -xzf packages.tar.gz -C packages
-# Check source and checksums before uploading to the private release.
-```
+To install: download `androp-mac` from the successful run, unzip it, open `androp-v0.1.0-preview.6-arm64.zip` (or the DMG) and drag `androp.app` to Applications.
 
 Free compute does not supply Apple Developer ID signing/notarization, physical Samsung/Mac radio testing, or unrestricted artifact storage. Retention is kept short, caches are disabled and private workflows stay disabled. Check the account's Actions budget separately; disabling workflows does not reverse previously accrued usage.
 
