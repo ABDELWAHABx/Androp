@@ -23,7 +23,7 @@ env:
 
 jobs:
   mac-build:
-    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main'
+    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     runs-on: macos-26
     timeout-minutes: 45
     steps:
@@ -52,7 +52,7 @@ jobs:
           compression-level: 0
 
   macos15-policies:
-    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main'
+    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -62,7 +62,7 @@ jobs:
       - run: bash mac/Tests/run-mac-regressions.sh
 
   android:
-    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.run_android)
+    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && (github.event_name != 'workflow_dispatch' || inputs.run_android)
     runs-on: ubuntu-latest
     timeout-minutes: 35
     defaults:
