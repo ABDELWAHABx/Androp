@@ -273,6 +273,12 @@ object SyncDashboardController {
                     Intent(Intent.ACTION_VIEW).apply { setDataAndType(uri, mimeType); flags = Intent.FLAG_GRANT_READ_URI_PERMISSION },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             }
+            // Android only lets the foreground app read the clipboard, so a copy made in
+            // another app reaches the Mac with one tap here (a brief, invisible activity).
+            snapshot.transport != null -> builder.addAction(0, "Send clipboard", PendingIntent.getActivity(context, 40021,
+                Intent(context, app.androp.android.presentation.ui.activities.ClipboardActionActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
         }
         builder.addAction(0, if (snapshot.paused) "Resume" else "Pause", action(context,
             if (snapshot.paused) NotificationActionReceiver.ACTION_RESUME else NotificationActionReceiver.ACTION_PAUSE, 40018))

@@ -40,6 +40,14 @@ struct ClipboardDeliveryQueue {
         entries[0].deadline = uptime + delay
     }
 
+    /// The transport refused the write (queue full, link changing): retry soon
+    /// without spending one of the three delivery attempts.
+    mutating func notSent(id: String, at uptime: TimeInterval) {
+        guard entries.first?.id == id, entries[0].attempts > 0 else { return }
+        entries[0].attempts -= 1
+        entries[0].deadline = uptime + 1
+    }
+
     mutating func acknowledge(id: String) -> Entry? {
         guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].attempts > 0 else { return nil }
         return entries.remove(at: index)

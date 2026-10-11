@@ -157,6 +157,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
+/** Once per app process, so declining is respected until the next launch. */
+private var askedForSetupPermissions = false
+
 @OptIn(
     ExperimentalMaterial3Api::class,
     ExperimentalFoundationApi::class,
@@ -287,6 +290,26 @@ fun AirSyncMainScreen(
     val nearbyPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { viewModel.refreshPermissions(context) }
+    // One system sheet for everything androp uses; restarts Bluetooth and the dashboard
+    // so newly granted features work without reopening the app.
+    val setupPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        viewModel.refreshPermissions(context)
+        app.androp.android.AirSyncApp.getBleConnectionManager()?.refreshAvailability()
+        SyncDashboardController.refreshNotification()
+    }
+    val isPaired = uiState.lastConnectedDevice != null
+    LaunchedEffect(isPaired) {
+        // Right after pairing, ask once for everything instead of feature by feature.
+        if (isPaired && !askedForSetupPermissions) {
+            val missing = PermissionUtil.missingRuntimePermissions(context)
+            if (missing.isNotEmpty()) {
+                askedForSetupPermissions = true
+                setupPermissionLauncher.launch(missing)
+            }
+        }
+    }
     val filesPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) {
             val clips = ClipData.newUri(context.contentResolver, "Selected files", uris.first())
@@ -941,31 +964,10 @@ fun AirSyncMainScreen(
                                 MacPowerControlsCard()
 
                                 DashboardActionsCard(
-                                    connected = uiState.isConnected,
                                     paused = uiState.isAppPaused,
                                     hasPairedDevice = uiState.lastConnectedDevice != null,
-                                    notificationsAllowed = PermissionUtil.isPostNotificationPermissionGranted(context),
-                                    notificationSyncNeedsAccess = uiState.isNotificationSyncEnabled && !uiState.isNotificationEnabled,
-                                    nearbyNeedsAccess = bleSyncEnabled && !PermissionUtil.isBluetoothPermissionsGranted(context),
-                                    onRemote = { scope.launch { pagerState.scrollToPage(1) } },
-                                    onFiles = { showFilesSheet = true },
-                                    onClipboard = { scope.launch { pagerState.scrollToPage(2) } },
-                                    onSettings = { scope.launch { pagerState.scrollToPage(if (uiState.isConnected) 3 else 1) } },
                                     onPair = { launchScanner(context) },
-                                    onEnableDashboard = {
-                                        if (Build.VERSION.SDK_INT >= 33) {
-                                            dashboardPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                                        }
-                                    },
-                                    onEnableNotificationSync = { viewModel.setPermissionDialogVisible(true) },
-                                    onNearbyPermission = {
-                                        if (Build.VERSION.SDK_INT >= 31) {
-                                            nearbyPermissionLauncher.launch(arrayOf(
-                                                Manifest.permission.BLUETOOTH_CONNECT,
-                                                Manifest.permission.BLUETOOTH_ADVERTISE
-                                            ))
-                                        }
-                                    }
+                                    onRequestPermissions = { setupPermissionLauncher.launch(it) }
                                 )
 
                                 AnimatedVisibility(

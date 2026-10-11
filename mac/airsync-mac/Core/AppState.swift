@@ -103,7 +103,9 @@ class AppState: ObservableObject {
         self.showMenubarPillStroke = UserDefaults.standard.bool(forKey: "showMenubarPillStroke")
         self.menubarNotificationStyle = UserDefaults.standard.string(forKey: "menubarNotificationStyle") ?? "both"
 
-        self.isClipboardSyncEnabled = UserDefaults.standard.bool(forKey: "isClipboardSyncEnabled")
+        // Universal-clipboard behaviour by default; still a single switch in Settings.
+        self.isClipboardSyncEnabled = UserDefaults.standard.object(forKey: "isClipboardSyncEnabled") == nil
+            ? true : UserDefaults.standard.bool(forKey: "isClipboardSyncEnabled")
         self.autoStartAtLogin = UserDefaults.standard.bool(forKey: "autoStartAtLogin")
         self.keepRunningAfterQuit = UserDefaults.standard.bool(forKey: "keepRunningAfterQuit")
         self.shortcutScopes = UserDefaults.standard.dictionary(forKey: "shortcutScopes") as? [String: String] ?? [:]
@@ -1629,7 +1631,9 @@ class AppState: ObservableObject {
         guard isClipboardSyncEnabled, device != nil, !isSyncPaused, clipboardCancellable == nil else { return }
         lastClipboardChangeCount = NSPasteboard.general.changeCount
         clipboardCancellable = Timer
-            .publish(every: 2.5, tolerance: 0.5, on: .main, in: .default)
+            // Reading changeCount is a cheap integer check; poll often so a copy reaches
+            // the phone before you pick it up, and keep running while menus are open.
+            .publish(every: 0.5, tolerance: 0.2, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self = self, self.device != nil, !self.isSyncPaused else { return }
@@ -1680,6 +1684,7 @@ class AppState: ObservableObject {
             let queued = WebSocketServer.shared.sendClipboardProtocol(data: [
                 "text": entry.text, "id": entry.id, "videoHandoff": entry.videoHandoff
             ])
+            if !queued { clipboardOutbox.notSent(id: entry.id, at: now) }
             clipboardDeliveryStatus = queued ? "Waiting for clipboard confirmation" : "Clipboard transport busy"
         }
         guard let deadline = clipboardOutbox.nextDeadline else { return }

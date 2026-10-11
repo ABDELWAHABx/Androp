@@ -385,4 +385,48 @@ object PermissionUtil {
             true
         }
     }
+
+    /**
+     * Every runtime permission androp's features use that is still missing, so the app can
+     * ask once (one system sheet) instead of feature by feature.
+     */
+    fun missingRuntimePermissions(context: Context): Array<String> {
+        val wanted = buildList {
+            if (Build.VERSION.SDK_INT >= 33) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+                add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+                add(Manifest.permission.BLUETOOTH_ADVERTISE)
+                add(Manifest.permission.BLUETOOTH_SCAN)
+            }
+            add(Manifest.permission.READ_PHONE_STATE)
+            add(Manifest.permission.READ_CALL_LOG)
+            add(Manifest.permission.READ_CONTACTS)
+            add(Manifest.permission.ANSWER_PHONE_CALLS)
+            if (Build.VERSION.SDK_INT >= 37) add("android.permission.ACCESS_LOCAL_NETWORK")
+        }
+        return wanted.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }.toTypedArray()
+    }
+
+    /** A special-access screen Android only lets the user flip; [label] says what it unlocks. */
+    class SetupStep(val label: String, val open: (Context) -> Unit)
+
+    /** Special access still missing, most useful first. */
+    fun missingSetupSteps(context: Context): List<SetupStep> = buildList {
+        if (!isNotificationListenerEnabled(context))
+            add(SetupStep("Show phone notifications on your Mac") { openNotificationListenerSettings(it) })
+        if (isBatteryOptimizationPermissionRequired() && !isBatteryOptimizationDisabled(context))
+            add(SetupStep("Stay connected in the background") { openBatteryOptimizationSettings(it) })
+        if (Build.VERSION.SDK_INT >= 36 && !runCatching { Settings.System.canWrite(context) }.getOrDefault(false))
+            add(SetupStep("Let your Mac turn on Hotspot") {
+                it.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, "package:${it.packageName}".toUri())
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            })
+    }
 }
