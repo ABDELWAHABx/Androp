@@ -42,8 +42,6 @@ class BleGattServer(private val context: Context) {
     companion object {
         private const val TAG = "BleGattServer"
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        private const val SERVICE_SETUP_RETRY_MS = 2_000L
-        private const val MAX_SERVICE_SETUP_RETRIES = 5
         // A legacy scan response is 31 bytes; the name AD structure spends 2 of them on its header.
         private const val MAX_SCAN_RESPONSE_NAME_BYTES = 29
         private val authenticatedFlag = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -80,6 +78,17 @@ class BleGattServer(private val context: Context) {
 
     @Volatile private var serverGeneration = 0L
     @Volatile private var peerConnectionGeneration = 0L
+    // Heartbeat: the Mac pings an idle link. A link that stops carrying anything is
+    // torn down so both sides reconnect, instead of looking connected while dead.
+    @Volatile private var lastPeerActivityMs = 0L
+    @Volatile private var peerHeartbeatSeen = false
+    private var peerWatchdog: Job? = null
+
+    /** Called for every authenticated blePing; also proves this Mac build sends them. */
+    internal fun onPeerHeartbeat() {
+        peerHeartbeatSeen = true
+        lastPeerActivityMs = android.os.SystemClock.elapsedRealtime()
+    }
     private val sendLock = Any()
     private data class OutboundMessage(val device: BluetoothDevice, val uuid: UUID, val chunks: List<ByteArray>,
         val stateKey: String? = null, var index: Int = 0, var retries: Int = 0)
@@ -176,6 +185,9 @@ class BleGattServer(private val context: Context) {
         scope.coroutineContext.cancelChildren()
         authenticationTimeout = null
         stopAdvertising()
+        advertiseRetry = null
+        advertiseFailures = 0
+        peerWatchdog = null
         val server = gattServer
         gattServer = null
         servicesReady = false
@@ -208,6 +220,7 @@ class BleGattServer(private val context: Context) {
     private fun setupGattServer() {
         gattServer = bluetoothManager.openGattServer(context, gattServerCallback) ?: return
         val generation = ++serverGeneration
+        advertiseFastForAWhile()
         scope.launch {
             dataStoreManager.getLastConnectedDevice().collect { device ->
                 val token = device?.symmetricKey?.takeIf { it.isNotBlank() }
@@ -281,16 +294,15 @@ class BleGattServer(private val context: Context) {
     /**
      * addService returns false before the server is registered, and the stack then sends no
      * onServiceAdded. Leaving gattServer set would make every start() a no-op and never advertise.
+     * After a few quick retries keep trying once a minute: giving up left the phone invisible
+     * to the Mac until Bluetooth was toggled.
      */
     private fun retryServiceSetupLater() {
         stop()
-        if (serviceSetupRetries++ >= MAX_SERVICE_SETUP_RETRIES) {
-            Log.w(TAG, "Bluetooth stack keeps rejecting GATT service setup; waiting for the next lifecycle event")
-            return
-        }
-        Log.w(TAG, "Bluetooth stack rejected GATT service setup; retrying")
+        val delayMs = BleLinkPolicy.serviceSetupRetryDelayMs(serviceSetupRetries++)
+        Log.w(TAG, "Bluetooth stack rejected GATT service setup; retrying in ${delayMs / 1000}s")
         scope.launch {
-            delay(SERVICE_SETUP_RETRY_MS)
+            delay(delayMs)
             start()
         }
     }
@@ -300,6 +312,31 @@ class BleGattServer(private val context: Context) {
     @Volatile private var advertisingToken: String? = null
     @Volatile private var advertiseProof = true
     private var proofRotation: Job? = null
+    /** Until this time advertise faster, so a Mac that just lost the link finds the phone again quickly. */
+    @Volatile private var fastAdvertiseUntil = 0L
+    private var advertiseSpeedChange: Job? = null
+    private var advertiseRetry: Job? = null
+    private var advertiseFailures = 0
+
+    private fun advertiseFastForAWhile() {
+        fastAdvertiseUntil = android.os.SystemClock.elapsedRealtime() + BleLinkPolicy.FAST_ADVERTISE_MS
+    }
+
+    /** Advertising that failed for a temporary reason comes back on its own instead of waiting for a radio event. */
+    private fun retryAdvertisingLater(errorCode: Int?) {
+        if (errorCode != null && !BleLinkPolicy.shouldRetryAdvertising(errorCode)) {
+            Log.w(TAG, "BLE advertising is not supported on this phone")
+            return
+        }
+        val delayMs = BleLinkPolicy.advertiseRetryDelayMs(++advertiseFailures)
+        Log.w(TAG, "Retrying BLE advertising in ${delayMs / 1000}s")
+        advertiseRetry?.cancel()
+        val generation = serverGeneration
+        advertiseRetry = scope.launch {
+            delay(delayMs)
+            if (generation == serverGeneration) startAdvertising()
+        }
+    }
 
     private fun restartAdvertisingIfIdle() {
         if (authenticatedDevice != null || currentAdvertiseCallback == null) return
@@ -313,14 +350,28 @@ class BleGattServer(private val context: Context) {
         // (watch, earbuds) must never hide the phone from the Mac.
         if (gattServer == null || !servicesReady || isAdvertisingPaused || authenticatedDevice != null) return
         if (currentAdvertiseCallback != null) return
+        advertiseRetry?.cancel()
+        advertiseRetry = null
 
         val advertiser = try { adapter.bluetoothLeAdvertiser } catch (failure: RuntimeException) {
             Log.w(TAG, "Bluetooth advertiser unavailable", failure)
             null
-        } ?: return
+        } ?: run { retryAdvertisingLater(null); return }
 
+        val now = android.os.SystemClock.elapsedRealtime()
+        val speed = BleLinkPolicy.advertiseSpeed(now, fastAdvertiseUntil, pendingPairing != null)
+        advertiseSpeedChange?.cancel()
+        advertiseSpeedChange = null
+        if (speed == BleLinkPolicy.AdvertiseSpeed.FAST) {
+            // Drop back to low power once the reconnect window has passed.
+            val generation = serverGeneration
+            advertiseSpeedChange = scope.launch {
+                delay(fastAdvertiseUntil - now + 500)
+                if (generation == serverGeneration) restartAdvertisingIfIdle()
+            }
+        }
         val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_POWER)
+            .setAdvertiseMode(BleLinkPolicy.advertiseMode(speed))
             .setConnectable(true)
             .setTimeout(0)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
@@ -357,6 +408,7 @@ class BleGattServer(private val context: Context) {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
                 if (currentAdvertiseCallback !== this || gattServer == null || isAdvertisingPaused) return
                 Log.d(TAG, "BLE Advertising started successfully")
+                advertiseFailures = 0
                 _connectionState.value = BleConnectionState.ADVERTISING
             }
 
@@ -376,6 +428,8 @@ class BleGattServer(private val context: Context) {
                     Log.e(TAG, "BLE Advertising failed: $errorCode")
                     currentAdvertiseCallback = null
                     _connectionState.value = BleConnectionState.DISCONNECTED
+                    // Usually another app holding every advertiser slot; it frees up.
+                    retryAdvertisingLater(errorCode)
                 }
             }
         }
@@ -385,13 +439,16 @@ class BleGattServer(private val context: Context) {
         catch (failure: RuntimeException) {
             currentAdvertiseCallback = null
             _connectionState.value = BleConnectionState.DISCONNECTED
-            Log.w(TAG, "Unable to advertise; waiting for a radio/settings event", failure)
+            Log.w(TAG, "Unable to advertise", failure)
+            retryAdvertisingLater(null)
         }
     }
 
     private fun stopAdvertising() {
         proofRotation?.cancel()
         proofRotation = null
+        advertiseSpeedChange?.cancel()
+        advertiseSpeedChange = null
         val callback = currentAdvertiseCallback ?: return
         currentAdvertiseCallback = null
         runCatching { adapter.bluetoothLeAdvertiser?.stopAdvertising(callback) }
@@ -406,6 +463,8 @@ class BleGattServer(private val context: Context) {
         if (isAdvertisingPaused) return
         Log.d(TAG, "BLE advertising paused")
         isAdvertisingPaused = true
+        advertiseRetry?.cancel()
+        advertiseRetry = null
         stopAdvertising()
         if (_connectionState.value == BleConnectionState.ADVERTISING) {
             _connectionState.value = BleConnectionState.DISCONNECTED
@@ -471,6 +530,10 @@ class BleGattServer(private val context: Context) {
                     it.replayGuard.disconnected()
                 }
                 if (authenticatedDevice == device) {
+                    // The Mac rescans continuously right after losing the link; meet it halfway.
+                    advertiseFastForAWhile()
+                    peerWatchdog?.cancel()
+                    peerWatchdog = null
                     authenticatedDevice = null
                     authenticatedPeer = null
                     clearSendQueue()
@@ -556,6 +619,7 @@ class BleGattServer(private val context: Context) {
                 return
             }
 
+            if (device == authenticatedDevice) lastPeerActivityMs = android.os.SystemClock.elapsedRealtime()
             when (characteristic.uuid) {
                 BleConstants.CHAR_AUTH_TOKEN -> {
                     // One Mac at a time: a second central cannot take over a live session.
@@ -734,6 +798,46 @@ class BleGattServer(private val context: Context) {
         }
     }
 
+    private fun startPeerWatchdog(device: BluetoothDevice) {
+        peerWatchdog?.cancel()
+        lastPeerActivityMs = android.os.SystemClock.elapsedRealtime()
+        peerHeartbeatSeen = false
+        val generation = serverGeneration
+        peerWatchdog = scope.launch {
+            while (true) {
+                delay(BleLinkPolicy.PEER_WATCHDOG_INTERVAL_MS)
+                if (generation != serverGeneration || authenticatedDevice != device) return@launch
+                if (BleLinkPolicy.peerIsSilent(peerHeartbeatSeen, lastPeerActivityMs, android.os.SystemClock.elapsedRealtime())) {
+                    Log.w(TAG, "Mac stopped answering over Bluetooth; dropping the link so it can reconnect")
+                    dropAuthenticatedPeer(device)
+                    return@launch
+                }
+            }
+        }
+    }
+
+    /** Forget a Mac whose link stopped working, disconnect it and advertise for its return. */
+    private fun dropAuthenticatedPeer(device: BluetoothDevice) {
+        clearSendQueue()
+        app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this, allowWifiFallback = true)
+        isAuthenticated = false
+        authenticatedPeer = null
+        authenticatedDevice = null
+        authenticatedFlag.set(false)
+        peerWatchdog?.cancel()
+        peerWatchdog = null
+        ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
+        if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
+        runCatching { gattServer?.cancelConnection(device) }
+        if (gattServer != null && !isAdvertisingPaused) {
+            _connectionState.value = BleConnectionState.ADVERTISING
+            advertiseFastForAWhile()
+            // A half-dead link may never report its disconnect; do not wait for it.
+            stopAdvertising()
+            startAdvertising()
+        }
+    }
+
     /** First use of androp's GATT service by a central: it may be the Mac, so give it time to authenticate. */
     private fun markGattPeer(device: BluetoothDevice) {
         if (!gattPeers.add(device.address)) return
@@ -797,6 +901,7 @@ class BleGattServer(private val context: Context) {
                     authenticatedPeer = AuthenticatedPeer(storedKey)
                     isAuthenticated = true
                     authenticatedFlag.set(true)
+                    startPeerWatchdog(device)
                     ClipboardSyncManager.onPeerChanged(storedKey)
                     ClipboardSyncManager.onTransportChanged(true)
                     _connectionState.value = BleConnectionState.AUTHENTICATED
@@ -1014,15 +1119,7 @@ class BleGattServer(private val context: Context) {
                     synchronized(sendLock) {
                         if (generation == serverGeneration && notificationInFlight && sendQueue.peekFirst() === message) {
                             Log.w(TAG, "BLE notification completion timed out; resetting connection")
-                            clearSendQueue()
-                            app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this@BleGattServer, allowWifiFallback = true)
-                            isAuthenticated = false
-                            authenticatedPeer = null
-                            authenticatedDevice = null
-                            authenticatedFlag.set(false)
-                            ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
-                            if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
-                            gattServer?.cancelConnection(message.device)
+                            dropAuthenticatedPeer(message.device)
                         }
                     }
                 }
@@ -1100,6 +1197,8 @@ class BleGattServer(private val context: Context) {
         isAuthenticated = false
         authenticatedPeer = null
         authenticatedFlag.set(false)
+        peerWatchdog?.cancel()
+        peerWatchdog = null
         ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
         if (!app.androp.android.utils.WebSocketUtil.isWifiConnected()) app.androp.android.utils.SyncManager.stopPeriodicSync()
         _connectionState.value = if (gattServer != null && !isAdvertisingPaused) BleConnectionState.ADVERTISING else BleConnectionState.DISCONNECTED

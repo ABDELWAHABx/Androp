@@ -213,6 +213,15 @@ object BleTransportBridge {
         // characteristic without changing legacy media command framing.
         if (action.toByteArray(Charsets.UTF_8).size <= 64 * 1024 && action.startsWith("{")) {
             val message = try { JSONObject(action) } catch (_: Exception) { null }
+            if (message?.optString("type") == "blePing") {
+                // Heartbeat from the Mac: answer so it knows the link still carries data.
+                val server = gattServer ?: return
+                if (!server.isAuthenticated || app.androp.android.utils.BackgroundWorkController.isPaused) return
+                server.onPeerHeartbeat()
+                val id = message.optJSONObject("data")?.optLong("id", 0L) ?: 0L
+                sendControl("blePong", JSONObject().put("id", id))
+                return
+            }
             if (message?.optString("type") == "transferNetwork") {
                 val server = gattServer ?: return
                 app.androp.android.utils.TransferNetworkManager.receive(context, server, message, action.toByteArray(Charsets.UTF_8).size)

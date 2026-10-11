@@ -12,6 +12,7 @@ swiftc -swift-version 5 -D BLE_LIFECYCLE_TESTS \
     "$test_root/airsync-mac/Core/BLE/BLECentralManager.swift" \
     "$test_root/airsync-mac/Core/BLE/BLEPairingProtocol.swift" \
     "$test_root/airsync-mac/Core/BLE/BLEAdvertisementProof.swift" \
+    "$test_root/airsync-mac/Core/BLE/BLELinkPolicy.swift" \
     "$test_root/airsync-mac/Core/BLE/BLEConstants.swift" \
     "$test_root/airsync-mac/Core/BLE/BLEChunkUtil.swift" \
     "$test_root/airsync-mac/Model/DeviceStatus.swift" \

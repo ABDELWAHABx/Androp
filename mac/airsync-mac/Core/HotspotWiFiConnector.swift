@@ -186,6 +186,7 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
     private var bluetoothPeer: String?
     private var requestedSSID = ""
     private var loadingNetworks = false
+    private var lastPhoneRequestID: String?
 
     private override init() {
         super.init()
@@ -220,6 +221,33 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
                 if self.ssid.isEmpty, !self.isBusy,
                    let guess = HotspotWiFiPolicy.likelyHotspot(phoneName: AppState.shared.device?.name, savedNetworks: names) {
                     self.ssid = guess
+                }
+            }
+        }
+    }
+
+    /// The phone's own "Connect Mac" button. It arrives over Bluetooth and Wi-Fi alike,
+    /// so the second copy of the same request is ignored.
+    func connectRequestedByPhone(_ data: [String: Any]) {
+        guard let id = data["id"] as? String, !id.isEmpty, id.count <= 128, id != lastPhoneRequestID,
+              !AppState.shared.isSyncPaused, AppState.shared.device != nil, !isBusy else { return }
+        lastPhoneRequestID = id
+        selectPhone()
+        if HotspotWiFiPolicy.validSSID(ssid) { connect(); return }
+        // First use from the phone: find the hotspot among saved networks, as the Mac's own row does.
+        HotspotWiFiWorker.queue.async {
+            let names = HotspotWiFiWorker.savedNetworks()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isBusy else { return }
+                self.savedNetworks = names
+                if !HotspotWiFiPolicy.validSSID(self.ssid),
+                   let guess = HotspotWiFiPolicy.likelyHotspot(phoneName: AppState.shared.device?.name, savedNetworks: names) {
+                    self.ssid = guess
+                }
+                if HotspotWiFiPolicy.validSSID(self.ssid) {
+                    self.connect()
+                } else {
+                    self.message = "Choose your phone's hotspot under Hotspot on your Mac once, then try again."
                 }
             }
         }
@@ -273,38 +301,29 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         guard attempt === token, !token.isCancelled, !AppState.shared.isSyncPaused,
               PhoneHotspotTransport.matches(deviceID: phoneID ?? "", bluetoothPeer: bluetoothPeer) else { finish(token, "Connection cancelled. Reconnect your phone and retry."); return }
         message = "Turning on your phone's hotspot…"
-        // Ask for a fresh observation even if an older status said it was on.
-        PhoneHotspotManager.shared.send(.status) { [weak self] enabled in
+        // One round trip: the phone answers "enabled" at once when it is already on, and
+        // explains (with a one-tap action on the phone) when it can't switch it itself.
+        // A separate status request first cost a second Bluetooth round trip on every Connect.
+        PhoneHotspotManager.shared.send(.enable) { [weak self] enabled in
             guard let self, self.attempt === token, !token.isCancelled else { return }
-            guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else {
-                self.finish(token, "Phone changed. Try again."); return
+            if enabled == true {
+                guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else {
+                    self.finish(token, "Phone changed. Try again."); return
+                }
+                self.join(token); return
             }
-            if enabled == true { self.join(token); return }
-            guard enabled != nil, PhoneHotspotManager.shared.state?.canAttemptControl == true else {
-                // No answer, or the phone can't switch it itself: never dead-end.
-                self.waitForManualHotspot(token)
+            // Some phones drop their old Wi-Fi before they can send the
+            // final state; scanning for the real network confirms instead.
+            if enabled == nil && HotspotWiFiPolicy.mayRecoverHandoff(
+                status: PhoneHotspotManager.shared.state?.status,
+                hasPhone: AppState.shared.device != nil,
+                paused: AppState.shared.isSyncPaused,
+                manuallyDisconnected: UserDefaults.standard.isManuallyDisconnected) {
+                self.join(token, patient: true)
                 return
             }
-            PhoneHotspotManager.shared.send(.enable) { [weak self] enabled in
-                guard let self, self.attempt === token, !token.isCancelled else { return }
-                if enabled == true {
-                    guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else {
-                        self.finish(token, "Phone changed. Try again."); return
-                    }
-                    self.join(token); return
-                }
-                // Some phones drop their old Wi-Fi before they can send the
-                // final state; scanning for the real network confirms instead.
-                if enabled == nil && HotspotWiFiPolicy.mayRecoverHandoff(
-                    status: PhoneHotspotManager.shared.state?.status,
-                    hasPhone: AppState.shared.device != nil,
-                    paused: AppState.shared.isSyncPaused,
-                    manuallyDisconnected: UserDefaults.standard.isManuallyDisconnected) {
-                    self.join(token, patient: true)
-                    return
-                }
-                self.waitForManualHotspot(token)
-            }
+            // No answer, or the phone can't switch it itself: never dead-end.
+            self.waitForManualHotspot(token)
         }
     }
 

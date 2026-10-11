@@ -79,6 +79,15 @@ class BLECentralManager: NSObject, ObservableObject {
     private var scanRestartGeneration = 0
     private var isTearingDown = false
     private(set) var sessionGeneration = 0
+    /// While set, discovery rests half a second instead of backing off (see BLELinkPolicy).
+    private var reconnectBurstUntil: Date?
+    // Heartbeat: an authenticated link that stops carrying anything is torn down and
+    // reconnected instead of looking connected while dead.
+    private var heartbeatTimer: Timer?
+    private var heartbeatSequence = 0
+    private var missedHeartbeats = 0
+    private var heartbeatSupported = false
+    private var notifyRetried: Set<CBUUID> = []
     
     override init() {
         super.init()
@@ -110,7 +119,23 @@ class BLECentralManager: NSObject, ObservableObject {
     func scheduleScanRestartForTesting(after delay: TimeInterval) {
         scheduleAutomaticScanRestart(after: delay)
     }
+    var reconnectBurstActiveForTesting: Bool { BLELinkPolicy.inReconnectBurst(until: reconnectBurstUntil) }
+    func endReconnectBurstForTesting() { reconnectBurstUntil = nil }
     #endif
+
+    /// Scan almost continuously for a minute: after a lost link, a wake from sleep, or the radio
+    /// coming back, the phone is most likely nearby and advertising fast for the same minute.
+    func beginReconnectBurst() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.beginReconnectBurst() }
+            return
+        }
+        reconnectBurstUntil = Date().addingTimeInterval(BLELinkPolicy.reconnectBurst)
+        discoveryBackoffStep = 0
+        failureBackoffStep = 0
+        // Replace a long rest that is already queued.
+        if scanRestartWorkItem != nil { scheduleAutomaticScanRestart(after: BLELinkPolicy.burstRescanDelay) }
+    }
 
     // Wi-Fi is an independent transport, not a reason to tear down BLE.
     // AppState can request discovery on meaningful lifecycle events without
@@ -221,6 +246,10 @@ class BLECentralManager: NSObject, ObservableObject {
             scheduleAutomaticScanRestart(after: 1)
             return
         }
+        if BLELinkPolicy.inReconnectBurst(until: reconnectBurstUntil) {
+            scheduleAutomaticScanRestart(after: BLELinkPolicy.burstRescanDelay)
+            return
+        }
         // Established BLE connections have no scan timer.
         // Ten seconds of discovery, then 5, 10, 20 and at most 30 seconds of rest,
         // so a phone coming back into range reconnects within about half a minute.
@@ -240,6 +269,10 @@ class BLECentralManager: NSObject, ObservableObject {
         // server must be revisited within seconds, not after a multi-minute backoff.
         if activeQRPairingSession != nil {
             scheduleAutomaticScanRestart(after: 1)
+            return
+        }
+        if BLELinkPolicy.inReconnectBurst(until: reconnectBurstUntil) {
+            scheduleAutomaticScanRestart(after: BLELinkPolicy.burstRescanDelay)
             return
         }
         let delay = min(30, 3 * pow(2, Double(failureBackoffStep)))
@@ -306,7 +339,7 @@ class BLECentralManager: NSObject, ObservableObject {
             return
         }
         guard !isTearingDown else { return }
-        if !restartScanning { endQRPairing() }
+        if !restartScanning { endQRPairing(); reconnectBurstUntil = nil }
         isManuallyDisconnected = !restartScanning
         tearDownConnection(cancelPeripheral: true)
         if restartScanning {
@@ -383,6 +416,44 @@ class BLECentralManager: NSObject, ObservableObject {
         qrPairingNonce = nil
         qrPairingResponse = nil
         qrPairingChunks.clear()
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
+        missedHeartbeats = 0
+        heartbeatSupported = false
+        notifyRetried.removeAll()
+    }
+
+    private func startHeartbeat() {
+        heartbeatTimer?.invalidate()
+        missedHeartbeats = 0
+        heartbeatSupported = false
+        let generation = sessionGeneration
+        let timer = Timer(timeInterval: BLELinkPolicy.heartbeatInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.heartbeatTick(generation: generation) }
+        }
+        timer.tolerance = 2
+        RunLoop.main.add(timer, forMode: .common)
+        heartbeatTimer = timer
+    }
+
+    private func heartbeatTick(generation: Int) {
+        guard sessionGeneration == generation, isAuthenticated, !AppState.shared.isSyncPaused else {
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
+            return
+        }
+        if BLELinkPolicy.linkIsDead(heartbeatSupported: heartbeatSupported, missedHeartbeats: missedHeartbeats) {
+            print("[BLE] Phone stopped answering; reconnecting")
+            beginReconnectBurst()
+            retryAfterTransportFailure()
+            return
+        }
+        heartbeatSequence &+= 1
+        // Also keeps the phone's own watchdog satisfied when only it has been sending.
+        if let ping = BLELinkPolicy.pingPayload(id: heartbeatSequence),
+           writeChunked(characteristicUUID: BLEConstants.charMediaControl, payload: ping) {
+            missedHeartbeats += 1
+        }
     }
 
     func write(characteristicUUID: CBUUID, data: Data) {
@@ -522,6 +593,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
         if central.state == .poweredOn {
             if AppState.shared.isBLEEnabled {
                 print("[BLE] Bluetooth powered on, starting scan")
+                beginReconnectBurst()
                 ensureAutomaticConnection()
             }
         } else {
@@ -606,6 +678,8 @@ extension BLECentralManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard peripheral === discoveredPeripheral else { return }
         print("[BLE] Disconnected: \(error?.localizedDescription ?? "clean")")
+        // A working link that dropped usually means a brief range or radio blip: look again at once.
+        if isAuthenticated { beginReconnectBurst() }
         retryAfterTransportFailure()
     }
 }
@@ -718,6 +792,8 @@ extension BLECentralManager: CBPeripheralDelegate {
             return
         }
         guard let data = characteristic.value, characteristic.uuid == BLEConstants.charAuthResult || isAuthenticated else { return }
+        // Anything arriving proves the link works.
+        missedHeartbeats = 0
         
         switch characteristic.uuid {
         case BLEConstants.charAuthResult:
@@ -778,7 +854,9 @@ extension BLECentralManager: CBPeripheralDelegate {
                 discoveryBackoffStep = 0
                 failureBackoffStep = 0
                 rejectedPeers.removeValue(forKey: peripheral.identifier.uuidString)
+                reconnectBurstUntil = nil
                 connectionStatus = .authenticated
+                startHeartbeat()
                 let devName = qrPairingResponse?.name ?? AppState.getPreferredDeviceName(fallback: discoveredPeripheral?.name)
                 connectedDeviceName = devName
                 endQRPairing()
@@ -864,6 +942,12 @@ extension BLECentralManager: CBPeripheralDelegate {
               AppState.shared.isBLEEnabled else { return }
         if let error = error {
             print("[BLE] Error updating notification state for characteristic \(characteristic.uuid): \(error.localizedDescription)")
+            // Authentication waits for every subscription; one transient failure used to
+            // stall it until the connection timer gave up. Try each one once more.
+            if !notifyRetried.contains(characteristic.uuid) {
+                notifyRetried.insert(characteristic.uuid)
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
         } else {
             print("[BLE] Notification state updated for \(characteristic.uuid): \(characteristic.isNotifying)")
             authenticateWhenReady(peripheral)
@@ -909,6 +993,10 @@ extension BLECentralManager: CBPeripheralDelegate {
         let assembler = chunkBuffers[uuid] ?? BLEChunkUtil.Reassembler()
         chunkBuffers[uuid] = assembler
         if let completePayload = assembler.add(data) {
+            if uuid == BLEConstants.charMacControl, BLELinkPolicy.isPong(completePayload) {
+                heartbeatSupported = true
+                return
+            }
             BLETransportBridge.shared.handleIncoming(uuid: uuid, payload: completePayload)
         }
     }

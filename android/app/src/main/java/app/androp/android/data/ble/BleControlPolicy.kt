@@ -7,7 +7,8 @@ object BleControlPolicy {
         "mediaControl", "volumeControl", "callControl", "notificationAction", "toggleNowPlaying",
         "macVolume", "modifierStatus", "phoneHotspotControl", "status", "remoteControlStatus")
     private val outgoing = setOf("macMediaControl", "notificationActionResponse", "dismissalResponse",
-        "mediaControlResponse", "callControlResponse", "call_event", "call_progress", "phoneHotspotState")
+        "mediaControlResponse", "callControlResponse", "call_event", "call_progress", "phoneHotspotState",
+        "phoneHotspotOffer")
     fun acceptsIncoming(type: String, bytes: Int) = bytes in 1..MAX_CONTROL_BYTES && type in incoming
     fun acceptsOutgoing(type: String, bytes: Int) = bytes in 1..MAX_CONTROL_BYTES && type in outgoing
     fun acceptsRemoteAction(action: String) = action in setOf("mouse_move", "mouse_scroll", "mouse_click", "keypress", "type", "arrow_up", "arrow_down",

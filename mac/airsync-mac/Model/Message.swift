@@ -51,6 +51,8 @@ enum MessageType: String, Codable {
     case webDavAccess
     case transferNetwork
     case phoneHotspotState
+    // the phone's own "Connect Mac" hotspot button
+    case phoneHotspotOffer
 }
 
 struct Message: Codable {

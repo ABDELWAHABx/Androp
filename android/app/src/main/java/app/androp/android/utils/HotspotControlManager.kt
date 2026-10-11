@@ -46,7 +46,7 @@ object HotspotControlManager {
             if (BackgroundWorkController.isPaused) return@post
             val now = android.os.SystemClock.elapsedRealtime()
             completed.entries.removeAll { now - it.value.first > 60_000 }
-            completed["$action:$id"]?.let { WebSocketUtil.sendMessage(it.second); return@post }
+            completed["$action:$id"]?.let { deliver(it.second); return@post }
             if (pending?.id == id && pending?.action == action) return@post
             val current = isHotspotOn(application)
             when (action) {
@@ -155,7 +155,34 @@ object HotspotControlManager {
             completed["$action:$id"] = android.os.SystemClock.elapsedRealtime() to envelope
             while (completed.size > 16) completed.remove(completed.keys.first())
         }
-        WebSocketUtil.sendMessage(envelope)
+        deliver(envelope)
+    }
+
+    /**
+     * Turning Hotspot on drops the phone's own Wi-Fi on most phones, and the socket with it,
+     * so an answer sent only over Wi-Fi was often lost and the Mac waited for nothing.
+     * Bluetooth survives the switch: send over it whenever it is up, and over Wi-Fi too while
+     * that socket is open. The Mac matches answers by request ID, so a second copy is ignored.
+     */
+    private fun deliver(envelope: String) {
+        val message = runCatching { JSONObject(envelope) }.getOrNull() ?: return
+        val viaBluetooth = app.androp.android.data.ble.BleTransportBridge.sendControl(
+            message.optString("type"), message.optJSONObject("data") ?: JSONObject())
+        if (!viaBluetooth || WebSocketUtil.isWifiConnected()) WebSocketUtil.sendMessage(envelope)
+    }
+
+    /**
+     * The phone's own "Connect Mac" button: ask the paired Mac to run its Connect, which turns
+     * Hotspot on (or waits for you to) and joins it with the Mac's saved password.
+     * Returns false when no Mac is connected to ask.
+     */
+    fun askMacToConnect(): Boolean {
+        if (BackgroundWorkController.isPaused) return false
+        val data = JSONObject().put("id", java.util.UUID.randomUUID().toString())
+        val envelope = JSONObject().put("type", "phoneHotspotOffer").put("data", data).toString()
+        val viaBluetooth = app.androp.android.data.ble.BleTransportBridge.sendControl("phoneHotspotOffer", data)
+        val viaWifi = WebSocketUtil.isWifiConnected() && WebSocketUtil.sendMessage(envelope)
+        return viaBluetooth || viaWifi
     }
 
     @RequiresApi(36)

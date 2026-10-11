@@ -1296,6 +1296,8 @@ class AppState: ObservableObject {
             UserDefaults.standard.isManuallyDisconnected = false
             if isBLEEnabled {
                 BLECentralManager.shared.isManuallyDisconnected = false
+                // Resume (including wake from sleep): the phone is most likely right here.
+                BLECentralManager.shared.beginReconnectBurst()
                 BLECentralManager.shared.startScanning()
             }
             updateConnectionMonitoring()

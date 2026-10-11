@@ -270,6 +270,49 @@ let cases: [(String, () throws -> Void)] = [
             try expect(manager.scheduledScanDelayForTesting == 1, "QR window backed off while the code was visible")
         }
         manager.endQRPairing()
+    }),
+    ("A lost link rescans almost at once during the reconnect burst, then backs off as before", {
+        let manager = makeManager()
+        manager.beginReconnectBurst()
+        try expect(manager.reconnectBurstActiveForTesting, "reconnect burst did not start")
+        for _ in 0..<5 {
+            manager.retryTransportFailureForTesting()
+            try expect(manager.scheduledScanDelayForTesting == BLELinkPolicy.burstRescanDelay, "failed reconnect rested during the burst")
+            manager.connectionStatus = .scanning
+            manager.finishDiscoveryWindowForTesting()
+            try expect(manager.scheduledScanDelayForTesting == BLELinkPolicy.burstRescanDelay, "missed discovery rested during the burst")
+        }
+        manager.endReconnectBurstForTesting()
+        manager.connectionStatus = .scanning
+        manager.finishDiscoveryWindowForTesting()
+        try expect((manager.scheduledScanDelayForTesting ?? 0) >= 5, "discovery kept scanning after the burst ended")
+        manager.disconnect()
+    }),
+    ("Manual disconnect and pause end the reconnect burst", {
+        let manager = makeManager()
+        manager.beginReconnectBurst()
+        manager.disconnect()
+        try expect(!manager.reconnectBurstActiveForTesting, "manual disconnect kept rescanning")
+        try expect(!manager.hasPendingScanRestartForTesting, "manual disconnect left a rescan queued")
+        let paused = makeManager()
+        paused.beginReconnectBurst()
+        AppState.shared.isSyncPaused = true
+        paused.retryTransportFailureForTesting()
+        try expect(!paused.hasPendingScanRestartForTesting, "burst rescanned while paused")
+        AppState.shared.isSyncPaused = false
+    }),
+    ("Heartbeat only judges a phone that answers pings, and fits inside the phone's own limit", {
+        try expect(!BLELinkPolicy.linkIsDead(heartbeatSupported: false, missedHeartbeats: 1_000), "older phone build would be dropped every minute")
+        try expect(!BLELinkPolicy.linkIsDead(heartbeatSupported: true, missedHeartbeats: BLELinkPolicy.maximumMissedHeartbeats - 1), "link dropped too eagerly")
+        try expect(BLELinkPolicy.linkIsDead(heartbeatSupported: true, missedHeartbeats: BLELinkPolicy.maximumMissedHeartbeats), "dead link was kept")
+        try expect(BLELinkPolicy.isPong(#"{"type":"blePong","data":{"id":4}}"#), "pong was not recognised")
+        try expect(!BLELinkPolicy.isPong(#"{"type":"status","data":{}}"#), "ordinary control message was taken for a pong")
+        let ping = BLELinkPolicy.pingPayload(id: 7) ?? ""
+        let decoded = (try? JSONSerialization.jsonObject(with: Data(ping.utf8))) as? [String: Any]
+        try expect(decoded?["type"] as? String == "blePing", "ping envelope type changed")
+        // BleLinkPolicy.kt PEER_SILENCE_LIMIT_MS is 240 s; the Mac must reconnect well before it.
+        try expect(BLELinkPolicy.heartbeatInterval * Double(BLELinkPolicy.maximumMissedHeartbeats + 1) * 2 <= 240,
+                   "phone could drop a Mac that is still pinging")
     })
 ]
 

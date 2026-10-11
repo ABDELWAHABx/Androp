@@ -952,6 +952,15 @@ fun AirSyncMainScreen(
                                             onRemoteAction = { sendRemoteAction(it) }
                                         )
                                     }
+
+                                    // One tap: the Mac turns this phone's Hotspot on and joins it.
+                                    AnimatedVisibility(
+                                        visible = uiState.isConnected && !uiState.isAppPaused,
+                                        enter = expandVertically() + fadeIn(),
+                                        exit = shrinkVertically() + fadeOut()
+                                    ) {
+                                        app.androp.android.presentation.ui.components.cards.HotspotConnectMacCard(context)
+                                    }
                                 }
 
                                 IncomingNearbyConsentCard()

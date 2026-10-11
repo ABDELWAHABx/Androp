@@ -87,6 +87,8 @@ extension WebSocketServer {
             }
         case .phoneHotspotState:
             if let data = message.data.value as? [String: Any] { PhoneHotspotManager.shared.handleState(data) }
+        case .phoneHotspotOffer:
+            if let data = message.data.value as? [String: Any] { HotspotWiFiConnector.shared.connectRequestedByPhone(data) }
         case .webDavAccess:
             guard !AppState.shared.isSyncPaused,
                   let device = AppState.shared.device, device.isRegularConnection,
@@ -115,6 +117,8 @@ extension WebSocketServer {
         switch message.type {
         case .phoneHotspotState:
             if let data = message.data.value as? [String: Any] { PhoneHotspotManager.shared.handleState(data) }
+        case .phoneHotspotOffer:
+            if let data = message.data.value as? [String: Any] { HotspotWiFiConnector.shared.connectRequestedByPhone(data) }
         case .status:
             if let data = message.data.value as? [String: Any],
                let battery = data["battery"] as? [String: Any],

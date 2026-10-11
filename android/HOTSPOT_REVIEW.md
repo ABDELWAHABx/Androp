@@ -11,7 +11,8 @@ Android provides no ordinary permission for an app to toggle global Data Saver. 
 ## Protocol and lifecycle
 
 - Incoming `phoneHotspotControl`: `data.id` (nonempty, at most 128 characters), `data.action`: `status`, `enable`, `disable`, or `setup`.
-- Outgoing `phoneHotspotState`: same ID/action, `status`, `message`, `apiSupported`, `writeSettingsGranted`, `dataSaverEnabled` (nullable), `hotspotEnabled` (nullable), `canAttemptControl`, optional numeric `errorCode`.
+- Outgoing `phoneHotspotState` is sent over authenticated BLE whenever it is up, and over Wi-Fi while that socket is open (turning Hotspot on usually drops the phone's own Wi-Fi). Same ID/action, `status`, `message`, `apiSupported`, `writeSettingsGranted`, `dataSaverEnabled` (nullable), `hotspotEnabled` (nullable), `canAttemptControl`, optional numeric `errorCode`.
+- Outgoing `phoneHotspotOffer` (`data.id`): the phone's **Connect Mac** button asks the Mac to run its normal Connect. Where Android cannot switch Hotspot itself, the button opens Hotspot settings and the Mac joins once it appears.
 - Status values: `ready`, `requesting`, `enabled`, `disabled`, `permissionRequired`, `dataSaverEnabled`, `unsupported`, `failed`, `unknown`, `busy`.
 - `canAttemptControl` means API version and special access prerequisites are met; firmware may still refuse the attempt.
 - Real Wi-Fi tethered-interface callbacks confirm state. A successful submission alone never becomes an enabled/disabled response. Internet availability still depends on upstream cellular service and the carrier.
