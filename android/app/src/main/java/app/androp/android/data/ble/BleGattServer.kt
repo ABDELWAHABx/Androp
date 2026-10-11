@@ -42,6 +42,10 @@ class BleGattServer(private val context: Context) {
     companion object {
         private const val TAG = "BleGattServer"
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+        private const val SERVICE_SETUP_RETRY_MS = 2_000L
+        private const val MAX_SERVICE_SETUP_RETRIES = 5
+        // A legacy scan response is 31 bytes; the name AD structure spends 2 of them on its header.
+        private const val MAX_SCAN_RESPONSE_NAME_BYTES = 29
         private val authenticatedFlag = java.util.concurrent.atomic.AtomicBoolean(false)
         fun isAnyAuthenticated(): Boolean = authenticatedFlag.get()
     }
@@ -248,8 +252,27 @@ class BleGattServer(private val context: Context) {
             delay(300)
             if (generation == serverGeneration && gattServer != null && pendingServices.isNotEmpty()) {
                 val first = pendingServices.removeAt(0)
-                gattServer?.addService(first)
+                if (gattServer?.addService(first) != true) retryServiceSetupLater()
             }
+        }
+    }
+
+    private var serviceSetupRetries = 0
+
+    /**
+     * addService returns false before the server is registered, and the stack then sends no
+     * onServiceAdded. Leaving gattServer set would make every start() a no-op and never advertise.
+     */
+    private fun retryServiceSetupLater() {
+        stop()
+        if (serviceSetupRetries++ >= MAX_SERVICE_SETUP_RETRIES) {
+            Log.w(TAG, "Bluetooth stack keeps rejecting GATT service setup; waiting for the next lifecycle event")
+            return
+        }
+        Log.w(TAG, "Bluetooth stack rejected GATT service setup; retrying")
+        scope.launch {
+            delay(SERVICE_SETUP_RETRY_MS)
+            start()
         }
     }
 
@@ -277,8 +300,12 @@ class BleGattServer(private val context: Context) {
             .addServiceUuid(ParcelUuid(BleConstants.SERVICE_SYSTEM))
             .build()
 
+        // Only the adapter name lives in the scan response. A long name makes the whole
+        // advertisement fail with ADVERTISE_FAILED_DATA_TOO_LARGE, and it is never retried.
+        val adapterName = runCatching { adapter.name }.getOrNull().orEmpty()
         val scanResponse = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
+            .setIncludeDeviceName(adapterName.isNotEmpty() &&
+                adapterName.toByteArray(Charsets.UTF_8).size <= MAX_SCAN_RESPONSE_NAME_BYTES)
             .build()
 
         val callback = object : AdvertiseCallback() {
@@ -347,13 +374,14 @@ class BleGattServer(private val context: Context) {
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             if (gattServer == null) return
-            if (status != BluetoothGatt.GATT_SUCCESS) { stop(); return }
+            if (status != BluetoothGatt.GATT_SUCCESS) { retryServiceSetupLater(); return }
             Log.d(TAG, "Service added: ${service.uuid}, status: $status")
             if (pendingServices.isNotEmpty()) {
                 val next = pendingServices.removeAt(0)
-                gattServer?.addService(next)
+                if (gattServer?.addService(next) != true) retryServiceSetupLater()
             } else {
                 Log.d(TAG, "All services added, starting advertising")
+                serviceSetupRetries = 0
                 servicesReady = true
                 startAdvertising()
             }
