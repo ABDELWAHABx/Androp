@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify locally supplied release files and exercise the packaged app on macOS 15.
+"""Verify locally supplied release files and exercise the packaged app on macOS.
 
 No download, authentication or decryption is performed here. Example:
     python3 mac/Tools/Release/verify-package.py /tmp/package \
@@ -159,10 +159,12 @@ def main():
     parser.add_argument("package_directory", type=Path)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--expected-source", "--expected-commit", default=os.environ.get("GITHUB_SHA"))
+    parser.add_argument("--runtime-major", choices=("15", "26"), default="15")
     args = parser.parse_args()
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", args.tag) is not None, "Invalid release tag")
     require(platform.system() == "Darwin" and platform.machine() == "arm64", "Verification requires an Apple Silicon Mac")
-    require(platform.mac_ver()[0].split(".")[0] == "15", "This runtime verification requires macOS 15")
+    require(platform.mac_ver()[0].split(".")[0] == args.runtime_major,
+            "This runtime verification requires macOS " + args.runtime_major)
     directory = args.package_directory.resolve(strict=True)
     require(directory.is_dir(), "Package directory is not a directory")
     mac_root = Path(__file__).resolve().parents[2]
@@ -196,7 +198,7 @@ def main():
         run(["codesign", "--verify", "--strict", str(helper)])
         run(["bash", str(mac_root / "Tests/run-app-lifecycle-tests.sh"), str(app)], cwd=mac_root)
     print("VERIFIED_MAC_METADATA " + json.dumps(metadata, sort_keys=True))
-    print("Packaged arm64 app: signatures, source, hashes, encrypted IPv4 pairing and real Pause/Resume passed on macOS 15.")
+    print("Packaged arm64 app: signatures, source, hashes, encrypted IPv4 pairing and real Pause/Resume passed on macOS " + args.runtime_major + ".")
 
 
 if __name__ == "__main__":

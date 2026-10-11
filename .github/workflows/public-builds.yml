@@ -5,13 +5,18 @@ on:
     branches: [main]
     paths: ['mac/**', 'android/**', '.github/workflows/public-builds.yml', '.github/build-recipient.txt']
   workflow_dispatch:
+    inputs:
+      run_android:
+        description: Also run Android build and tests
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: public-builds-${{ github.ref }}
-  cancel-in-progress: true
+  group: public-builds-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && !inputs.run_android && 'mac' || 'all' }}
+  cancel-in-progress: false
 
 env:
   RELEASE_TAG: androp-v0.1.0-preview.6
@@ -19,7 +24,7 @@ env:
 jobs:
   mac-build:
     if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -30,11 +35,11 @@ jobs:
         run: test -s .github/build-recipient.txt
       - uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '26.3'
+          xcode-version: '26.6'
       - name: Build and verify on macOS
         run: bash mac/Tools/Release/build-mac.sh "$RELEASE_TAG" arm64
-      - name: Verify the final package on macOS 15
-        run: python3 mac/Tools/Release/verify-package.py mac/dist --tag "$RELEASE_TAG" --expected-source "$GITHUB_SHA"
+      - name: Verify the final package on macOS 26
+        run: python3 mac/Tools/Release/verify-package.py mac/dist --tag "$RELEASE_TAG" --expected-source "$GITHUB_SHA" --runtime-major 26
       - name: Encrypt installers before uploading
         run: |
           set -euo pipefail
@@ -53,8 +58,18 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  android:
+  macos15-policies:
     if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: bash mac/Tests/run-mac-regressions.sh
+
+  android:
+    if: github.repository == 'ABDELWAHABx/Androp' && github.event.repository.private == false && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.run_android)
     runs-on: ubuntu-latest
     timeout-minutes: 35
     defaults:
