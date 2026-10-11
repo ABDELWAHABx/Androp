@@ -126,8 +126,12 @@ class OutboundQuickShareService : Service() {
             }
 
             val expected = expectedPairingKey
+            // No Wi-Fi session: the share screen chose the Bluetooth file lane for a small selection.
+            val bluetoothOnly = expected != null && WebSocketUtil.authenticatedPeerAddress(expected) == null &&
+                networkLease == null && app.androp.android.data.ble.BleFileLane.canSendToMac(0)
             if (expected == null || pairedDevice.symmetricKey != expected ||
-                WebSocketUtil.authenticatedPeerAddress(expected) == null || dataStoreManager.getUserManuallyDisconnected().first()) {
+                (WebSocketUtil.authenticatedPeerAddress(expected) == null && !bluetoothOnly) ||
+                dataStoreManager.getUserManuallyDisconnected().first()) {
                 updateNotification("Connection changed before sending. Share the files again when connected.")
                 stopSelf()
                 return@launch
@@ -138,7 +142,7 @@ class OutboundQuickShareService : Service() {
                 combine(dataStoreManager.getLastConnectedDevice(), dataStoreManager.isAppPaused(),
                     dataStoreManager.getUserManuallyDisconnected(), WebSocketUtil.connectionState) { device, paused, manual, _ ->
                     device?.symmetricKey != expected || paused || manual ||
-                        WebSocketUtil.authenticatedPeerAddress(expected) == null
+                        (!bluetoothOnly && WebSocketUtil.authenticatedPeerAddress(expected) == null)
                 }.first { it }
                 stopSelf()
             }
@@ -160,6 +164,7 @@ class OutboundQuickShareService : Service() {
                 return@launch
             }
 
+            if (bluetoothOnly) { sendOverBluetooth(pairedDevice.name, files); return@launch }
             if (sendFastIfSupported(pairedDevice.name, files)) return@launch
             updateNotification("Looking for ${pairedDevice.name}...")
             findAndSend(pairedDevice.name, ourName, files)
@@ -211,6 +216,34 @@ class OutboundQuickShareService : Service() {
         delay(1500)
         stopSelf()
         return true
+    }
+
+    /** Small selections without Wi-Fi: the Bluetooth file lane (see BleFileLane). */
+    private suspend fun sendOverBluetooth(macName: String, files: List<OutboundQuickShareConnection.PendingFile>) {
+        for (file in files) {
+            val notifId = ("lane-out:" + file.uri).hashCode()
+            var lastPercent = -1
+            updateNotification("Sending to $macName over Bluetooth…")
+            val outcome = app.androp.android.data.ble.BleFileLane.sendToMac(this, file.uri, file.name, file.size,
+                file.mimeType) { sent ->
+                val percent = if (file.size > 0) (sent * 100 / file.size).toInt() else 0
+                if (percent != lastPercent) {
+                    lastPercent = percent
+                    app.androp.android.utils.NotificationUtil.showFileProgress(this, notifId, file.name, percent,
+                        notifId.toString(), isSending = true)
+                }
+            } ?: (false to "Bluetooth disconnected. Share again when your Mac is connected.")
+            app.androp.android.utils.NotificationUtil.showFileComplete(this, notifId, file.name, outcome.first, isSending = true)
+            if (!outcome.first) {
+                updateNotification(outcome.second ?: "Couldn't send ${file.name}")
+                delay(2000)
+                stopSelf()
+                return
+            }
+        }
+        updateNotification("Sent to $macName")
+        delay(1500)
+        stopSelf()
     }
 
     private suspend fun findAndSend(

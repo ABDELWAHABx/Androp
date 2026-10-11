@@ -53,6 +53,8 @@ enum MessageType: String, Codable {
     case phoneHotspotState
     // the phone's own "Connect Mac" hotspot button
     case phoneHotspotOffer
+    // phone → Mac file over the Bluetooth file lane (BLE only)
+    case bleFileOffer
 }
 
 struct Message: Codable {

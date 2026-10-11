@@ -12,6 +12,8 @@ struct RemotePermissionView: View {
     @Environment(\.dismiss) var dismiss
     @State private var isTrusted: Bool = false
     @State private var timer: AnyCancellable?
+    @State private var resetting = false
+    @State private var resetNote: String?
 
     var body: some View {
         VStack(spacing: 20) {
@@ -39,7 +41,34 @@ struct RemotePermissionView: View {
                     dismiss()
                 } else {
                     MacRemoteManager.shared.requestAccessibilityPermission()
+                    MacRemoteManager.shared.openAccessibilitySettings()
                 }
+            }
+
+            if !isTrusted {
+                // Each private build is ad-hoc signed, so macOS treats an update as a new app:
+                // the old switch can stay on without applying to this version.
+                VStack(spacing: 8) {
+                    Text("Already switched on for androp? This version isn't recognised yet. Reset, then switch androp on again.")
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(resetting ? "Resetting…" : "Reset permission") {
+                        resetting = true
+                        MacRemoteManager.shared.resetAccessibilityPermission { reset in
+                            resetting = false
+                            resetNote = reset ? "Now switch androp on in Accessibility."
+                                : "Remove androp from the Accessibility list with −, then add it again."
+                            MacRemoteManager.shared.openAccessibilitySettings()
+                        }
+                    }
+                    .disabled(resetting)
+                    if let resetNote {
+                        Text(resetNote).font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal)
             }
         }
         .padding(30)
@@ -58,6 +87,8 @@ struct RemotePermissionView: View {
     
     private func checkPermission() {
         isTrusted = MacRemoteManager.shared.isAccessibilityTrusted()
+        // Keep the phone's remote screen in step with what this window shows.
+        MacRemoteManager.shared.publishTrust(force: false)
     }
 }
 

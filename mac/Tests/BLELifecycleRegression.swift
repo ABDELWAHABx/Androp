@@ -310,13 +310,41 @@ let cases: [(String, () throws -> Void)] = [
         let ping = BLELinkPolicy.pingPayload(id: 7) ?? ""
         let decoded = (try? JSONSerialization.jsonObject(with: Data(ping.utf8))) as? [String: Any]
         try expect(decoded?["type"] as? String == "blePing", "ping envelope type changed")
-        // BleLinkPolicy.kt PEER_SILENCE_LIMIT_MS is 240 s; the Mac must reconnect well before it.
-        try expect(BLELinkPolicy.heartbeatInterval * Double(BLELinkPolicy.maximumMissedHeartbeats + 1) * 2 <= 240,
+        // BleLinkPolicy.kt PEER_SILENCE_LIMIT_MS is 160 s; the Mac must reconnect well before it.
+        try expect(BLELinkPolicy.heartbeatInterval * Double(BLELinkPolicy.maximumMissedHeartbeats + 1) * 2 <= 160,
                    "phone could drop a Mac that is still pinging")
+    }),
+    ("Instant reconnect asks to pair only when opted in, once per phone per day", {
+        let now = Date()
+        try expect(!BLELinkPolicy.mayProbeBond(enabled: false, bondedPeer: nil, peer: "A", lastAttemptPeer: nil, lastAttempt: nil, now: now),
+                   "paired without the user opting in")
+        try expect(BLELinkPolicy.mayProbeBond(enabled: true, bondedPeer: nil, peer: "A", lastAttemptPeer: nil, lastAttempt: nil, now: now),
+                   "opted-in phone was never asked")
+        try expect(!BLELinkPolicy.mayProbeBond(enabled: true, bondedPeer: "A", peer: "A", lastAttemptPeer: nil, lastAttempt: nil, now: now),
+                   "already bonded phone was asked again")
+        try expect(!BLELinkPolicy.mayProbeBond(enabled: true, bondedPeer: nil, peer: "A", lastAttemptPeer: "A",
+                                              lastAttempt: now.addingTimeInterval(-60), now: now), "declined prompt repeated within a day")
+        try expect(BLELinkPolicy.mayProbeBond(enabled: true, bondedPeer: nil, peer: "B", lastAttemptPeer: "A",
+                                             lastAttempt: now.addingTimeInterval(-60), now: now), "another phone inherited a decline")
+        try expect(BLELinkPolicy.mayProbeBond(enabled: true, bondedPeer: nil, peer: "A", lastAttemptPeer: "A",
+                                             lastAttempt: now.addingTimeInterval(-BLELinkPolicy.bondRetryInterval), now: now), "decline never expired")
+    }),
+    ("Instant reconnect stays off without a radio and never blocks scanning", {
+        let manager = makeManager()
+        UserDefaults.standard.set(UUID().uuidString, forKey: "bleBondedPeerUUID")
+        manager.instantReconnectEnabled = true
+        manager.ensureAutomaticConnection()
+        manager.retryTransportFailureForTesting()
+        try expect(manager.hasPendingScanRestartForTesting, "bonded reconnect replaced discovery")
+        try expect(!manager.fileLaneAvailable, "file lane offered without an authenticated phone")
+        manager.instantReconnectEnabled = false
+        UserDefaults.standard.removeObject(forKey: "bleBondedPeerUUID")
+        manager.disconnect()
     })
 ]
 
-let preferenceKeys = ["bleAuthToken", "isManuallyDisconnected", "bleAuthenticatedPeerUUID", "bleAuthenticatedTokenFingerprint"]
+let preferenceKeys = ["bleAuthToken", "isManuallyDisconnected", "bleAuthenticatedPeerUUID", "bleAuthenticatedTokenFingerprint",
+                      "bleInstantReconnect", "bleBondedPeerUUID"]
 let savedPreferences = preferenceKeys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
 var failures = 0
 for (name, test) in cases {

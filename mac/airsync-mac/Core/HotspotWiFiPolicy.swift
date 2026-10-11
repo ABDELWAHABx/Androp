@@ -43,6 +43,23 @@ nonisolated enum HotspotWiFiPolicy {
     static func mayRecoverHandoff(status: String?, hasPhone: Bool, paused: Bool, manuallyDisconnected: Bool) -> Bool {
         status == "requesting" && !hasPhone && !paused && !manuallyDisconnected
     }
+
+    /// Losing Wi-Fi for a moment (roaming, a router restart) must not start the hotspot.
+    static let autoJoinOfflineDelay: TimeInterval = 10
+    /// One automatic attempt per five minutes, whatever its outcome.
+    static let autoJoinCooldown: TimeInterval = 300
+
+    /// Joins the phone's hotspot by itself only when the user opted in and the Mac has had no
+    /// network for a while. Never while paused or disconnected on purpose, while Connect is
+    /// already running, during the local-only transfer network (no internet by design), or
+    /// when Mac Wi-Fi is off, since that is usually deliberate.
+    static func shouldAutoJoin(enabled: Bool, offlineFor: TimeInterval?, phoneReachable: Bool, busy: Bool,
+                               paused: Bool, manuallyDisconnected: Bool, transferNetworkActive: Bool,
+                               wifiPoweredOn: Bool, hasHotspotName: Bool, sinceLastAttempt: TimeInterval?) -> Bool {
+        guard enabled, let offlineFor, offlineFor >= autoJoinOfflineDelay, phoneReachable, !busy, !paused,
+              !manuallyDisconnected, !transferNetworkActive, wifiPoweredOn, hasHotspotName else { return false }
+        return sinceLastAttempt.map { $0 >= autoJoinCooldown } ?? true
+    }
 }
 
 /// Cancellation wakes retry waits. A CoreWLAN call already submitted to macOS

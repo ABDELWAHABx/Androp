@@ -3,6 +3,7 @@ import SwiftUI
 struct MyMacSettingsView: View {
     @ObservedObject var appState = AppState.shared
     @ObservedObject private var power = MacPowerManager.shared
+    @ObservedObject private var ble = BLECentralManager.shared
 
     @State private var deviceName: String = ""
     @State private var port: String = "6997"
@@ -191,6 +192,26 @@ struct MyMacSettingsView: View {
                         }
                         Spacer()
                         Toggle("", isOn: $appState.isAutoSwitchWithBLEEnabled)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .disabled(!appState.isBLEEnabled)
+                    }
+
+                    HStack(spacing: 12) {
+                        Image(systemName: "bolt.horizontal")
+                            .font(.title3)
+                            .foregroundColor(.accentColor)
+                            .frame(width: 24)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Instant reconnect")
+                                .font(.body)
+                            Text(ble.bondIssue ?? "Pair the phone with this Mac over Bluetooth once, so it reconnects the moment it's in range. Both devices ask to confirm.")
+                                .font(.caption)
+                                .foregroundColor(ble.bondIssue == nil ? Color.secondary : Color.orange)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $ble.instantReconnectEnabled)
                             .toggleStyle(.switch)
                             .controlSize(.small)
                             .disabled(!appState.isBLEEnabled)

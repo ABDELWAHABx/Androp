@@ -47,6 +47,8 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     private var preparedFileSizes: [Int64] = []
     private var preparedDeviceName: String?
     private var wsTransferID: String?
+    /// The file currently going over the Bluetooth file lane, for Cancel.
+    private var laneTransferID: String?
     private var fileSendGeneration: UInt64 = 0
     private var transferNetworkLease: UUID?
     private var preparedNextFileIndex = 0
@@ -172,6 +174,14 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
     public func cancelActiveTransfer() {
         fileSendGeneration &+= 1
         releaseTransferNetwork(cancelled: true)
+        if let id = laneTransferID {
+            laneTransferID = nil
+            BLEFileLane.shared.cancel(id: id)
+            sendingFileName = nil
+            transferState = .idle
+            AppState.shared.showingQuickShareTransfer = false
+            return
+        }
         if let id = wsTransferID {
             wsTransferID = nil
             WebSocketServer.shared.cancelFileTransfer(id: id, notifyRemote: true)
@@ -364,6 +374,19 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         transferProgress = 0
         sendingFileName = nil
         sendingDeviceName = preparedDeviceName
+        // Small selections with no Wi-Fi go over the Bluetooth file lane: the Mac keeps its own Wi-Fi.
+        if AppState.shared.device?.isRegularConnection != true,
+           BLEFileLane.shared.canCarry(totalBytes: selectedFileSize - preparedCompletedBytes) {
+            transferState = .sending(targetID)
+            sendPreparedFileOverBluetooth(files, index: preparedNextFileIndex, completedBytes: preparedCompletedBytes,
+                                          targetID: targetID, generation: generation)
+            return
+        }
+        sendPreparedFilesOverNetwork(files, targetID: targetID, generation: generation)
+    }
+
+    private func sendPreparedFilesOverNetwork(_ files: [URL], targetID: String, generation: UInt64) {
+        guard fileSendGeneration == generation else { return }
         transferState = .connectingNetwork(preparedDeviceName ?? "your phone")
         transferNetworkLease = TransferNetworkCoordinator.shared.ensureNetwork(
             deviceID: targetID, pairingToken: preparedPairingToken) { [weak self] result in
@@ -422,6 +445,58 @@ public class QuickShareManager: NSObject, ObservableObject, MainAppDelegate, Sha
         sendingFileName = nil
         transferState = .failed(message)
         releaseTransferNetwork()
+    }
+
+    private var canStreamOverBluetooth: Bool {
+        FileTransferRoutePolicy.mayBegin(
+            preparedDeviceID: preparedDeviceID,
+            currentDeviceID: AppState.shared.device?.deviceId,
+            preparedPairingToken: preparedPairingToken,
+            currentPairingToken: UserDefaults.standard.string(forKey: "bleAuthToken"),
+            networkConnected: false,
+            bluetoothAuthenticated: BLECentralManager.shared.isAuthenticated,
+            paused: AppState.shared.isSyncPaused)
+    }
+
+    private func sendPreparedFileOverBluetooth(_ files: [URL], index: Int, completedBytes: Int64,
+                                               targetID: String, generation: UInt64) {
+        guard fileSendGeneration == generation else { return }
+        guard index < files.count else {
+            laneTransferID = nil
+            sendingFileName = nil
+            transferProgress = 1
+            transferState = .finished
+            return
+        }
+        guard canStreamOverBluetooth else {
+            failPreparedTransfer("The paired phone disconnected. Your remaining files are still selected.")
+            return
+        }
+        let url = files[index]
+        let size = preparedFileSizes[index]
+        sendingFileName = url.lastPathComponent
+        var id = ""
+        id = BLEFileLane.shared.send(url: url, size: size, progress: { fraction in
+            guard self.fileSendGeneration == generation, self.laneTransferID == id else { return }
+            self.transferProgress = self.selectedFileSize > 0
+                ? (Double(completedBytes) + Double(size) * fraction) / Double(self.selectedFileSize)
+                : (Double(index) + fraction) / Double(files.count)
+        }, completion: { ok, error, opened in
+            guard self.fileSendGeneration == generation else { return }
+            self.laneTransferID = nil
+            if ok {
+                self.preparedNextFileIndex = index + 1
+                self.preparedCompletedBytes = completedBytes + size
+                self.sendPreparedFileOverBluetooth(files, index: index + 1, completedBytes: completedBytes + size,
+                                                   targetID: targetID, generation: generation)
+            } else if !opened {
+                // No Bluetooth channel (older phone, busy radio): the temporary Wi-Fi route still works.
+                self.sendPreparedFilesOverNetwork(files, targetID: targetID, generation: generation)
+            } else {
+                self.failPreparedTransfer(error ?? "Couldn't send the file. Your remaining files are still selected; try again.")
+            }
+        })
+        if laneTransferID == nil, fileSendGeneration == generation, case .sending = transferState { laneTransferID = id }
     }
 
     private func sendPreparedFile(_ files: [URL], index: Int, completedBytes: Int64,

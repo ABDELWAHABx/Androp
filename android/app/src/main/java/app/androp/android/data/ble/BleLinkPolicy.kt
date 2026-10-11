@@ -12,11 +12,11 @@ object BleLinkPolicy {
     const val FAST_ADVERTISE_MS = 60_000L
 
     /**
-     * The Mac pings every 20 s and itself reconnects after about 80 s of silence. App Nap can
-     * stretch its timers, so the phone waits much longer before deciding the Mac is gone; this
-     * only has to catch a link that died without either side being told.
+     * The Mac pings every 20 s (holding an App Nap exemption so the timer keeps time) and itself
+     * reconnects after about 80 s of silence. The phone waits twice that before deciding the Mac
+     * is gone; this only has to catch a link that died without either side being told.
      */
-    const val PEER_SILENCE_LIMIT_MS = 240_000L
+    const val PEER_SILENCE_LIMIT_MS = 160_000L
     const val PEER_WATCHDOG_INTERVAL_MS = 20_000L
 
     enum class AdvertiseSpeed { PAIRING, FAST, LOW_POWER }

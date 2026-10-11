@@ -8,7 +8,8 @@ enum BLELinkPolicy {
     static let burstRescanDelay: TimeInterval = 0.5
 
     /// The Mac pings the phone this often while authenticated; the phone answers with blePong.
-    /// The phone drops a Mac it has not heard from in four minutes, so this must stay well below that.
+    /// The phone drops a Mac it has not heard from in 160 seconds, so this must stay well below that.
+    /// The Mac holds an App Nap exemption while authenticated, so the timer fires on time.
     static let heartbeatInterval: TimeInterval = 20
     /// Pings sent with nothing at all received since. Three unanswered (checked on the next tick,
     /// about 80 seconds after the last data) means the link is dead.
@@ -23,6 +24,20 @@ enum BLELinkPolicy {
     /// never answers, and must not be disconnected every minute.
     static func linkIsDead(heartbeatSupported: Bool, missedHeartbeats: Int) -> Bool {
         heartbeatSupported && missedHeartbeats >= maximumMissedHeartbeats
+    }
+
+    /// After a declined or failed pairing prompt, wait a day before asking again.
+    static let bondRetryInterval: TimeInterval = 24 * 60 * 60
+    /// A pending connect that ends without connecting is re-armed after this rest.
+    static let bondedReconnectRetry: TimeInterval = 2
+
+    /// Ask the phone to bond only when the user opted in, this phone isn't already the
+    /// bonded one, and no prompt was shown for it recently.
+    static func mayProbeBond(enabled: Bool, bondedPeer: String?, peer: String,
+                             lastAttemptPeer: String?, lastAttempt: Date?, now: Date = Date()) -> Bool {
+        guard enabled, bondedPeer != peer else { return false }
+        guard lastAttemptPeer == peer, let lastAttempt else { return true }
+        return now.timeIntervalSince(lastAttempt) >= bondRetryInterval
     }
 
     static func pingPayload(id: Int) -> String? {

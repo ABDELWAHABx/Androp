@@ -90,7 +90,11 @@ internal class OutgoingShareViewModel(private val context: Context) : ViewModel(
                 }
                 ensureActive()
                 checkAllowed(attempt, expected)
-                if (WebSocketUtil.authenticatedPeerAddress(expected) == null) {
+                // Small selections go over the Bluetooth file lane: no temporary Wi-Fi network,
+                // so the Mac stays on its own Wi-Fi.
+                val viaBluetooth = WebSocketUtil.authenticatedPeerAddress(expected) == null &&
+                    app.androp.android.data.ble.BleFileLane.canSendToMac(staged.sumOf { it.length() })
+                if (!viaBluetooth && WebSocketUtil.authenticatedPeerAddress(expected) == null) {
                     if (!TransferNetworkManager.hasPermission(context)) {
                         mutableState.value = State.Permission
                         return@launch
@@ -132,7 +136,8 @@ internal class OutgoingShareViewModel(private val context: Context) : ViewModel(
                 val paused = dataStore.isAppPaused().first() || BackgroundWorkController.isPaused
                 val disconnected = dataStore.getUserManuallyDisconnected().first()
                 check(attempt.claim(current?.symmetricKey, paused, disconnected,
-                    WebSocketUtil.authenticatedPeerAddress(expected), setupConfirmed = lease?.let { id ->
+                    WebSocketUtil.authenticatedPeerAddress(expected)
+                        ?: OutgoingShareGate.BLUETOOTH_LANE.takeIf { viaBluetooth }, setupConfirmed = lease?.let { id ->
                         TransferNetworkManager.state.value.let { it.id == id && it.phase == TransferNetworkManager.Phase.CONNECTED }
                     } ?: true)) { "Connection changed before sending. Retry when ready." }
                 mutableState.value = State.Progress("Sending files to your Mac…")

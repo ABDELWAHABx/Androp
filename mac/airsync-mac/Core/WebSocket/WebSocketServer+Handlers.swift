@@ -104,7 +104,7 @@ extension WebSocketServer {
             }
         case .userDisconnected:
             handleUserDisconnected()
-        case .volumeControl, .macVolume, .toggleAppNotif, .browseLs, .wakeUpRequest, .macMediaControlResponse, .macPowerControlResponse, .macInfo, .callControl:
+        case .volumeControl, .macVolume, .toggleAppNotif, .browseLs, .wakeUpRequest, .macMediaControlResponse, .macPowerControlResponse, .macInfo, .callControl, .bleFileOffer:
             // Outgoing or unexpected messages
             break
         }
@@ -119,6 +119,8 @@ extension WebSocketServer {
             if let data = message.data.value as? [String: Any] { PhoneHotspotManager.shared.handleState(data) }
         case .phoneHotspotOffer:
             if let data = message.data.value as? [String: Any] { HotspotWiFiConnector.shared.connectRequestedByPhone(data) }
+        case .bleFileOffer:
+            if let data = message.data.value as? [String: Any] { BLEFileLane.shared.handleOffer(data) }
         case .status:
             if let data = message.data.value as? [String: Any],
                let battery = data["battery"] as? [String: Any],

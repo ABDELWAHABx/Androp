@@ -28,6 +28,26 @@ struct HotspotWiFiPolicyRegression {
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "failed", hasPhone: false, paused: false, manuallyDisconnected: false))
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: true, paused: false, manuallyDisconnected: false))
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: true, manuallyDisconnected: false))
+        func autoJoin(enabled: Bool = true, offlineFor: TimeInterval? = 15, phoneReachable: Bool = true, busy: Bool = false,
+                      paused: Bool = false, manual: Bool = false, transfer: Bool = false, wifiOn: Bool = true,
+                      named: Bool = true, since: TimeInterval? = nil) -> Bool {
+            HotspotWiFiPolicy.shouldAutoJoin(enabled: enabled, offlineFor: offlineFor, phoneReachable: phoneReachable,
+                busy: busy, paused: paused, manuallyDisconnected: manual, transferNetworkActive: transfer,
+                wifiPoweredOn: wifiOn, hasHotspotName: named, sinceLastAttempt: since)
+        }
+        precondition(autoJoin())
+        precondition(!autoJoin(enabled: false))
+        precondition(!autoJoin(offlineFor: nil))
+        precondition(!autoJoin(offlineFor: HotspotWiFiPolicy.autoJoinOfflineDelay - 1))
+        precondition(!autoJoin(phoneReachable: false))
+        precondition(!autoJoin(busy: true))
+        precondition(!autoJoin(paused: true))
+        precondition(!autoJoin(manual: true))
+        precondition(!autoJoin(transfer: true))
+        precondition(!autoJoin(wifiOn: false))
+        precondition(!autoJoin(named: false))
+        precondition(!autoJoin(since: 60))
+        precondition(autoJoin(since: HotspotWiFiPolicy.autoJoinCooldown))
         precondition(!HotspotWiFiPolicy.mayRecoverHandoff(status: "requesting", hasPhone: false, paused: false, manuallyDisconnected: true))
         for value in ["192.168.43.2", "172.16.0.2", "172.31.255.2", "10.0.0.2"] {
             precondition(HotspotWiFiPolicy.validLocalIPv4(value))

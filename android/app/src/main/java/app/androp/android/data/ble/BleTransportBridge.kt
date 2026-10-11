@@ -222,6 +222,10 @@ object BleTransportBridge {
                 sendControl("blePong", JSONObject().put("id", id))
                 return
             }
+            if (message?.optString("type") == "bleFileReject") {
+                if (BleGattServer.isAnyAuthenticated()) message.optJSONObject("data")?.let(BleFileLane::handleReject)
+                return
+            }
             if (message?.optString("type") == "transferNetwork") {
                 val server = gattServer ?: return
                 app.androp.android.utils.TransferNetworkManager.receive(context, server, message, action.toByteArray(Charsets.UTF_8).size)

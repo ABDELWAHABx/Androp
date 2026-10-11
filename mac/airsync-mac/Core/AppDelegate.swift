@@ -66,6 +66,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppState.shared.setSyncPaused(false)
         })
 
+        // Watches for the Mac going offline; does nothing unless the user opted in.
+        _ = PhoneHotspotAutoJoin.shared
+        // Tells the phone as soon as remote-control (Accessibility) permission changes.
+        MacRemoteManager.shared.startTrustMonitoring()
+
         // Register all app shortcuts' global (KeyboardShortcuts/Carbon) handlers, enabled per
         // the user's chosen scope. Carbon hotkey registration — unlike an NSEvent global
         // monitor — doesn't require Accessibility permission.

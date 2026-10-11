@@ -219,6 +219,7 @@ struct PhoneHotspotControls: View {
     @ObservedObject private var appState = AppState.shared
     @ObservedObject private var hotspot = PhoneHotspotManager.shared
     @ObservedObject private var wifi = HotspotWiFiConnector.shared
+    @ObservedObject private var autoJoin = PhoneHotspotAutoJoin.shared
     @State private var editingName = false
     var compact = false
 
@@ -265,6 +266,8 @@ struct PhoneHotspotControls: View {
                         }
                         if !wifi.savedNetworks.isEmpty { Divider() }
                         Button("Other network…") { editingName = true }
+                        Divider()
+                        Toggle("Join automatically when the Mac is offline", isOn: $autoJoin.isEnabled)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }

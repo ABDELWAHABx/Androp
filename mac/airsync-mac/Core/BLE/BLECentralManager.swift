@@ -88,6 +88,28 @@ class BLECentralManager: NSObject, ObservableObject {
     private var missedHeartbeats = 0
     private var heartbeatSupported = false
     private var notifyRetried: Set<CBUUID> = []
+    // Instant reconnect (opt-in): once bonded, macOS can resolve the phone's rotating private
+    // address, so a no-timeout pending connect reconnects the moment the phone is in range.
+    @Published var instantReconnectEnabled = UserDefaults.standard.bool(forKey: "bleInstantReconnect") {
+        didSet {
+            UserDefaults.standard.set(instantReconnectEnabled, forKey: "bleInstantReconnect")
+            if instantReconnectEnabled {
+                bondIssue = nil
+                if isAuthenticated, let peripheral = discoveredPeripheral { probeBondIfNeeded(peripheral) }
+                else { armBondedReconnect() }
+            } else { cancelBondedReconnect() }
+        }
+    }
+    @Published private(set) var bondIssue: String?
+    private var pendingBondedPeripheral: CBPeripheral?
+    private var bondedReconnectRetry: DispatchWorkItem?
+    // File lane: the phone's L2CAP channel for small files when there is no Wi-Fi.
+    private(set) var fileLanePSM: CBL2CAPPSM?
+    private var pendingLaneOpen: ((CBL2CAPChannel?) -> Void)?
+    private var laneOpenTimeout: DispatchWorkItem?
+    /// Held while authenticated so App Nap cannot stretch the heartbeat and reconnect timers.
+    /// It allows idle system sleep; Pause on sleep tears the session down anyway.
+    private var appNapActivity: NSObjectProtocol?
     
     override init() {
         super.init()
@@ -145,6 +167,7 @@ class BLECentralManager: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in self?.ensureAutomaticConnection() }
             return
         }
+        armBondedReconnect()
         guard automaticConnectionAllowed, scanRestartWorkItem == nil,
               connectionStatus == .disconnected, discoveredPeripheral == nil else { return }
         startScanning()
@@ -373,6 +396,11 @@ class BLECentralManager: NSObject, ObservableObject {
             centralManager.cancelPeripheralConnection(peripheral)
         }
         if AppState.shared.device?.isBLE == true { AppState.shared.device = nil }
+        // Manual disconnect and Pause make automatic connection disallowed, so this only
+        // re-arms the bonded phone after an ordinary drop or failure. Deferred: teardown
+        // itself counts as disallowed until it returns.
+        cancelBondedReconnect()
+        DispatchQueue.main.async { [weak self] in self?.armBondedReconnect() }
     }
 
     private func cancelPendingScanRestart() {
@@ -421,9 +449,124 @@ class BLECentralManager: NSObject, ObservableObject {
         missedHeartbeats = 0
         heartbeatSupported = false
         notifyRetried.removeAll()
+        if let activity = appNapActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            appNapActivity = nil
+        }
+        fileLanePSM = nil
+        finishLaneOpen(nil)
+    }
+
+    // MARK: Instant reconnect (bonding)
+
+    private var bondedPeerUUID: UUID? {
+        UserDefaults.standard.string(forKey: "bleBondedPeerUUID").flatMap(UUID.init(uuidString:))
+    }
+
+    private func probeBondIfNeeded(_ peripheral: CBPeripheral) {
+        let peer = peripheral.identifier.uuidString
+        let defaults = UserDefaults.standard
+        guard isAuthenticated, let probe = characteristics[BLEConstants.charBondProbe],
+              BLELinkPolicy.mayProbeBond(enabled: instantReconnectEnabled,
+                                        bondedPeer: defaults.string(forKey: "bleBondedPeerUUID"), peer: peer,
+                                        lastAttemptPeer: defaults.string(forKey: "bleBondAttemptPeer"),
+                                        lastAttempt: defaults.object(forKey: "bleBondAttemptAt") as? Date) else { return }
+        defaults.set(peer, forKey: "bleBondAttemptPeer")
+        defaults.set(Date(), forKey: "bleBondAttemptAt")
+        print("[BLE] Pairing with the phone for instant reconnect")
+        peripheral.readValue(for: probe)
+    }
+
+    private func handleBondProbe(_ peripheral: CBPeripheral, error: Error?) {
+        guard peripheral === discoveredPeripheral else { return }
+        if let error {
+            // Declined or failed prompt: mayProbeBond waits a day before asking again.
+            print("[BLE] Phone pairing for instant reconnect failed: \(error.localizedDescription)")
+            return
+        }
+        UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: "bleBondedPeerUUID")
+        bondIssue = nil
+        print("[BLE] Bonded with the phone; reconnects no longer need a scan")
+    }
+
+    /// A pending connect has no timeout: macOS completes it whenever the bonded phone advertises.
+    private func armBondedReconnect() {
+        guard Thread.isMainThread, instantReconnectEnabled, pendingBondedPeripheral == nil,
+              discoveredPeripheral == nil, activeQRPairingSession == nil, automaticConnectionAllowed,
+              centralManager?.state == .poweredOn, let id = bondedPeerUUID,
+              let peripheral = centralManager.retrievePeripherals(withIdentifiers: [id]).first else { return }
+        bondedReconnectRetry?.cancel()
+        bondedReconnectRetry = nil
+        pendingBondedPeripheral = peripheral
+        centralManager.connect(peripheral, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+    }
+
+    private func cancelBondedReconnect() {
+        bondedReconnectRetry?.cancel()
+        bondedReconnectRetry = nil
+        guard let peripheral = pendingBondedPeripheral else { return }
+        pendingBondedPeripheral = nil
+        // Never cancel the session we are adopting or already running.
+        if peripheral !== discoveredPeripheral, centralManager?.state == .poweredOn {
+            centralManager.cancelPeripheralConnection(peripheral)
+        }
+    }
+
+    private func retryBondedReconnectLater() {
+        bondedReconnectRetry?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.bondedReconnectRetry = nil
+            self?.armBondedReconnect()
+        }
+        bondedReconnectRetry = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + BLELinkPolicy.bondedReconnectRetry, execute: work)
+    }
+
+    /// The phone dropped its half of the pairing (unpaired in Settings, reset). macOS keeps its
+    /// half and the app cannot remove it, so tell the user, and stop relying on the bond.
+    private func handleBondLossIfNeeded(_ error: Error?) {
+        guard let error = error as? CBError, error.code == .peerRemovedPairingInformation else { return }
+        UserDefaults.standard.removeObject(forKey: "bleBondedPeerUUID")
+        cancelBondedReconnect()
+        bondIssue = "Your phone forgot this Mac's Bluetooth pairing. Remove the phone in System Settings → Bluetooth, then reconnect."
+    }
+
+    // MARK: File lane (L2CAP)
+
+    var fileLaneAvailable: Bool { isAuthenticated && fileLanePSM != nil }
+
+    /// Opens a fresh L2CAP channel to the phone's file lane. One open at a time; nil on failure.
+    func openFileLane(completion: @escaping (CBL2CAPChannel?) -> Void) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { completion(nil); return }
+                self.openFileLane(completion: completion)
+            }
+            return
+        }
+        guard isAuthenticated, !AppState.shared.isSyncPaused, pendingLaneOpen == nil,
+              let peripheral = discoveredPeripheral, let psm = fileLanePSM else { completion(nil); return }
+        pendingLaneOpen = completion
+        let timeout = DispatchWorkItem { [weak self] in self?.finishLaneOpen(nil) }
+        laneOpenTimeout = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: timeout)
+        peripheral.openL2CAPChannel(psm)
+    }
+
+    private func finishLaneOpen(_ channel: CBL2CAPChannel?) {
+        laneOpenTimeout?.cancel()
+        laneOpenTimeout = nil
+        let completion = pendingLaneOpen
+        pendingLaneOpen = nil
+        completion?(channel)
     }
 
     private func startHeartbeat() {
+        if appNapActivity == nil {
+            appNapActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Keeping the phone's Bluetooth link responsive")
+        }
         heartbeatTimer?.invalidate()
         missedHeartbeats = 0
         heartbeatSupported = false
@@ -561,6 +704,7 @@ class BLECentralManager: NSObject, ObservableObject {
         UserDefaults.standard.set(false, forKey: "isManuallyDisconnected")
         rejectedPeers.removeValue(forKey: uuidStr)
         stopScanning()
+        if pendingBondedPeripheral === peripheral { pendingBondedPeripheral = nil } else { cancelBondedReconnect() }
         discoveredPeripheral = peripheral
         connectingDeviceUUID = uuidStr
         centralManager.connect(peripheral, options: [
@@ -625,6 +769,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
                 manufacturerData: advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data) else { return }
 
             stopScanning()
+            if pendingBondedPeripheral === peripheral { pendingBondedPeripheral = nil } else { cancelBondedReconnect() }
             discoveredPeripheral = peripheral
             connectingDeviceUUID = uuidStr
             
@@ -645,6 +790,16 @@ extension BLECentralManager: CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        if peripheral === pendingBondedPeripheral {
+            pendingBondedPeripheral = nil
+            if discoveredPeripheral == nil, automaticConnectionAllowed {
+                // The bonded phone came into range: adopt it like a scanned, connected peer.
+                print("[BLE] Bonded phone reconnected without a scan")
+                stopScanning()
+                cancelPendingScanRestart()
+                discoveredPeripheral = peripheral
+            }
+        }
         guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused,
               AppState.shared.isBLEEnabled else {
             if peripheral === discoveredPeripheral { tearDownConnection(cancelPeripheral: true) }
@@ -670,12 +825,24 @@ extension BLECentralManager: CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        handleBondLossIfNeeded(error)
+        if peripheral === pendingBondedPeripheral {
+            pendingBondedPeripheral = nil
+            retryBondedReconnectLater()
+            return
+        }
         guard peripheral === discoveredPeripheral else { return }
         print("[BLE] Failed to connect: \(error?.localizedDescription ?? "Unknown error")")
         retryAfterTransportFailure()
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        handleBondLossIfNeeded(error)
+        if peripheral === pendingBondedPeripheral, peripheral !== discoveredPeripheral {
+            pendingBondedPeripheral = nil
+            retryBondedReconnectLater()
+            return
+        }
         guard peripheral === discoveredPeripheral else { return }
         print("[BLE] Disconnected: \(error?.localizedDescription ?? "clean")")
         // A working link that dropped usually means a brief range or radio blip: look again at once.
@@ -787,6 +954,17 @@ extension BLECentralManager: CBPeripheralDelegate {
     
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard peripheral === discoveredPeripheral, !AppState.shared.isSyncPaused else { return }
+        if characteristic.uuid == BLEConstants.charBondProbe {
+            handleBondProbe(peripheral, error: error)
+            return
+        }
+        if characteristic.uuid == BLEConstants.charFileLanePSM {
+            if error == nil, isAuthenticated, let value = characteristic.value, value.count == 2 {
+                let psm = CBL2CAPPSM(value[value.startIndex]) << 8 | CBL2CAPPSM(value[value.startIndex + 1])
+                fileLanePSM = psm == 0 ? nil : psm
+            }
+            return
+        }
         if let error = error {
             print("[BLE] Error updating value for characteristic \(characteristic.uuid): \(error.localizedDescription)")
             return
@@ -886,6 +1064,9 @@ extension BLECentralManager: CBPeripheralDelegate {
                 if let battery = characteristics[BLEConstants.charBatteryLevel], battery.properties.contains(.read) {
                     peripheral.readValue(for: battery)
                 }
+                // Phones with the file lane publish its L2CAP channel; older phones lack the characteristic.
+                if let lane = characteristics[BLEConstants.charFileLanePSM] { peripheral.readValue(for: lane) }
+                probeBondIfNeeded(peripheral)
 
                 // Immediately notify Android of Mac status
                 WebSocketServer.shared.sendMacStatusOverBLE()
@@ -972,6 +1153,12 @@ extension BLECentralManager: CBPeripheralDelegate {
         }
     }
     
+    func peripheral(_ peripheral: CBPeripheral, didOpen channel: CBL2CAPChannel?, error: Error?) {
+        guard peripheral === discoveredPeripheral else { return }
+        if let error { print("[BLE] File lane channel failed: \(error.localizedDescription)") }
+        finishLaneOpen(error == nil ? channel : nil)
+    }
+
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
         guard peripheral === discoveredPeripheral else { return }
         drainWrites()

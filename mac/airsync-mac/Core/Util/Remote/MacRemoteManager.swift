@@ -70,6 +70,73 @@ class MacRemoteManager: ObservableObject {
     private var lastTrustCheck: TimeInterval = 0
     private var reportedTrust: Bool?
     private var promptedForTrust = false
+    private var accessibilityObserver: NSObjectProtocol?
+    private var deviceObserver: AnyCancellable?
+    private var untrustedPoll: Timer?
+
+    /// Tell the phone the moment Accessibility is granted or revoked. Before, the Mac only
+    /// re-checked when remote input arrived, so the phone kept saying "allow androp in
+    /// Accessibility" after you had. Also re-sent whenever a phone connects.
+    func startTrustMonitoring() {
+        guard accessibilityObserver == nil else { return }
+        // macOS posts this whenever the Accessibility list changes; trust updates just after.
+        accessibilityObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.accessibility.api"), object: nil, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.publishTrust(force: false) }
+        }
+        deviceObserver = AppState.shared.$device
+            .map { $0?.deviceId }
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] id in if id != nil { self?.publishTrust(force: true) } }
+    }
+
+    /// Sends the current state when it changed (or always with [force]). While untrusted, polls
+    /// every two seconds as well, since the notification isn't posted on every macOS version.
+    func publishTrust(force: Bool) {
+        let trusted = isAccessibilityTrusted()
+        lastTrustCheck = ProcessInfo.processInfo.systemUptime
+        if force || trusted != reportedTrust {
+            reportedTrust = trusted
+            WebSocketServer.shared.sendRemoteControlStatus(inputAllowed: trusted)
+        }
+        if trusted {
+            untrustedPoll?.invalidate()
+            untrustedPoll = nil
+        } else if untrustedPoll == nil {
+            untrustedPoll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.publishTrust(force: false) }
+            }
+        }
+    }
+
+    /// Private builds are ad-hoc signed, so every update is a new app to macOS: Accessibility can
+    /// show androp switched on while not trusting this build, and switching it on again changes
+    /// nothing. Removing the stale entry and asking again fixes it; the app can't edit the list.
+    func resetAccessibilityPermission(completion: @escaping (Bool) -> Void) {
+        let bundleID = Bundle.main.bundleIdentifier ?? "app.androp.mac"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            process.arguments = ["reset", "Accessibility", bundleID]
+            var reset = false
+            if (try? process.run()) != nil {
+                process.waitUntilExit()
+                reset = process.terminationStatus == 0
+            }
+            DispatchQueue.main.async {
+                self.requestAccessibilityPermission()
+                self.publishTrust(force: true)
+                completion(reset)
+            }
+        }
+    }
+
+    func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
     /// Called before synthetic input. Without Accessibility macOS drops every
     /// event silently, so ask once and tell the phone, instead of failing quietly.
@@ -85,6 +152,8 @@ class MacRemoteManager: ObservableObject {
             reportedTrust = trusted
             WebSocketServer.shared.sendRemoteControlStatus(inputAllowed: trusted)
         }
+        // Watch for the grant so the phone hears about it without another touch.
+        if !trusted { DispatchQueue.main.async { self.publishTrust(force: false) } }
         if !trusted && !promptedForTrust {
             promptedForTrust = true
             DispatchQueue.main.async { self.requestAccessibilityPermission() }

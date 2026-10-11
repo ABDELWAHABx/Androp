@@ -23,4 +23,9 @@ internal class OutgoingShareGate(private val pairedKey: String) {
     }
 
     @Synchronized fun cancel() { cancelled = true }
+
+    companion object {
+        /** Route marker for a selection that goes over the Bluetooth file lane instead of a network address. */
+        const val BLUETOOTH_LANE = "bluetooth-lane"
+    }
 }

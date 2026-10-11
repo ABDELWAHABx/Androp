@@ -20,6 +20,10 @@ object BleConstants {
     val CHAR_SYSTEM_STATE = UUID.fromString("a1520106$UUID_BASE")
     val CHAR_MAC_CONTROL = UUID.fromString("a1520107$UUID_BASE")
     val CHAR_DEVICE_NAME = UUID.fromString("a1520108$UUID_BASE")
+    /** Encrypted read: a Mac that opted into instant reconnect reads it once to bond. */
+    val CHAR_BOND_PROBE = UUID.fromString("a1520109$UUID_BASE")
+    /** Read: the L2CAP channel (PSM) of the Bluetooth file lane, 0 when it isn't listening. */
+    val CHAR_FILE_LANE_PSM = UUID.fromString("a152010a$UUID_BASE")
 
     // Notification Characteristics
     val CHAR_NOTIFICATION_DATA = UUID.fromString("a1520201$UUID_BASE")

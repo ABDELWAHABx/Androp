@@ -19,6 +19,10 @@ struct BLEConstants {
     static let charSystemState = CBUUID(string: "a1520106\(uuidBase)")
     static let charMacControl = CBUUID(string: "a1520107\(uuidBase)")
     static let charDeviceName = CBUUID(string: "a1520108\(uuidBase)")
+    /// Encrypted read; reading it once makes macOS pair with the phone (instant reconnect).
+    static let charBondProbe = CBUUID(string: "a1520109\(uuidBase)")
+    /// Two bytes, big-endian: the phone's file-lane L2CAP PSM, 0 when it isn't listening.
+    static let charFileLanePSM = CBUUID(string: "a152010a\(uuidBase)")
 
     // Notification Characteristics
     static let charNotificationData = CBUUID(string: "a1520201\(uuidBase)")

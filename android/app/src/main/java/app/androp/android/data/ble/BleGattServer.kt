@@ -84,6 +84,12 @@ class BleGattServer(private val context: Context) {
     @Volatile private var peerHeartbeatSeen = false
     private var peerWatchdog: Job? = null
 
+    /** The authenticated Mac read the file lane's channel, so it can use the lane. */
+    @Volatile var peerUsesFileLane = false
+        private set
+    internal fun isAuthenticatedAddress(address: String?): Boolean =
+        address != null && isAuthenticated && authenticatedDevice?.address == address
+
     /** Called for every authenticated blePing; also proves this Mac build sends them. */
     internal fun onPeerHeartbeat() {
         peerHeartbeatSeen = true
@@ -188,6 +194,8 @@ class BleGattServer(private val context: Context) {
         advertiseRetry = null
         advertiseFailures = 0
         peerWatchdog = null
+        peerUsesFileLane = false
+        BleFileLane.stop(this)
         val server = gattServer
         gattServer = null
         servicesReady = false
@@ -221,6 +229,8 @@ class BleGattServer(private val context: Context) {
         gattServer = bluetoothManager.openGattServer(context, gattServerCallback) ?: return
         val generation = ++serverGeneration
         advertiseFastForAWhile()
+        // Listen before advertising: the Mac reads the lane's channel right after authenticating.
+        BleFileLane.start(context, this)
         scope.launch {
             dataStoreManager.getLastConnectedDevice().collect { device ->
                 val token = device?.symmetricKey?.takeIf { it.isNotBlank() }
@@ -247,6 +257,11 @@ class BleGattServer(private val context: Context) {
         systemService.addCharacteristic(createNotifyCharacteristic(BleConstants.CHAR_SYSTEM_STATE))
         systemService.addCharacteristic(createNotifyCharacteristic(BleConstants.CHAR_MAC_CONTROL))
         systemService.addCharacteristic(createNotifyCharacteristic(BleConstants.CHAR_DEVICE_NAME))
+        // Android answers an unencrypted read with "insufficient encryption", which makes the
+        // Mac pair; the request only reaches this app once the link is encrypted.
+        systemService.addCharacteristic(BluetoothGattCharacteristic(BleConstants.CHAR_BOND_PROBE,
+            BluetoothGattCharacteristic.PROPERTY_READ, BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED))
+        systemService.addCharacteristic(createReadCharacteristic(BleConstants.CHAR_FILE_LANE_PSM))
         pendingServices.add(systemService)
 
         // Notifications Service
@@ -530,6 +545,7 @@ class BleGattServer(private val context: Context) {
                     it.replayGuard.disconnected()
                 }
                 if (authenticatedDevice == device) {
+                    peerUsesFileLane = false
                     // The Mac rescans continuously right after losing the link; meet it halfway.
                     advertiseFastForAWhile()
                     peerWatchdog?.cancel()
@@ -572,6 +588,14 @@ class BleGattServer(private val context: Context) {
                     0,
                     byteArrayOf(BleConstants.PROTOCOL_VERSION.toByte())
                 )
+            } else if (characteristic.uuid == BleConstants.CHAR_BOND_PROBE && device == authenticatedDevice && offset == 0) {
+                Log.i(TAG, "Mac bonded for instant reconnect")
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, byteArrayOf(1))
+            } else if (characteristic.uuid == BleConstants.CHAR_FILE_LANE_PSM && device == authenticatedDevice && offset == 0) {
+                val psm = BleFileLane.psm
+                peerUsesFileLane = psm != 0
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0,
+                    byteArrayOf((psm shr 8 and 0xFF).toByte(), (psm and 0xFF).toByte()))
             } else {
                 gattServer?.sendResponse(
                     device,
@@ -818,6 +842,7 @@ class BleGattServer(private val context: Context) {
 
     /** Forget a Mac whose link stopped working, disconnect it and advertise for its return. */
     private fun dropAuthenticatedPeer(device: BluetoothDevice) {
+        peerUsesFileLane = false
         clearSendQueue()
         app.androp.android.utils.TransferNetworkManager.onPeerDisconnected(this, allowWifiFallback = true)
         isAuthenticated = false
@@ -902,6 +927,7 @@ class BleGattServer(private val context: Context) {
                     isAuthenticated = true
                     authenticatedFlag.set(true)
                     startPeerWatchdog(device)
+                    peerUsesFileLane = false
                     ClipboardSyncManager.onPeerChanged(storedKey)
                     ClipboardSyncManager.onTransportChanged(true)
                     _connectionState.value = BleConnectionState.AUTHENTICATED
@@ -1197,6 +1223,7 @@ class BleGattServer(private val context: Context) {
         isAuthenticated = false
         authenticatedPeer = null
         authenticatedFlag.set(false)
+        peerUsesFileLane = false
         peerWatchdog?.cancel()
         peerWatchdog = null
         ClipboardSyncManager.onTransportChanged(app.androp.android.utils.WebSocketUtil.isConnected())
