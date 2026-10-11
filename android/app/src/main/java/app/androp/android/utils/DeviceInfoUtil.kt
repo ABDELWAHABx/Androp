@@ -64,13 +64,15 @@ object DeviceInfoUtil {
                 // Use ConnectivityManager and LinkProperties for Android 12+
                 val connectivityManager =
                     context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                val activeNetwork = connectivityManager.activeNetwork
-                val networkCapabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
-                if (networkCapabilities != null &&
-                    networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                ) {
+                // Search Wi-Fi rather than the default route: a VPN or a Wi-Fi without internet
+                // access is often the default, and the LAN address is still the one peers need.
+                val wifiNetwork = connectivityManager.allNetworks.firstOrNull { network ->
+                    connectivityManager.getNetworkCapabilities(network)
+                        ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+                }
+                if (wifiNetwork != null) {
                     val linkProperties: LinkProperties? =
-                        connectivityManager.getLinkProperties(activeNetwork)
+                        connectivityManager.getLinkProperties(wifiNetwork)
                     linkProperties?.linkAddresses?.forEach { linkAddress ->
                         val address = linkAddress.address
                         if (address is Inet4Address && !address.isLoopbackAddress) {

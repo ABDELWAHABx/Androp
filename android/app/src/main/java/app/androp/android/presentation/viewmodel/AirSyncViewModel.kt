@@ -966,13 +966,15 @@ class AirSyncViewModel(
                                         manualAttempt = false,
                                         onConnectionStatus = { connected ->
                                             viewModelScope.launch {
+                                                // A refused request can coincide with another live or in-flight Wi-Fi attempt.
+                                                val wifiConnected = connected || WebSocketUtil.isWifiConnected()
                                                 val anyConnected = app.androp.android.data.ble.BleAvailabilityPolicy.connectedForUi(
-                                                    connected, app.androp.android.data.ble.BleGattServer.isAnyAuthenticated(),
+                                                    wifiConnected, app.androp.android.data.ble.BleGattServer.isAnyAuthenticated(),
                                                     app.androp.android.utils.BackgroundWorkController.isPaused)
                                                 _uiState.value = _uiState.value.copy(
                                                     isConnected = anyConnected,
-                                                    isConnecting = false,
-                                                    response = if (connected) "Connected successfully!" else if (anyConnected) "Connected over Bluetooth" else "Reconnection failed"
+                                                    isConnecting = !wifiConnected && WebSocketUtil.isConnecting(),
+                                                    response = if (wifiConnected) "Connected successfully!" else if (anyConnected) "Connected over Bluetooth" else "Reconnection failed"
                                                 )
                                                 if (connected) {
                                                     // Update last connected record timestamp for this device

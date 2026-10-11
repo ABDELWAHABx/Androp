@@ -30,8 +30,11 @@ object NetworkMonitor {
 
             val isConnected = networkCapabilities != null &&
                     networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            val isWifi =
-                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            // The default route is often a VPN or cellular while the Wi-Fi LAN stays in use,
+            // so Wi-Fi presence must not depend on the active network.
+            val isWifi = connectivityManager.allNetworks.any { network ->
+                connectivityManager.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            }
             val ipAddress = if (isWifi) DeviceInfoUtil.getWifiIpAddress(context) else null
 
             return NetworkInfo(isConnected, isWifi, ipAddress)

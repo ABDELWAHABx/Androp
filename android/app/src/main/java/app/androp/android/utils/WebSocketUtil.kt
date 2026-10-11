@@ -151,10 +151,16 @@ object WebSocketUtil {
         val epoch = synchronized(connectionLock) {
             if (BackgroundWorkController.isPaused || authorization?.invoke() == false || isConnected.get() || isConnecting.get()) {
                 Log.d(TAG, "Already connected, connecting, or authorization expired")
+                // Callers mark the UI as connecting before calling; they need an outcome, not a silent drop.
+                // This request did not connect, so never report success or save its credentials here.
+                onConnectionStatus?.invoke(false)
                 return
             }
             if (manualAttempt) manualReconnectSuppressed.set(false)
-            else if (manualReconnectSuppressed.get()) return
+            else if (manualReconnectSuppressed.get()) {
+                onConnectionStatus?.invoke(false)
+                return
+            }
             isConnecting.set(true)
             currentSymmetricKey = decodedKey
             val epoch = connectionEpoch.advance()
@@ -172,12 +178,12 @@ object WebSocketUtil {
         scope.launch {
             val ds = app.androp.android.data.local.DataStoreManager.getInstance(context)
             if (ds.isAppPaused().first() || BackgroundWorkController.isPaused || authorization?.invoke() == false || !connectionEpoch.isCurrent(epoch)) {
-                if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
+                abandonAttempt(epoch, onConnectionStatus)
                 return@launch
             }
             if (!manualAttempt && (manualReconnectSuppressed.get() || ds.getUserManuallyDisconnected().first() ||
                     (!pairedUserRequest && !ds.getAutoReconnectEnabled().first()))) {
-                if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
+                abandonAttempt(epoch, onConnectionStatus)
                 return@launch
             }
             // Validate before launching socket work. A malformed persisted endpoint
@@ -209,7 +215,7 @@ object WebSocketUtil {
             }
 
             if (!isActive || !connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) {
-                if (connectionEpoch.isCurrent(epoch)) isConnecting.set(false)
+                abandonAttempt(epoch, onConnectionStatus)
                 return@launch
             }
             // Reset manual disconnect flag on manual attempt
@@ -239,7 +245,10 @@ object WebSocketUtil {
             }
             synchronized(connectionLock) {
                 // DataStore reads/writes above can suspend across a manual Stop or a newer attempt.
-                if (!isActive || !connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) return@launch
+                if (!isActive || !connectionEpoch.isCurrent(epoch) || BackgroundWorkController.isPaused || authorization?.invoke() == false) {
+                    abandonAttempt(epoch, onConnectionStatus)
+                    return@launch
+                }
                 handshakeCompleted.set(false)
                 notifyConnectionStatusListeners(false)
                 currentIpAddress = ipAddress
@@ -645,6 +654,15 @@ object WebSocketUtil {
                     onConnectionStatusChanged?.invoke(false)
                 }
             }
+        }
+    }
+
+    /** Ends an attempt that never opened a socket, so its caller receives a result. */
+    private fun abandonAttempt(epoch: Long, onConnectionStatus: ((Boolean) -> Unit)?) {
+        synchronized(connectionLock) {
+            if (!connectionEpoch.isCurrent(epoch)) return
+            isConnecting.set(false)
+            onConnectionStatus?.invoke(false)
         }
     }
 
@@ -1062,7 +1080,9 @@ object WebSocketUtil {
                 launch {
                     var backoffMs = 2000L
                     var failedStreak = 0
-                    while (isActive && autoReconnectActive.get() && !isConnected()) {
+                    // Paired Bluetooth alone must not end the Wi-Fi retry loop: the loop would exit
+                    // while autoReconnectActive stays true, and later Wi-Fi drops could never restart it.
+                    while (isActive && autoReconnectActive.get() && !isWifiConnected()) {
                         val manual = ds.getUserManuallyDisconnected().first()
                         val autoEnabled = ds.getAutoReconnectEnabled().first()
 

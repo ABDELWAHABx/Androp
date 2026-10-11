@@ -106,6 +106,13 @@ extension WebSocketServer {
                 return true
             }
         }
+        // Carrier-grade NAT / Tailscale (100.64.0.0/10). Android already accepts 100.x as local.
+        if ip.hasPrefix("100.") {
+            let parts = ip.split(separator: ".")
+            if parts.count > 1, let second = Int(parts[1]), (64...127).contains(second) {
+                return true
+            }
+        }
         return false
     }
 

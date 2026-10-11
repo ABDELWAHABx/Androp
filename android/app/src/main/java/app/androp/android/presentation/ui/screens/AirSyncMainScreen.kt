@@ -441,13 +441,20 @@ fun AirSyncMainScreen(
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 } catch (_: Exception) {
                 }
-                viewModel.setConnectionStatus(isConnected = false, isConnecting = false)
-                WebSocketUtil.disconnect(context)
+                // A connection that came up through another attempt in the meantime must survive this timeout.
+                if (!WebSocketUtil.isWifiConnected()) {
+                    viewModel.setConnectionStatus(isConnected = false, isConnecting = false)
+                    WebSocketUtil.disconnect(context)
+                }
                 Toast.makeText(context, "Connection Timed Out", Toast.LENGTH_SHORT).show()
                 viewModel.setResponse("Connection Timed Out")
             } else {
                 val connected = result
-                viewModel.setConnectionStatus(isConnected = connected, isConnecting = false)
+                // A refused request (another attempt in flight, or already connected) must not hide the live state.
+                viewModel.setConnectionStatus(
+                    isConnected = connected || WebSocketUtil.isConnected(),
+                    isConnecting = !connected && WebSocketUtil.isConnecting()
+                )
                 if (connected) {
                     viewModel.setResponse("Connected successfully!")
                     // Persist the exact successful attempt, even if the form changed while connecting.
