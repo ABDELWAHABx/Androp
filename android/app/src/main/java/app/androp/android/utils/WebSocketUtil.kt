@@ -7,6 +7,7 @@ import app.androp.android.data.ble.BleTransportBridge
 import app.androp.android.domain.model.AudioInfo
 import app.androp.android.widget.AirSyncWidgetProvider
 import app.androp.android.utils.discovery.DiscoveryOrchestrator
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -174,8 +175,15 @@ object WebSocketUtil {
             cancelAutoReconnect()
         }
 
+        // An unexpected failure (e.g. a DataStore read) must not leave isConnecting set,
+        // which would refuse every later connect until a manual disconnect.
+        val attemptFailureHandler = CoroutineExceptionHandler { _, failure ->
+            Log.e(TAG, "Connection attempt failed", failure)
+            abandonAttempt(epoch, onConnectionStatus)
+        }
+
         // Validate local network IP
-        scope.launch {
+        scope.launch(attemptFailureHandler) {
             val ds = app.androp.android.data.local.DataStoreManager.getInstance(context)
             if (ds.isAppPaused().first() || BackgroundWorkController.isPaused || authorization?.invoke() == false || !connectionEpoch.isCurrent(epoch)) {
                 abandonAttempt(epoch, onConnectionStatus)
