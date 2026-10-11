@@ -203,8 +203,8 @@ let cases: [(String, () throws -> Void)] = [
             try expect(manager.connectionStatus == .disconnected, "window left continuous scanning active")
             try expect(manager.hasPendingScanRestartForTesting, "window did not arrange future discovery")
             let delay = manager.scheduledScanDelayForTesting ?? 0
-            try expect(delay >= 5 && delay <= 60, "scan rest escaped its battery/availability bounds")
-            if index >= 4 { try expect(delay == 60, "repeated missed discovery did not back off") }
+            try expect(delay >= 5 && delay <= 30, "scan rest escaped its battery/availability bounds")
+            if index >= 4 { try expect(delay == 30, "repeated missed discovery did not back off") }
         }
         manager.disconnect()
         try expect(!manager.hasPendingScanRestartForTesting, "manual stop retained discovery window")
@@ -223,8 +223,8 @@ let cases: [(String, () throws -> Void)] = [
             manager.retryTransportFailureForTesting()
             try expect(!manager.isManuallyDisconnected, "transient failure was treated as user disconnect")
             let delay = manager.scheduledScanDelayForTesting ?? 0
-            try expect(delay >= 3 && delay <= 60, "transport retries escaped their bounds")
-            if index >= 5 { try expect(delay == 60, "failing transport did not back off") }
+            try expect(delay >= 3 && delay <= 30, "transport retries escaped their bounds")
+            if index >= 5 { try expect(delay == 30, "failing transport did not back off") }
         }
         try expect(AppState.shared.device?.ipAddress == "192.168.1.2", "BLE failure destroyed Wi-Fi")
         manager.disconnect()

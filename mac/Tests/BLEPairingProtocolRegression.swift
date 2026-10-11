@@ -17,6 +17,16 @@ struct BLEPairingProtocolRegression {
         expect(!BLEAdvertisementProof.verifies(manufacturerData: Data([0xFF, 0xFF]) + proof,
                                                token: "token", now: now.addingTimeInterval(1_800)), "stale proof rejected")
         expect(!BLEAdvertisementProof.verifies(manufacturerData: nil, token: "token", now: now), "missing proof rejected")
+        // Reconnect handshake, shared vector with Android (BleReconnectProtocolTest).
+        let macNonce = "bWFjbWFjbWFjbWFjbWFjbQ==", phoneNonce = "cGhvbmVwaG9uZXBob25lcA=="
+        expect(BLEPairingProtocol.reconnectProof(token: "token", role: "phone", first: macNonce, second: phoneNonce)
+               == "ZLFMCEKWZipsawh6Q45rCDI0AjySYuAiLtJh/jGmXZM=", "reconnect proof matches Android vector")
+        let challenge = #"{"v":2,"action":"challenge","nonce":"\#(phoneNonce)","proof":"ZLFMCEKWZipsawh6Q45rCDI0AjySYuAiLtJh/jGmXZM="}"#
+        expect(BLEPairingProtocol.verifiedPhoneNonce(challenge: challenge, token: "token", macNonce: macNonce) == phoneNonce, "genuine phone accepted")
+        expect(BLEPairingProtocol.verifiedPhoneNonce(challenge: challenge, token: "other", macNonce: macNonce) == nil, "phone without the token rejected")
+        expect(BLEPairingProtocol.verifiedPhoneNonce(challenge: challenge, token: "token",
+               macNonce: BLEPairingProtocol.newReconnectNonce()) == nil, "replayed challenge rejected")
+        expect(!(BLEPairingProtocol.reconnectHello(nonce: macNonce) ?? "").contains("token"), "hello carries no secret")
         let key = Data(0..<32)
         let pairing = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
         let nonce = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!

@@ -570,9 +570,14 @@ class BleGattServer(private val context: Context) {
                         if (pairing != null) {
                             pairing.chunks.addChunk(value)?.let { handlePairingRequest(device, pairing, it) }
                         } else {
-                            legacyAuthChunks.addChunk(value)?.let { handleAuthRequest(device, it.toByteArray(Charsets.UTF_8)) }
+                            legacyAuthChunks.addChunk(value)?.let { handleReconnect(device, it) }
                         }
-                    } else handleAuthRequest(device, value)
+                    } else {
+                        // A bare token on the air is the old, replayable scheme; only the
+                        // mutual reconnect proof (or an encrypted QR exchange) is accepted.
+                        Log.w(TAG, "Rejected legacy BLE token authentication")
+                        sendNotification(BleConstants.CHAR_AUTH_RESULT, byteArrayOf(BleConstants.AUTH_FAILED))
+                    }
                 }
                 BleConstants.CHAR_MAC_BATTERY -> handleMacBattery(value)
                 BleConstants.CHAR_NOTIFICATION_ACTION -> handleChunkedWrite(
@@ -687,6 +692,44 @@ class BleGattServer(private val context: Context) {
                     sendQueue.addFirst(priority)
                 }
                 drainNotifications()
+            }
+        }
+    }
+
+    private class ReconnectChallenge(val device: BluetoothDevice, val token: String, val macNonce: String, val phoneNonce: String)
+    @Volatile private var reconnectChallenge: ReconnectChallenge? = null
+
+    /**
+     * Reconnect of an already QR-paired Mac: the phone answers the Mac's fresh nonce with a
+     * proof, then requires the Mac's proof for the phone's nonce. Neither sends the token.
+     */
+    private fun handleReconnect(device: BluetoothDevice, text: String) {
+        val generation = serverGeneration
+        val connectionGeneration = peerConnectionGeneration
+        scope.launch {
+            if (generation != serverGeneration || connectionGeneration != peerConnectionGeneration ||
+                device !in connectedDevices || app.androp.android.utils.BackgroundWorkController.isPaused) return@launch
+            BlePairingProtocol.helloNonce(text)?.let { macNonce ->
+                val key = dataStoreManager.getLastConnectedDevice().first()?.symmetricKey?.takeIf { it.isNotBlank() }
+                val token = key?.let { BleTransportBridge.deriveAuthToken(it) }?.takeIf { it.isNotEmpty() }
+                if (token == null) {
+                    sendNotification(BleConstants.CHAR_AUTH_RESULT, byteArrayOf(BleConstants.AUTH_FAILED))
+                    return@launch
+                }
+                val phoneNonce = BlePairingProtocol.newNonce()
+                reconnectChallenge = ReconnectChallenge(device, token, macNonce, phoneNonce)
+                sendChunkedNotification(BleConstants.CHAR_AUTH_RESULT, BlePairingProtocol.challenge(token, macNonce, phoneNonce))
+                return@launch
+            }
+            val challenge = reconnectChallenge
+            reconnectChallenge = null
+            if (challenge != null && challenge.device == device &&
+                BlePairingProtocol.verifiesMacAuth(text, challenge.token, challenge.macNonce, challenge.phoneNonce)) {
+                // Proven: reuse the established success path with the locally derived token.
+                handleAuthRequest(device, challenge.token.toByteArray(Charsets.UTF_8))
+            } else {
+                Log.w(TAG, "BLE reconnect proof rejected")
+                sendNotification(BleConstants.CHAR_AUTH_RESULT, byteArrayOf(BleConstants.AUTH_FAILED))
             }
         }
     }

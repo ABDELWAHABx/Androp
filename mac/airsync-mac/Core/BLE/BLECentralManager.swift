@@ -24,6 +24,9 @@ class BLECentralManager: NSObject, ObservableObject {
     private var discoveredServices: Set<CBUUID> = []
     private var requestedServices: Set<CBUUID> = []
     private var hasAttemptedAuth = false
+    /// Reconnect handshake state: the Mac's nonce, and whether the phone proved itself.
+    private var reconnectNonce: String?
+    private var reconnectPhoneVerified = false
     private let expectedServiceCount = 4
     
     @Published var connectionStatus: BLEConnectionStatus = .disconnected
@@ -374,6 +377,8 @@ class BLECentralManager: NSObject, ObservableObject {
         pendingWriteBytes = 0
         responseWriteInFlight = false
         hasAttemptedAuth = false
+        reconnectNonce = nil
+        reconnectPhoneVerified = false
         authenticationTokenFingerprint = nil
         qrPairingNonce = nil
         qrPairingResponse = nil
@@ -670,15 +675,17 @@ extension BLECentralManager: CBPeripheralDelegate {
             return
         }
         let token = UserDefaults.standard.string(forKey: "bleAuthToken") ?? ""
-        if !token.isEmpty, let data = token.data(using: .utf8) {
+        if !token.isEmpty {
+            // Ask the phone to prove it holds the pairing token first; the token
+            // itself is never written to the peripheral.
             print("[BLE] Attempting authentication...")
             authenticationTokenFingerprint = tokenFingerprint()
-            if let peripheral = discoveredPeripheral,
-               data.count > min(peripheral.maximumWriteValueLength(for: .withResponse), peripheral.maximumWriteValueLength(for: .withoutResponse)) {
-                if !sendFramedAuthentication(token) { retryAfterTransportFailure() }
-            } else {
-                write(characteristicUUID: BLEConstants.charAuthToken, data: data)
-            }
+            let nonce = BLEPairingProtocol.newReconnectNonce()
+            reconnectNonce = nonce
+            reconnectPhoneVerified = false
+            qrPairingChunks.clear()
+            guard let hello = BLEPairingProtocol.reconnectHello(nonce: nonce),
+                  sendFramedAuthentication(hello) else { retryAfterTransportFailure(); return }
         } else {
             print("[BLE] Auth token is empty, skipping auth and disconnecting because they have never paired")
             tearDownConnection(cancelPeripheral: true)
@@ -730,6 +737,21 @@ extension BLECentralManager: CBPeripheralDelegate {
                 if !sendQRPairingProof(confirmation, key: session.key) { retryAfterTransportFailure() }
                 return
             }
+            if activeQRPairingSession == nil, qrPairingResponse == nil, let macNonce = reconnectNonce, data.count != 1 {
+                guard connectionStatus == .connected, hasAttemptedAuth else { return }
+                guard let text = qrPairingChunks.add(data) else { return }
+                let token = UserDefaults.standard.string(forKey: "bleAuthToken") ?? ""
+                guard let phoneNonce = BLEPairingProtocol.verifiedPhoneNonce(challenge: text, token: token, macNonce: macNonce),
+                      let auth = BLEPairingProtocol.reconnectAuth(token: token, macNonce: macNonce, phoneNonce: phoneNonce) else {
+                    // Not our phone (or a replayed advertisement): nothing secret was sent.
+                    rejectAuthentication(peerUUID: peripheral.identifier.uuidString)
+                    return
+                }
+                reconnectNonce = nil
+                reconnectPhoneVerified = true
+                if !sendFramedAuthentication(auth) { retryAfterTransportFailure() }
+                return
+            }
             if let response = qrPairingResponse {
                 guard activeQRPairingSession != nil, connectionStatus == .connected, hasAttemptedAuth,
                       data.count == 1, data.first == BLEConstants.authSuccess,
@@ -745,7 +767,10 @@ extension BLECentralManager: CBPeripheralDelegate {
             guard connectionStatus == .connected, hasAttemptedAuth,
                   let authenticatedToken = authenticationTokenFingerprint,
                   authenticatedToken == tokenFingerprint() else { return }
-            if data.count == 1 && data.first == BLEConstants.authSuccess {
+            // Success counts only after the phone proved itself (reconnect) or the
+            // encrypted QR exchange completed (first pairing).
+            if data.count == 1 && data.first == BLEConstants.authSuccess &&
+                (reconnectPhoneVerified || qrPairingResponse != nil) {
                 print("[BLE] Auth Success!")
                 connectionTimer?.invalidate()
                 connectionTimer = nil

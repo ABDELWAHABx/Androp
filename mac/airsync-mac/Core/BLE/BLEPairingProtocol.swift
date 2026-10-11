@@ -76,4 +76,52 @@ nonisolated enum BLEPairingProtocol {
         }.joined(separator: "&")
         return components.string
     }
+
+    // MARK: Reconnect after QR pairing
+    // Mutual proof over fresh nonces; the token never crosses the air, so a device
+    // replaying the phone's advertisement cannot learn anything. Must match
+    // BlePairingProtocol.kt.
+
+    static func newReconnectNonce() -> String {
+        // UInt8.random draws from the system CSPRNG.
+        Data((0..<16).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
+    }
+
+    private static func validNonce(_ value: String?) -> Bool {
+        guard let value, value.count <= 32, let data = Data(base64Encoded: value) else { return false }
+        return data.count == 16
+    }
+
+    static func reconnectProof(token: String, role: String, first: String, second: String) -> String {
+        let key = SymmetricKey(data: Data(token.utf8))
+        let mac = HMAC<SHA256>.authenticationCode(for: Data("androp-ble-auth|\(role)|\(first)|\(second)".utf8), using: key)
+        return Data(mac).base64EncodedString()
+    }
+
+    private static func json(_ object: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func reconnectHello(nonce: String) -> String? {
+        json(["v": 2, "action": "hello", "nonce": nonce])
+    }
+
+    /// The phone's nonce when [text] is a challenge that proves the phone holds [token].
+    static func verifiedPhoneNonce(challenge text: String, token: String, macNonce: String) -> String? {
+        guard !token.isEmpty, text.utf8.count <= maximumPlaintextBytes,
+              let object = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any],
+              object["v"] as? Int == 2, object["action"] as? String == "challenge",
+              let phoneNonce = object["nonce"] as? String, validNonce(phoneNonce),
+              let proof = object["proof"] as? String else { return nil }
+        let expected = reconnectProof(token: token, role: "phone", first: macNonce, second: phoneNonce)
+        // Constant-time comparison of equal-length ASCII strings.
+        let a = Array(proof.utf8), b = Array(expected.utf8)
+        guard a.count == b.count else { return nil }
+        return zip(a, b).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0 ? phoneNonce : nil
+    }
+
+    static func reconnectAuth(token: String, macNonce: String, phoneNonce: String) -> String? {
+        json(["v": 2, "action": "auth", "proof": reconnectProof(token: token, role: "mac", first: phoneNonce, second: macNonce)])
+    }
 }

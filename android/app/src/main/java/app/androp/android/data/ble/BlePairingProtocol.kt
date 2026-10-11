@@ -4,6 +4,8 @@ import app.androp.android.utils.CryptoUtil
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.util.UUID
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /** The QR secret proves possession on both sides before legacy BLE authentication is enabled. */
 object BlePairingProtocol {
@@ -67,4 +69,47 @@ object BlePairingProtocol {
         JsonObject().apply { addProperty("type", "blePairing"); addProperty("encrypted", encrypted) }.toString()
             .takeIf { it.toByteArray().size <= MAX_ENVELOPE_BYTES }
     }.getOrNull()
+
+    // ---- Reconnect after QR pairing: mutual proof, the token never crosses the air. ----
+    // Mac -> phone: {"v":2,"action":"hello","nonce":Nm}
+    // phone -> Mac: {"v":2,"action":"challenge","nonce":Np,"proof":HMAC(token,"…|phone|Nm|Np")}
+    // Mac -> phone: {"v":2,"action":"auth","proof":HMAC(token,"…|mac|Np|Nm")}
+    // phone -> Mac: AUTH_SUCCESS. A device replaying the phone's advertisement learns nothing:
+    // it cannot answer the Mac's fresh nonce, and the Mac never sends a reusable secret.
+    // Must match BLEPairingProtocol.swift.
+
+    private val random = java.security.SecureRandom()
+
+    fun newNonce(): String = java.util.Base64.getEncoder().encodeToString(ByteArray(16).also(random::nextBytes))
+
+    private fun validNonce(value: String?): Boolean = value != null && value.length <= 32 &&
+        runCatching { java.util.Base64.getDecoder().decode(value).size == 16 }.getOrDefault(false)
+
+    fun reconnectProof(token: String, role: String, first: String, second: String): String {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(token.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        return java.util.Base64.getEncoder().encodeToString(
+            mac.doFinal("androp-ble-auth|$role|$first|$second".toByteArray(Charsets.UTF_8)))
+    }
+
+    private fun body(text: String, action: String): JsonObject? = runCatching {
+        if (text.toByteArray().size > MAX_PLAIN_BYTES) return null
+        val body = JsonParser.parseString(text).asJsonObject
+        body.takeIf { it.get("v")?.asInt == 2 && it.get("action")?.asString == action }
+    }.getOrNull()
+
+    /** The Mac's nonce from a reconnect hello, or null if [text] is not one. */
+    fun helloNonce(text: String): String? = body(text, "hello")?.get("nonce")?.asString?.takeIf(::validNonce)
+
+    fun challenge(token: String, macNonce: String, phoneNonce: String): String = JsonObject().apply {
+        addProperty("v", 2); addProperty("action", "challenge"); addProperty("nonce", phoneNonce)
+        addProperty("proof", reconnectProof(token, "phone", macNonce, phoneNonce))
+    }.toString()
+
+    /** True when [text] proves the Mac holds [token] for this exchange's nonces. */
+    fun verifiesMacAuth(text: String, token: String, macNonce: String, phoneNonce: String): Boolean {
+        val proof = body(text, "auth")?.get("proof")?.asString ?: return false
+        return java.security.MessageDigest.isEqual(proof.toByteArray(),
+            reconnectProof(token, "mac", phoneNonce, macNonce).toByteArray())
+    }
 }
