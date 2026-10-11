@@ -97,6 +97,12 @@ object WebSocketFileTransfer {
             val size = data.getLong("size")
             val chunkSize = data.getInt("chunkSize")
             require(size >= 0 && chunkSize in FileTransferValidation.MIN_CHUNK_SIZE..MAX_CHUNK_SIZE) { "Invalid transfer size" }
+            // Fast path: a direct encrypted stream straight into Downloads.
+            if (BulkFileTransfer.receiveIfOffered(context, data, name, size,
+                    data.optString("mime", "application/octet-stream"), data.optBoolean("isClipboard", false),
+                    onUnreachable = {
+                        handle(context, "fileTransferInit", JSONObject(data.toString()).apply { remove("bulkPort"); remove("bulkKey") })
+                    }) { ok, error -> verified(id, ok, error) }) return
             val temporary = File(context.cacheDir, "incoming_${UUID.randomUUID()}")
             require(size <= context.cacheDir.usableSpace / 2) { "Not enough space on your phone" }
             val file = Incoming(id, name, size, data.optString("mime", "application/octet-stream"),
@@ -205,6 +211,7 @@ object WebSocketFileTransfer {
         }
 
         fun discard(context: Context, id: String) {
+            BulkFileTransfer.cancel(id)
             files.remove(id)?.let { file ->
                 cleanup(file, context)
                 NotificationUtil.showFileComplete(context, id.hashCode(), file.name, false)
@@ -252,6 +259,11 @@ object WebSocketFileTransfer {
     }
 
     fun cancelTransfer(id: String) {
+        if (BulkFileTransfer.isActive(id)) {
+            BulkFileTransfer.cancel(id)
+            WebSocketUtil.sendMessage(JSONObject().put("type", "fileTransferCancel").put("data", JSONObject().put("id", id)).toString())
+            return
+        }
         val worker = receiver ?: return
         if (!worker.markCancelled(id)) { cancelAll(); return }
         val data = JSONObject().put("id", id)

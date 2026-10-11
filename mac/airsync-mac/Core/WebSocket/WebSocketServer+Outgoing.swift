@@ -465,8 +465,43 @@ extension WebSocketServer {
                 var hasher = SHA256()
                 let checksum: String? = nil
                 let mime = self.mimeType(for: url) ?? "application/octet-stream"
+                let bulk = BulkTransferSocket()
+                defer { bulk?.close() }
                 guard send(FileTransferProtocol.buildInit(id: transferID, name: url.lastPathComponent,
-                    size: Int64(size), mime: mime, chunkSize: chunkSize, checksum: checksum, isClipboard: isClipboard)) else { return }
+                    size: Int64(size), mime: mime, chunkSize: chunkSize, checksum: checksum, isClipboard: isClipboard,
+                    bulkPort: bulk?.port, bulkKey: bulk?.keyBase64)) else { return }
+                var streamed = false
+                if let bulk, bulk.acceptPeer(transferID: transferID, timeout: 6, isActive: isActive) {
+                    // Fast path: one encrypted TCP stream, 1 MB records, no per-chunk acks.
+                    let sealer = BulkTransferProtocol.Sealer(key: bulk.key, direction: BulkTransferProtocol.macToPhone)
+                    try handle.seek(toOffset: 0)
+                    var offset = 0
+                    var lastProgress = ProcessInfo.processInfo.systemUptime - 1
+                    while offset < size {
+                        guard isActive() else { return }
+                        let data = try handle.read(upToCount: BulkTransferProtocol.maxPayload) ?? Data()
+                        guard !data.isEmpty, data.count <= size - offset else {
+                            failure = "The file changed while sending. Try again."; return
+                        }
+                        hasher.update(data: data)
+                        do { try bulk.writeRecord(sealer, type: BulkTransferProtocol.typeData, payload: data) }
+                        catch { failure = "The connection to your phone dropped. Try again."; return }
+                        offset += data.count
+                        noteFileIO()
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if now - lastProgress >= 0.2 {
+                            lastProgress = now
+                            let fraction = size == 0 ? 0.99 : min(0.99, Double(offset) / Double(size))
+                            DispatchQueue.main.async { progress?(fraction) }
+                        }
+                    }
+                    let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+                    let end = (try? JSONSerialization.data(withJSONObject: ["sha256": digest, "size": size])) ?? Data()
+                    do { try bulk.writeRecord(sealer, type: BulkTransferProtocol.typeEnd, payload: end) }
+                    catch { failure = "The connection to your phone dropped. Try again."; return }
+                    streamed = true
+                }
+                if !streamed {
                 let totalChunks = max(1, (size + chunkSize - 1) / chunkSize)
                 var pending: [Int: (payload: String, attempts: Int, sent: Date)] = [:]
                 var next = 0
@@ -525,6 +560,7 @@ extension WebSocketServer {
                 }
                 let finalChecksum = hasher.finalize().map { String(format: "%02x", $0) }.joined()
                 guard send(FileTransferProtocol.buildComplete(id: transferID, name: url.lastPathComponent, size: Int64(size), checksum: finalChecksum)) else { return }
+                }
                 // Final verification streams the temporary file and publishes a
                 // second copy to Downloads. Give large files a bounded storage
                 // budget without polling or keeping cancelled transfers alive.

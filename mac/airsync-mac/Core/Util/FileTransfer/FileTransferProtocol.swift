@@ -8,8 +8,11 @@ enum FileTransferProtocol {
         return result
     }
 
-    static func buildInit(id: String, name: String, size: Int64, mime: String, chunkSize: Int, checksum: String?, isClipboard: Bool = false) -> String {
+    static func buildInit(id: String, name: String, size: Int64, mime: String, chunkSize: Int, checksum: String?, isClipboard: Bool = false,
+                          bulkPort: UInt16? = nil, bulkKey: String? = nil) -> String {
         var data: [String: Any] = ["id": id, "name": name, "size": size, "mime": mime, "chunkSize": chunkSize, "isClipboard": isClipboard]
+        // Offer the direct encrypted stream; phones without it ignore these fields.
+        if let bulkPort, let bulkKey { data["bulkPort"] = Int(bulkPort); data["bulkKey"] = bulkKey }
         if let checksum, !checksum.isEmpty { data["checksum"] = checksum }
         return message("fileTransferInit", data)
     }
