@@ -443,6 +443,41 @@ struct ADBConnector {
         }
     }
 
+    /// Runs one `adb shell` command on the paired phone: the USB device mapped to it,
+    /// otherwise its wireless-debugging connection. Completion gets nil without a target.
+    static func shell(_ command: String, completion: @escaping (String?) -> Void) {
+        DispatchQueue.main.async {
+            let wireless = AppState.shared.adbConnected && !AppState.shared.adbConnectedIP.isEmpty
+                ? "\(AppState.shared.adbConnectedIP):\(AppState.shared.adbPort)" : nil
+            let mapped = AppState.shared.selectedWiredSerial
+                ?? (AppState.shared.device?.deviceId).flatMap { AppState.shared.deviceAdbSerials[$0] }
+            getWiredDevices { devices in
+                let wired = devices.first(where: { $0.serial == mapped })?.serial ?? devices.first?.serial
+                guard let target = wired ?? wireless,
+                      let adbPath = findExecutable(named: "adb", fallbackPaths: possibleADBPaths) else {
+                    DispatchQueue.main.async { completion(nil) }
+                    return
+                }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let task = Process()
+                    task.executableURL = URL(fileURLWithPath: adbPath)
+                    task.arguments = ["-s", target, "shell", command]
+                    let pipe = Pipe()
+                    task.standardOutput = pipe
+                    task.standardError = pipe
+                    do { try task.run() } catch {
+                        DispatchQueue.main.async { completion(nil) }
+                        return
+                    }
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    task.waitUntilExit()
+                    let output = String(data: data, encoding: .utf8) ?? ""
+                    DispatchQueue.main.async { completion(task.terminationStatus == 0 ? output : nil) }
+                }
+            }
+        }
+    }
+
     static func stopMirroringProcesses() {
         mirrorLock.lock()
         mirrorGeneration &+= 1

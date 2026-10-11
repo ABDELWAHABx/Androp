@@ -10,6 +10,8 @@ struct SettingsView: View {
                 MyMacSettingsView()
             case .sync:
                 SyncSettingsView()
+            case .phonePermissions:
+                PhonePermissionsSettingsView()
             case .notifications:
                 NotificationsSettingsView()
             case .mirroring:

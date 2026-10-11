@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only click events and toasts, no window content: androp learns that something was
+     copied, never what is on screen. The clipboard itself is read by a brief focused window. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeNotificationStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="false"
+    android:notificationTimeout="200"
+    android:description="@string/clipboard_accessibility_description"
+    android:settingsActivity="app.androp.android.MainActivity" />

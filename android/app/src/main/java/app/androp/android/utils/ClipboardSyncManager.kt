@@ -95,6 +95,9 @@ object ClipboardSyncManager {
         clipboardListener = null
         listenerContext = null
     }
+    /** A copy made in another app, read by the clipboard reader while it briefly had focus. */
+    fun offerCopiedText(text: String) = automaticSend(text)
+
     private fun automaticSend(text: String) {
         if (!isEnabled || BackgroundWorkController.isPaused || !WebSocketUtil.isConnected()) return
         if (text == lastReceivedText) return

@@ -248,7 +248,8 @@ extension WebSocketServer {
                 }
             }
 
-            if (!AppState.shared.adbConnected && (AppState.shared.adbEnabled || AppState.shared.manualAdbConnectionPending || AppState.shared.wiredAdbEnabled) && AppState.shared.isPlus) {
+            if (!AppState.shared.adbConnected && (AppState.shared.adbEnabled || AppState.shared.manualAdbConnectionPending || AppState.shared.wiredAdbEnabled) &&
+                (AppState.shared.isPlus || AppState.shared.manualAdbConnectionPending)) {
                 let killServer = AppState.shared.userInitiatedAdbConnect || AppState.shared.alwaysKillAdbBeforeConnect
                 
                 if AppState.shared.wiredAdbEnabled {

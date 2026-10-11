@@ -112,6 +112,19 @@
         </activity>
 
 
+        <service
+            android:name=".service.ClipboardAccessibilityService"
+            android:exported="false"
+            android:label="@string/clipboard_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/clipboard_accessibility_service" />
+        </service>
+
         <activity
             android:name=".presentation.ui.activities.ClipboardActionActivity"
             android:excludeFromRecents="true"

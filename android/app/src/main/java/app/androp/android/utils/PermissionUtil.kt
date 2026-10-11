@@ -423,10 +423,28 @@ object PermissionUtil {
             add(SetupStep("Show phone notifications on your Mac") { openNotificationListenerSettings(it) })
         if (isBatteryOptimizationPermissionRequired() && !isBatteryOptimizationDisabled(context))
             add(SetupStep("Stay connected in the background") { openBatteryOptimizationSettings(it) })
+        if (!isClipboardAccessibilityEnabled(context))
+            add(SetupStep("Send copies from any app to your Mac") { openClipboardAccessibilitySettings(it) })
         if (Build.VERSION.SDK_INT >= 36 && !runCatching { Settings.System.canWrite(context) }.getOrDefault(false))
             add(SetupStep("Let your Mac turn on Hotspot") {
                 it.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, "package:${it.packageName}".toUri())
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             })
+    }
+
+    fun isClipboardAccessibilityEnabled(context: Context): Boolean {
+        val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+        val component = ComponentName(context, app.androp.android.service.ClipboardAccessibilityService::class.java)
+        return enabled.split(':').any { ComponentName.unflattenFromString(it) == component }
+    }
+
+    fun openClipboardAccessibilitySettings(context: Context) {
+        val component = ComponentName(context, app.androp.android.service.ClipboardAccessibilityService::class.java)
+        val detail = Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS")
+            .putExtra(Intent.EXTRA_COMPONENT_NAME, component.flattenToString())
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { context.startActivity(detail) }.onFailure {
+            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
     }
 }

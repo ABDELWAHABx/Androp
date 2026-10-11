@@ -143,4 +143,6 @@
     <string name="action_configure">Configure</string>
     <string name="label_device_discovery">Device discovery</string>
     <string name="label_ripple_animation">Ripple animation</string>
+    <string name="clipboard_accessibility_label">androp clipboard</string>
+    <string name="clipboard_accessibility_description">Sends what you copy in any app to your Mac. androp only notices Copy taps; it does not read your screen.</string>
 </resources>

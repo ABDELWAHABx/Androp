@@ -59,11 +59,23 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
 class ClipboardActionActivity : ComponentActivity() {
+    companion object {
+        /** Silent read started by [app.androp.android.service.ClipboardAccessibilityService]. */
+        const val ACTION_AUTO = "app.androp.android.CLIPBOARD_AUTO"
+    }
 
     private val _windowFocus = mutableStateOf(false)
+    private val autoRead get() = intent?.action == ACTION_AUTO
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (autoRead) {
+            // No UI: Android only lets the focused app read the clipboard, so this invisible
+            // window takes focus for a moment, forwards the copy and closes.
+            window.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            window.decorView.postDelayed({ if (!isFinishing) finishSilently() }, 1_500)
+            return
+        }
 
         // Standard Edge-to-Edge with explicit transparent bars
         enableEdgeToEdge(
@@ -100,6 +112,18 @@ class ClipboardActionActivity : ComponentActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         _windowFocus.value = hasFocus
+        if (hasFocus && autoRead && !isFinishing) {
+            ClipboardUtil.getClipboardText(this, automatic = true)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { ClipboardSyncManager.offerCopiedText(it) }
+            finishSilently()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun finishSilently() {
+        finish()
+        overridePendingTransition(0, 0)
     }
 }
 
