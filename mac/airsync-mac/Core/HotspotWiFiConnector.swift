@@ -9,6 +9,9 @@ import Darwin
 /// is persisted by androp, logged, passed to a subprocess, or sent to the phone.
 nonisolated enum HotspotWiFiWorker {
     static let queue = DispatchQueue(label: "app.androp.hotspot-wifi", qos: .userInitiated)
+    /// Joining the phone's hotspot can wait a minute for the user to turn it on;
+    /// it must not hold up transfer Wi-Fi setup or saved-network loads on [queue].
+    static let hotspotQueue = DispatchQueue(label: "app.androp.hotspot-join", qos: .userInitiated)
     // All reads/writes are asserted onto this serial worker queue.
     nonisolated(unsafe) private static var temporaryOwnership = TemporaryWiFiOwnership()
 
@@ -273,6 +276,9 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         // Ask for a fresh observation even if an older status said it was on.
         PhoneHotspotManager.shared.send(.status) { [weak self] enabled in
             guard let self, self.attempt === token, !token.isCancelled else { return }
+            guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else {
+                self.finish(token, "Phone changed. Try again."); return
+            }
             if enabled == true { self.join(token); return }
             guard enabled != nil, PhoneHotspotManager.shared.state?.canAttemptControl == true else {
                 // No answer, or the phone can't switch it itself: never dead-end.
@@ -281,7 +287,12 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
             }
             PhoneHotspotManager.shared.send(.enable) { [weak self] enabled in
                 guard let self, self.attempt === token, !token.isCancelled else { return }
-                if enabled == true { self.join(token); return }
+                if enabled == true {
+                    guard PhoneHotspotTransport.matches(deviceID: self.phoneID ?? "", bluetoothPeer: self.bluetoothPeer) else {
+                        self.finish(token, "Phone changed. Try again."); return
+                    }
+                    self.join(token); return
+                }
                 // Some phones drop their old Wi-Fi before they can send the
                 // final state; scanning for the real network confirms instead.
                 if enabled == nil && HotspotWiFiPolicy.mayRecoverHandoff(
@@ -314,7 +325,7 @@ final class HotspotWiFiConnector: NSObject, ObservableObject, CLLocationManagerD
         joining = true
         if !patient { message = "Joining your phone's hotspot…" }
         let name = requestedSSID
-        HotspotWiFiWorker.queue.async {
+        HotspotWiFiWorker.hotspotQueue.async {
             let result = HotspotWiFiWorker.join(ssid: name, attempt: token, patient: patient)
             let address = HotspotWiFiWorker.joinedIPv4(ssid: name, attempt: token)
             DispatchQueue.main.async { [weak self] in

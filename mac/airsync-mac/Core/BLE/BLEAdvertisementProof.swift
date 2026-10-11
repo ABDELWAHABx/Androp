@@ -5,7 +5,7 @@ import CryptoKit
 /// Bluetooth address, so the CoreBluetooth identifier of an already paired phone
 /// changes over time. A valid proof shows the advertiser holds the pairing token
 /// without the Mac revealing it first. Must match BleAdvertisementProof.kt.
-enum BLEAdvertisementProof {
+nonisolated enum BLEAdvertisementProof {
     static let manufacturerID: UInt16 = 0xFFFF
     static let proofBytes = 5
     static let windowSeconds: TimeInterval = 600

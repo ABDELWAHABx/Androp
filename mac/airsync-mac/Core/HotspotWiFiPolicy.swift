@@ -32,7 +32,7 @@ nonisolated enum HotspotWiFiPolicy {
             if let exact = savedNetworks.first(where: { $0.lowercased() == phone }) { return exact }
             if let partial = savedNetworks.first(where: {
                 let name = $0.lowercased()
-                return name.count >= 4 && (name.contains(phone) || phone.contains(name))
+                return name.contains(phone)
             }) { return partial }
         }
         let defaults = ["androidap", "galaxy", "pixel", "oneplus", "xiaomi", "redmi", "moto", "nothing"]

@@ -120,6 +120,16 @@ class MacRemoteManager: ObservableObject {
     }
 
     private var heldButton: CGMouseButton?
+    private var lastPointerInput: TimeInterval = 0
+
+    /// A lost button-up (disconnect mid-drag) must not leave the Mac dragging forever.
+    private func releaseStaleButton(now: TimeInterval) {
+        guard let button = heldButton, now - lastPointerInput > 3 else { return }
+        heldButton = nil
+        let type: CGEventType = button == .left ? .leftMouseUp : button == .right ? .rightMouseUp : .otherMouseUp
+        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: currentPointer(), mouseButton: button)?
+            .post(tap: .cghidEventTap)
+    }
 
     func lockScreen() {
         let libPath = "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
@@ -144,6 +154,9 @@ class MacRemoteManager: ObservableObject {
     
     func simulateMouseRelativeMove(dx: CGFloat, dy: CGFloat) {
         guard dx.isFinite, dy.isFinite, abs(dx) <= 1_000_000, abs(dy) <= 1_000_000 else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        releaseStaleButton(now: now)
+        lastPointerInput = now
         let current = currentPointer()
         let newPos = clampToDisplays(CGPoint(x: current.x + dx, y: current.y + dy))
         // While a button is held the move is a drag, so windows and selections follow.
@@ -173,6 +186,7 @@ class MacRemoteManager: ObservableObject {
         }
         // Report double-clicks so Finder opens files and text selects words.
         let now = ProcessInfo.processInfo.systemUptime
+        lastPointerInput = now
         var clickCount: Int64 = 1
         if isDown {
             if let last = lastClick, last.button == button, now - last.time < NSEvent.doubleClickInterval {
